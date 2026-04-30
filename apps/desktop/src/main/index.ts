@@ -7,10 +7,10 @@ import {
   importProfile,
 } from "@multizen/profile-manager";
 import {
-  ActivityLog,
   HttpTransport,
   createMultizenMcpServer,
   type ActivityEvent,
+  type ActivityLog,
 } from "@multizen/mcp-server";
 import { AnthropicResolver, type NaturalLanguageResolver } from "@multizen/cdp-driver";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";

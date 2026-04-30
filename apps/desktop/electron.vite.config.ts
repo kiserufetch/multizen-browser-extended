@@ -1,21 +1,38 @@
-import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import { defineConfig } from "electron-vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "node:path";
 
+/**
+ * Native modules and Electron itself cannot be bundled — they must be
+ * marked external. Pure-JS workspace deps (@multizen/*) get bundled so
+ * we can ship .ts source files without a separate build step in dev.
+ */
+const NATIVE_EXTERNALS = [
+  "electron",
+  /^node:/,
+  "better-sqlite3",
+  "keytar",
+  "chrome-remote-interface",
+  "ws",
+  "@modelcontextprotocol/sdk",
+  "uuid",
+  "zod",
+];
+
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
+        external: NATIVE_EXTERNALS,
         input: { index: resolve(__dirname, "src/main/index.ts") },
       },
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
+        external: ["electron"],
         input: { index: resolve(__dirname, "src/preload/index.ts") },
       },
     },
