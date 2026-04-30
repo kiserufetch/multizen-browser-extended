@@ -1,0 +1,35 @@
+{
+  "name": "@multizen/desktop",
+  "productName": "MultiZen",
+  "version": "0.2.0-pre",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev --watch",
+    "build": "electron-vite build && electron-builder --dir",
+    "build:mac": "electron-vite build && electron-builder --mac",
+    "build:win": "electron-vite build && electron-builder --win",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "preview": "electron-vite preview"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@multizen/mcp-server": "workspace:*",
+    "@multizen/profile-manager": "workspace:*",
+    "@multizen/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.0",
+    "@tailwindcss/vite": "^4.0.0",
+    "vite": "^6.0.3"
+  }
+}

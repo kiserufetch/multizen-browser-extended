@@ -1,0 +1,41 @@
+appId: com.multizen.desktop
+productName: MultiZen
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - "out/**/*"
+  - "package.json"
+  - "!**/*.map"
+
+extraResources:
+  - from: ../../resources/icons
+    to: icons
+
+mac:
+  category: public.app-category.developer-tools
+  icon: ../../resources/icons/icon.png
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  notarize: false
+  identity: null
+
+win:
+  target:
+    - nsis
+  icon: ../../resources/icons/icon.png
+  signAndEditExecutable: false
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+publish:
+  provider: github
+  owner: multizenteam
+  repo: multizen-browser

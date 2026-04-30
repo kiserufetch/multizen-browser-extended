@@ -1,10 +1,46 @@
-.DS_Store
-!build/icons
+# dependencies
 node_modules/
-npm-debug.log
-npm-debug.log.*
-thumbs.db
-!.gitkeep
-.idea/
-out
+.yarn/cache
+.yarn/install-state.gz
+.pnp.*
+
+# build outputs
+dist/
+out/
+build/
+*.tsbuildinfo
+!build/icons
+
+# logs
+*.log
 *.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# environment
+.env
+.env.local
+.env.*.local
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+thumbs.db
+*.swp
+
+# electron-builder artifacts
+release/
+release-builds/
+
+# local SQLite databases (dev only)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# private repo dependency (loaded as binary at build time)
+vendor/multizen-private/
+
+!.gitkeep

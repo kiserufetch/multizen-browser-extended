@@ -1,68 +1,34 @@
 {
-    "name": "multizen-browser",
-    "productName": "MultiZen Browser",
-    "version": "0.1.1",
-    "homepage": "https://GetMultizen.com",
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/multizenteam/multizen-browser.git"
-    },
-    "bugs": {
-        "url": "https://github.com/multizenteam/multizen-browser/issues"
-    },
-    "author": "MultiZen Team <oboshto@gmail.com>",
-    "description": "MultiZen Browser: The New Dimension of Web Browsing. Experience simultaneous, seamless multi-session browsing that puts you in control. Navigate the web in tranquility with the privacy and anonymity you desire. Welcome to MultiZen - Your personal space for calm, clutter-free web exploration.",
-    "private": true,
-    "main": "./out/main/index.js",
-    "scripts": {
-        "format": "prettier --write .",
-        "lint": "eslint . --ext .js,.cjs,.mjs,.ts,.cts,.mts,.vue --fix",
-        "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
-        "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
-        "typecheck": "yarn typecheck:node && yarn typecheck:web",
-        "start": "electron-vite preview",
-        "dev": "electron-vite dev --watch",
-        "build": "yarn typecheck && electron-vite build",
-        "postinstall": "electron-builder install-app-deps",
-        "package": "yarn build && node pack.js"
-    },
-    "dependencies": {
-        "@electron-toolkit/preload": "3.0.0",
-        "@electron-toolkit/utils": "3.0.0",
-        "electron-log": "5.1.1",
-        "font-awesome": "4.7.0",
-        "lodash": "4.17.21",
-        "urijs": "1.19.11",
-        "uuid": "^9.0.1",
-        "vuex": "4.1.0",
-        "vuex-persistedstate": "4.1.0"
-    },
-    "devDependencies": {
-        "@electron-toolkit/eslint-config": "1.0.2",
-        "@electron-toolkit/eslint-config-ts": "1.0.1",
-        "@electron-toolkit/tsconfig": "1.0.1",
-        "@rushstack/eslint-patch": "1.7.1",
-        "@types/electron": "^1.6.10",
-        "@types/node": "20.11.17",
-        "@types/uuid": "^9.0.8",
-        "@vitejs/plugin-vue": "5.0.4",
-        "@vue/eslint-config-prettier": "9.0.0",
-        "@vue/eslint-config-typescript": "12.0.0",
-        "electron": "28.2.0",
-        "electron-builder": "24.9.1",
-        "electron-vite": "2.0.0",
-        "eslint": "8.56.0",
-        "eslint-plugin-vue": "9.20.1",
-        "mitt": "3.0.1",
-        "prettier": "3.2.4",
-        "sass": "^1.71.0",
-        "typescript": "5.3.3",
-        "vite": "5.0.12",
-        "vue": "3.4.15",
-        "vue-tsc": "1.8.27"
-    },
-    "engines" : {
-        "yarn" : ">=1.22.10",
-        "node" : ">=21.6.1"
-      }
+  "name": "multizen",
+  "version": "0.2.0-pre",
+  "private": true,
+  "description": "AI-native browser for agents and operators — desktop app + MCP server with anti-detect Chromium",
+  "homepage": "https://getmultizen.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/multizenteam/multizen-browser.git"
+  },
+  "license": "MIT",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "yarn workspace @multizen/desktop dev",
+    "build": "yarn workspaces foreach -A run build",
+    "typecheck": "yarn workspaces foreach -A run typecheck",
+    "lint": "yarn workspaces foreach -A run lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md,astro}\"",
+    "mcp:dev": "yarn workspace @multizen/mcp-server dev",
+    "clean": "rm -rf apps/*/dist apps/*/out packages/*/dist node_modules/.cache"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "prettier": "^3.4.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "yarn@4.5.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
 }
