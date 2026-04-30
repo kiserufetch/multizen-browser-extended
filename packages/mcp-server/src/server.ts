@@ -6,6 +6,7 @@ import {
 import { z } from "zod";
 import type { ProfileManager } from "@multizen/profile-manager";
 import type { LaunchedProfile, ProfileId } from "@multizen/types";
+import { ActivityLog } from "./ActivityLog.js";
 
 /**
  * BrowserDriver is the surface that the MCP server delegates real
@@ -27,6 +28,13 @@ export interface BrowserDriver {
 export interface MultizenMcpServerOptions {
   profileManager: ProfileManager;
   browserDriver: BrowserDriver;
+  /** Optional activity log; if not provided, a fresh one is created */
+  activityLog?: ActivityLog;
+}
+
+export interface MultizenMcpServer {
+  server: Server;
+  activityLog: ActivityLog;
 }
 
 const ProfileIdSchema = z.object({ profile_id: z.string().min(1) });
@@ -43,8 +51,9 @@ const CreateProfileSchema = z.object({
   tags: z.array(z.string()).optional(),
 });
 
-export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Server {
+export function createMultizenMcpServer(opts: MultizenMcpServerOptions): MultizenMcpServer {
   const { profileManager, browserDriver } = opts;
+  const activityLog = opts.activityLog ?? new ActivityLog();
 
   const server = new Server(
     { name: "multizen", version: "0.2.0-pre" },
@@ -56,181 +65,204 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Server 
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
-      {
-        name: "list_profiles",
-        description:
-          "List all browser profiles available on this machine. Returns id, name, tags, last opened, and running state.",
-        inputSchema: { type: "object", properties: {} },
-      },
-      {
-        name: "create_profile",
-        description: "Create a new browser profile with sensible default fingerprint.",
-        inputSchema: {
-          type: "object",
-          required: ["name"],
-          properties: {
-            name: { type: "string", description: "Human-readable name" },
-            notes: { type: "string" },
-            tags: { type: "array", items: { type: "string" } },
-          },
-        },
-      },
-      {
-        name: "launch_profile",
-        description:
-          "Launch a profile in patched Chromium. Returns CDP endpoint for further automation. Idempotent: if already running, returns existing endpoint.",
-        inputSchema: {
-          type: "object",
-          required: ["profile_id"],
-          properties: { profile_id: { type: "string" } },
-        },
-      },
-      {
-        name: "close_profile",
-        description: "Close a running profile. Cookies and state remain on disk.",
-        inputSchema: {
-          type: "object",
-          required: ["profile_id"],
-          properties: { profile_id: { type: "string" } },
-        },
-      },
-      {
-        name: "navigate",
-        description: "Navigate the profile's browser to a URL. Waits for page load.",
-        inputSchema: {
-          type: "object",
-          required: ["profile_id", "url"],
-          properties: {
-            profile_id: { type: "string" },
-            url: { type: "string", format: "uri" },
-          },
-        },
-      },
-      {
-        name: "click",
-        description:
-          "Click an element. 'target' can be a CSS selector or a natural-language description ('the Sign In button').",
-        inputSchema: {
-          type: "object",
-          required: ["profile_id", "target"],
-          properties: {
-            profile_id: { type: "string" },
-            target: { type: "string" },
-          },
-        },
-      },
-      {
-        name: "type",
-        description: "Type text into an element selected by CSS selector or natural language.",
-        inputSchema: {
-          type: "object",
-          required: ["profile_id", "target", "text"],
-          properties: {
-            profile_id: { type: "string" },
-            target: { type: "string" },
-            text: { type: "string" },
-          },
-        },
-      },
-      {
-        name: "extract",
-        description:
-          "Extract structured data from the current page. 'query' is a natural-language description of what to extract.",
-        inputSchema: {
-          type: "object",
-          required: ["profile_id", "query"],
-          properties: {
-            profile_id: { type: "string" },
-            query: { type: "string" },
-          },
-        },
-      },
-      {
-        name: "screenshot",
-        description: "Capture a PNG screenshot of the current viewport. Returns base64.",
-        inputSchema: {
-          type: "object",
-          required: ["profile_id"],
-          properties: { profile_id: { type: "string" } },
-        },
-      },
-    ],
+    tools: TOOL_DEFINITIONS,
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const name = req.params.name;
     const args = req.params.arguments ?? {};
+    const event = activityLog.startCall(name, args);
+    const startedAt = Date.now();
 
     try {
-      switch (name) {
-        case "list_profiles": {
-          const profiles = profileManager.list().map((p) => ({
-            ...p,
-            isRunning: browserDriver.isRunning(p.id),
-          }));
-          return ok({ profiles });
-        }
-        case "create_profile": {
-          const input = CreateProfileSchema.parse(args);
-          const created = profileManager.create(input);
-          return ok({ id: created.id, name: created.name });
-        }
-        case "launch_profile": {
-          const { profile_id } = ProfileIdSchema.parse(args);
-          assertProfileExists(profileManager, profile_id);
-          const launched = await browserDriver.launch(profile_id);
-          profileManager.markOpened(profile_id);
-          return ok(launched);
-        }
-        case "close_profile": {
-          const { profile_id } = ProfileIdSchema.parse(args);
-          await browserDriver.close(profile_id);
-          return ok({ closed: profile_id });
-        }
-        case "navigate": {
-          const { profile_id, url } = NavigateSchema.parse(args);
-          assertProfileRunning(browserDriver, profile_id);
-          const r = await browserDriver.navigate(profile_id, url);
-          return ok(r);
-        }
-        case "click": {
-          const { profile_id, target } = ClickSchema.parse(args);
-          assertProfileRunning(browserDriver, profile_id);
-          const r = await browserDriver.click(profile_id, target);
-          return ok(r);
-        }
-        case "type": {
-          const { profile_id, target, text } = TypeSchema.parse(args);
-          assertProfileRunning(browserDriver, profile_id);
-          const r = await browserDriver.type(profile_id, target, text);
-          return ok(r);
-        }
-        case "extract": {
-          const { profile_id, query } = ExtractSchema.parse(args);
-          assertProfileRunning(browserDriver, profile_id);
-          const r = await browserDriver.extract(profile_id, query);
-          return ok(r);
-        }
-        case "screenshot": {
-          const { profile_id } = ProfileIdSchema.parse(args);
-          assertProfileRunning(browserDriver, profile_id);
-          const r = await browserDriver.screenshot(profile_id);
-          return ok(r);
-        }
-        default:
-          return err("INTERNAL_ERROR", `Unknown tool: ${name}`);
-      }
+      const result = await dispatch(name, args, { profileManager, browserDriver });
+      activityLog.finish(event, "ok", summarize(result), startedAt);
+      return ok(result);
     } catch (e) {
-      if (e instanceof z.ZodError) {
-        return err("INVALID_INPUT", e.message);
-      }
-      const message = e instanceof Error ? e.message : String(e);
-      return err("INTERNAL_ERROR", message);
+      const message = e instanceof z.ZodError ? e.message : e instanceof Error ? e.message : String(e);
+      const code = e instanceof z.ZodError ? "INVALID_INPUT" : "INTERNAL_ERROR";
+      activityLog.finish(event, "error", message, startedAt);
+      return err(code, message);
     }
   });
 
-  return server;
+  return { server, activityLog };
+}
+
+interface DispatchDeps {
+  profileManager: ProfileManager;
+  browserDriver: BrowserDriver;
+}
+
+async function dispatch(
+  name: string,
+  args: Record<string, unknown>,
+  deps: DispatchDeps,
+): Promise<unknown> {
+  const { profileManager, browserDriver } = deps;
+  switch (name) {
+    case "list_profiles": {
+      const profiles = profileManager.list().map((p) => ({
+        ...p,
+        isRunning: browserDriver.isRunning(p.id),
+      }));
+      return { profiles };
+    }
+    case "create_profile": {
+      const input = CreateProfileSchema.parse(args);
+      const created = profileManager.create(input);
+      return { id: created.id, name: created.name };
+    }
+    case "launch_profile": {
+      const { profile_id } = ProfileIdSchema.parse(args);
+      assertProfileExists(profileManager, profile_id);
+      const launched = await browserDriver.launch(profile_id);
+      profileManager.markOpened(profile_id);
+      return launched;
+    }
+    case "close_profile": {
+      const { profile_id } = ProfileIdSchema.parse(args);
+      await browserDriver.close(profile_id);
+      return { closed: profile_id };
+    }
+    case "navigate": {
+      const { profile_id, url } = NavigateSchema.parse(args);
+      assertProfileRunning(browserDriver, profile_id);
+      return await browserDriver.navigate(profile_id, url);
+    }
+    case "click": {
+      const { profile_id, target } = ClickSchema.parse(args);
+      assertProfileRunning(browserDriver, profile_id);
+      return await browserDriver.click(profile_id, target);
+    }
+    case "type": {
+      const { profile_id, target, text } = TypeSchema.parse(args);
+      assertProfileRunning(browserDriver, profile_id);
+      return await browserDriver.type(profile_id, target, text);
+    }
+    case "extract": {
+      const { profile_id, query } = ExtractSchema.parse(args);
+      assertProfileRunning(browserDriver, profile_id);
+      return await browserDriver.extract(profile_id, query);
+    }
+    case "screenshot": {
+      const { profile_id } = ProfileIdSchema.parse(args);
+      assertProfileRunning(browserDriver, profile_id);
+      return await browserDriver.screenshot(profile_id);
+    }
+    default:
+      throw new Error(`Unknown tool: ${name}`);
+  }
+}
+
+const TOOL_DEFINITIONS = [
+  {
+    name: "list_profiles",
+    description:
+      "List all browser profiles available on this machine. Returns id, name, tags, last opened, and running state.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "create_profile",
+    description: "Create a new browser profile with sensible default fingerprint.",
+    inputSchema: {
+      type: "object",
+      required: ["name"],
+      properties: {
+        name: { type: "string", description: "Human-readable name" },
+        notes: { type: "string" },
+        tags: { type: "array", items: { type: "string" } },
+      },
+    },
+  },
+  {
+    name: "launch_profile",
+    description:
+      "Launch a profile in patched Chromium. Returns CDP endpoint. Idempotent: returns existing endpoint if already running.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id"],
+      properties: { profile_id: { type: "string" } },
+    },
+  },
+  {
+    name: "close_profile",
+    description: "Close a running profile. Cookies and state remain on disk.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id"],
+      properties: { profile_id: { type: "string" } },
+    },
+  },
+  {
+    name: "navigate",
+    description: "Navigate the profile's browser to a URL. Waits for page load.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id", "url"],
+      properties: {
+        profile_id: { type: "string" },
+        url: { type: "string", format: "uri" },
+      },
+    },
+  },
+  {
+    name: "click",
+    description:
+      "Click an element. 'target' can be a CSS selector or a natural-language description ('the Sign In button').",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id", "target"],
+      properties: {
+        profile_id: { type: "string" },
+        target: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "type",
+    description: "Type text into an element selected by CSS selector or natural language.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id", "target", "text"],
+      properties: {
+        profile_id: { type: "string" },
+        target: { type: "string" },
+        text: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "extract",
+    description:
+      "Extract structured data from the current page. 'query' is a natural-language description of what to extract.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id", "query"],
+      properties: {
+        profile_id: { type: "string" },
+        query: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "screenshot",
+    description: "Capture a PNG screenshot of the current viewport. Returns base64.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id"],
+      properties: { profile_id: { type: "string" } },
+    },
+  },
+];
+
+function summarize(result: unknown): string {
+  if (typeof result === "string") return result.slice(0, 200);
+  if (result && typeof result === "object") {
+    const keys = Object.keys(result).slice(0, 5).join(", ");
+    return `keys: ${keys}`;
+  }
+  return String(result);
 }
 
 function ok(data: unknown) {

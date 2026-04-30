@@ -15,11 +15,14 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
+    "@multizen/cdp-driver": "workspace:*",
     "@multizen/mcp-server": "workspace:*",
     "@multizen/profile-manager": "workspace:*",
+    "@multizen/settings-store": "workspace:*",
     "@multizen/types": "workspace:*"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
@@ -29,7 +32,6 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.0.0",
-    "@tailwindcss/vite": "^4.0.0",
     "vite": "^6.0.3"
   }
 }

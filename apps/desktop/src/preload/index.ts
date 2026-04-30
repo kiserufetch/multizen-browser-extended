@@ -7,6 +7,14 @@ import type {
   UpdateProfileInput,
   LaunchedProfile,
 } from "@multizen/types";
+import type { ActivityEvent } from "@multizen/mcp-server";
+import type { AppSettings } from "@multizen/settings-store";
+
+interface SystemInfo {
+  mcpHttpUrl: string | null;
+  appVersion: string;
+  platform: NodeJS.Platform;
+}
 
 const api = {
   profiles: {
@@ -20,6 +28,31 @@ const api = {
     launch: (id: ProfileId): Promise<LaunchedProfile> =>
       ipcRenderer.invoke("profiles:launch", id),
     close: (id: ProfileId): Promise<void> => ipcRenderer.invoke("profiles:close", id),
+    exportArchive: (
+      id: ProfileId,
+      passphrase: string,
+    ): Promise<{ ok: true; path: string } | { ok: false; reason: string }> =>
+      ipcRenderer.invoke("profiles:export", id, passphrase),
+    importArchive: (
+      passphrase: string,
+    ): Promise<{ ok: true; id: ProfileId } | { ok: false; reason: string }> =>
+      ipcRenderer.invoke("profiles:import", passphrase),
+  },
+  settings: {
+    get: (): Promise<AppSettings> => ipcRenderer.invoke("settings:get"),
+    update: (patch: Partial<AppSettings>): Promise<AppSettings> =>
+      ipcRenderer.invoke("settings:update", patch),
+  },
+  activity: {
+    recent: (): Promise<ActivityEvent[]> => ipcRenderer.invoke("activity:recent"),
+    onEvent: (cb: (e: ActivityEvent) => void): (() => void) => {
+      const listener = (_: unknown, e: ActivityEvent): void => cb(e);
+      ipcRenderer.on("activity:event", listener);
+      return () => ipcRenderer.off("activity:event", listener);
+    },
+  },
+  system: {
+    info: (): Promise<SystemInfo> => ipcRenderer.invoke("system:info"),
   },
 };
 

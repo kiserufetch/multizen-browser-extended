@@ -2,27 +2,34 @@
 
 This document tracks what's done and what's coming. Last updated: 2026-04-30.
 
-## Done — repo scaffolding
+## Done — repo scaffolding + working core
 
-- [x] Monorepo split: `apps/desktop`, `packages/mcp-server`, `packages/profile-manager`, `packages/types`
-- [x] Yarn 4 workspaces, TypeScript strict, prettier, .gitignore
-- [x] Profile manager with SQLite storage, fingerprint pool, CRUD API
+- [x] Monorepo split: `apps/desktop`, `packages/{mcp-server,profile-manager,cdp-driver,settings-store,types}`
+- [x] Yarn 4 workspaces (node-modules linker for native module compat)
+- [x] TypeScript strict across every package — clean typecheck
+- [x] Profile manager with SQLite storage, fingerprint pool, full CRUD
+- [x] **Encrypted profile archive (export/import)** — AES-256-GCM with scrypt KDF
 - [x] MCP server with full tool surface (list/create/launch/close/navigate/click/type/extract/screenshot)
 - [x] Mock browser driver for protocol testing without Chromium
-- [x] Standalone MCP server runner (stdio for spawned MCP clients)
-- [x] Electron skeleton: main process, preload bridge, React renderer, basic GUI
-- [x] ChromiumBrowserDriver scaffold (process spawn, profile data dirs)
+- [x] **Standalone stdio MCP runner** — spawn from Cursor / Claude Desktop without GUI
+- [x] **HTTP+SSE MCP transport** — external clients connect to running desktop app
+- [x] **Real CDP integration** in `ChromiumBrowserDriver` via chrome-remote-interface:
+      navigate / click (CSS or natural language) / type / extract / screenshot
+- [x] **BYOK Anthropic resolver** for natural-language click target resolution and
+      structured extraction — keys stored in OS keychain, never proxied
+- [x] **Settings store** with keychain-backed Anthropic key
+- [x] **Activity log** — real-time stream of MCP tool calls forwarded to renderer
+- [x] Electron 33 + React 19 + Tailwind v4 GUI:
+      ProfileList, ProfileDetail (edit name/tags/proxy/fingerprint),
+      ActivityPanel (real-time tool calls), SettingsModal (BYOK + MCP HTTP toggle)
 
 ## Next — milestone v0.2 alpha
 
-- [ ] Wire MCP server into desktop main process via HTTP+SSE on localhost:7777
-- [ ] Real CDP integration in `ChromiumBrowserDriver`: navigate, click, extract, screenshot
-- [ ] Bundle a Chromium binary for dev (system Chrome fallback for now)
-- [ ] Profile detail page in GUI: edit name, tags, proxy, fingerprint
-- [ ] Activity log panel (what AI agents are doing in real-time)
-- [ ] Profile import/export as encrypted archive
+- [ ] Wire export/import IPC handler to use restored profile data dir (currently
+      dataDir is regenerated; should preserve archive's path layout)
 - [ ] License gate (free 3 profiles, Pro unlimited)
-- [ ] Crypto-only checkout integration (NOWPayments hosted page)
+- [ ] Crypto-only checkout integration (NOWPayments hosted page) — needs API key
+- [ ] Bundle Electron icon assets, write minimal `build/icons` set
 - [ ] First closed alpha for 5–10 testers
 
 ## v0.2 beta

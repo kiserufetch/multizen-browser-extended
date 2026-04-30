@@ -28,12 +28,20 @@ async function main(): Promise<void> {
   });
 
   const browserDriver = new MockBrowserDriver();
-  const server = createMultizenMcpServer({ profileManager, browserDriver });
+  const { server, activityLog } = createMultizenMcpServer({ profileManager, browserDriver });
+
+  // Pipe activity events to stderr in standalone mode (stdout is reserved for MCP transport)
+  activityLog.on("event", (e) => {
+    if (e.status !== "pending") {
+      process.stderr.write(
+        `[mcp] ${e.tool} (${e.status}, ${e.durationMs ?? 0}ms) ${e.summary ?? ""}\n`,
+      );
+    }
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Keep process alive until stdio closes
   process.on("SIGINT", () => {
     profileManager.close();
     process.exit(0);
