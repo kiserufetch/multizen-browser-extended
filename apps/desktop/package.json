@@ -19,7 +19,9 @@
     "@multizen/mcp-server": "workspace:*",
     "@multizen/profile-manager": "workspace:*",
     "@multizen/settings-store": "workspace:*",
-    "@multizen/types": "workspace:*"
+    "@multizen/types": "workspace:*",
+    "framer-motion": "^12.0.0",
+    "lucide-react": "^0.469.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",

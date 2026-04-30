@@ -43,7 +43,7 @@ function createWindow(): void {
     titleBarStyle: "hiddenInset",
     backgroundColor: "#0a0a0f",
     webPreferences: {
-      preload: join(__dirname, "../preload/index.js"),
+      preload: join(__dirname, "../preload/index.mjs"),
       sandbox: false,
       contextIsolation: true,
     },
@@ -51,9 +51,17 @@ function createWindow(): void {
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+    mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
     void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
   }
+
+  mainWindow.webContents.on("did-fail-load", (_e, code, description, url) => {
+    process.stderr.write(`Renderer failed to load (${code} ${description}): ${url}\n`);
+  });
+  mainWindow.webContents.on("render-process-gone", (_e, details) => {
+    process.stderr.write(`Renderer process gone: ${JSON.stringify(details)}\n`);
+  });
 }
 
 app.whenReady().then(async () => {
