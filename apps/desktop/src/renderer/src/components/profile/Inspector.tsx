@@ -1,5 +1,5 @@
 import { useEffect, useState, type JSX, type ReactNode } from "react";
-import { Globe, Plus, Square, X } from "lucide-react";
+import { Plus, Square, X } from "lucide-react";
 import type { Profile, ProfileSummary } from "../../types";
 import { Avatar, Flag, Pill, ccFromTimezone, profileInitials } from "../atoms";
 import { relativeTime } from "../../lib/relativeTime";
@@ -113,15 +113,6 @@ export function Inspector(props: Props): JSX.Element {
               Launch
             </button>
           )}
-          <button
-            type="button"
-            className="btn-secondary px-0 rounded-[9px]"
-            style={{ width: 32, height: 28 }}
-            title="Open Chromium"
-            onClick={props.onLaunch}
-          >
-            <Globe size={13} strokeWidth={1.5} />
-          </button>
         </div>
       </div>
 

@@ -16,6 +16,10 @@ interface SystemInfo {
   platform: NodeJS.Platform;
 }
 
+export type RunningStateChange =
+  | { kind: "launched"; profileId: ProfileId }
+  | { kind: "closed"; profileId: ProfileId; reason: "user-close" | "external-exit" };
+
 const api = {
   profiles: {
     list: (): Promise<ProfileSummary[]> => ipcRenderer.invoke("profiles:list"),
@@ -37,6 +41,11 @@ const api = {
       passphrase: string,
     ): Promise<{ ok: true; id: ProfileId } | { ok: false; reason: string }> =>
       ipcRenderer.invoke("profiles:import", passphrase),
+    onRunningChanged: (cb: (change: RunningStateChange) => void): (() => void) => {
+      const listener = (_: unknown, change: RunningStateChange): void => cb(change);
+      ipcRenderer.on("profiles:running-changed", listener);
+      return () => ipcRenderer.off("profiles:running-changed", listener);
+    },
   },
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke("settings:get"),

@@ -2,20 +2,16 @@ appId: com.multizen.desktop
 productName: MultiZen
 directories:
   output: release
-  buildResources: build
+  buildResources: ../../build
 
 files:
   - "out/**/*"
   - "package.json"
   - "!**/*.map"
 
-extraResources:
-  - from: ../../resources/icons
-    to: icons
-
 mac:
   category: public.app-category.developer-tools
-  icon: ../../resources/icons/icon.png
+  icon: ../../build/icon.icns
   target:
     - dmg
     - zip
@@ -27,8 +23,13 @@ mac:
 win:
   target:
     - nsis
-  icon: ../../resources/icons/icon.png
+  icon: ../../build/icon.png
   signAndEditExecutable: false
+
+linux:
+  target:
+    - AppImage
+  icon: ../../build/icons
 
 nsis:
   oneClick: false

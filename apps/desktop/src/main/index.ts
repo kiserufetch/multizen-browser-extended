@@ -1,6 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage } from "electron";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import {
   ProfileManager,
   exportProfile,
@@ -17,6 +18,29 @@ import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
+/**
+ * Resolve the master 1024×1024 brand icon. In packaged builds Electron picks
+ * the bundled icon based on platform (.icns on Mac, the .ico/.png on Win/Linux).
+ * In dev we fall back to the source PNG so the dock / taskbar / window icons
+ * are not the default Electron logo.
+ */
+function resolveAppIcon(): string | null {
+  const candidates = app.isPackaged
+    ? [
+        join(process.resourcesPath, "icon.png"),
+        join(process.resourcesPath, "..", "icon.png"),
+      ]
+    : [
+        join(__dirname, "../../../../build/icon.png"),
+        join(__dirname, "../../../build/icon.png"),
+        join(__dirname, "../../build/icon.png"),
+      ];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
 let mainWindow: BrowserWindow | null = null;
 let profileManager: ProfileManager;
 let browserDriver: ChromiumBrowserDriver;
@@ -26,13 +50,15 @@ let httpTransport: HttpTransport | null = null;
 let cachedSettings: AppSettings | null = null;
 
 function createWindow(): void {
+  const iconPath = resolveAppIcon();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 900,
     minHeight: 600,
     titleBarStyle: "hiddenInset",
-    backgroundColor: "#0a0a0f",
+    backgroundColor: "#0a0b0f",
+    icon: iconPath ?? undefined,
     webPreferences: {
       preload: join(__dirname, "../preload/index.mjs"),
       sandbox: false,
@@ -56,6 +82,20 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  // macOS: explicitly set the dock icon. In packaged .app bundles macOS
+  // picks the .icns automatically, but in dev (running ./node_modules/.bin/electron)
+  // the dock shows the generic Electron icon unless we override it here.
+  if (process.platform === "darwin" && !app.isPackaged) {
+    const iconPath = resolveAppIcon();
+    if (iconPath) {
+      const img = nativeImage.createFromPath(iconPath);
+      if (!img.isEmpty()) app.dock?.setIcon(img);
+    }
+  }
+
+  // Set application name (also influences the menu bar on macOS)
+  app.setName("MultiZen");
+
   const userData = app.getPath("userData");
   const dataRoot = join(userData, "data");
 
@@ -75,6 +115,13 @@ app.whenReady().then(async () => {
   // Forward activity events to renderer
   activityLog.on("event", (e: ActivityEvent) => {
     mainWindow?.webContents.send("activity:event", e);
+  });
+
+  // Forward profile running-state changes (manual launch, manual close,
+  // and — most importantly — external Chromium close where the user quits
+  // the browser window directly).
+  browserDriver.on("running-changed", (change) => {
+    mainWindow?.webContents.send("profiles:running-changed", change);
   });
 
   // Optional embedded HTTP+SSE transport so external Cursor/Claude can connect

@@ -54,7 +54,7 @@ export function App(): JSX.Element {
     void window.multizen.system.info().then(setInfo);
     void window.multizen.activity.recent().then(setEvents);
 
-    const off = window.multizen.activity.onEvent((e) => {
+    const offEvents = window.multizen.activity.onEvent((e) => {
       setEvents((prev) => {
         const idx = prev.findIndex((x) => x.id === e.id);
         if (idx >= 0) {
@@ -64,7 +64,8 @@ export function App(): JSX.Element {
         }
         return [...prev, e].slice(-500);
       });
-      // Refetch profiles when launch/close/create — running state changed
+      // Refetch profiles when MCP-driven create/launch/close — covers the
+      // case where an AI agent created a profile we don't know about.
       if (
         e.tool === "launch_profile" ||
         e.tool === "close_profile" ||
@@ -73,7 +74,17 @@ export function App(): JSX.Element {
         void refresh();
       }
     });
-    return off;
+
+    // Refetch on ANY running-state change, including the "user closed
+    // Chromium window directly" case which doesn't go through MCP at all.
+    const offRunning = window.multizen.profiles.onRunningChanged(() => {
+      void refresh();
+    });
+
+    return () => {
+      offEvents();
+      offRunning();
+    };
   }, [refresh]);
 
   // Persist drawer

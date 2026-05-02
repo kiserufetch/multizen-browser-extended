@@ -15,6 +15,10 @@ export interface SystemInfo {
   platform: string;
 }
 
+export type RunningStateChange =
+  | { kind: "launched"; profileId: ProfileId }
+  | { kind: "closed"; profileId: ProfileId; reason: "user-close" | "external-exit" };
+
 export interface MultizenApi {
   profiles: {
     list: () => Promise<ProfileSummary[]>;
@@ -31,6 +35,7 @@ export interface MultizenApi {
     importArchive: (
       passphrase: string,
     ) => Promise<{ ok: true; id: ProfileId } | { ok: false; reason: string }>;
+    onRunningChanged: (cb: (change: RunningStateChange) => void) => () => void;
   };
   settings: {
     get: () => Promise<AppSettings>;

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { app } from "electron";
 import { join } from "node:path";
 import type { BrowserDriver } from "@multizen/mcp-server";
@@ -13,10 +14,20 @@ interface RunningProcess {
   pid: number;
   startedAt: string;
   session: CdpSession;
+  /** Polls /json/list and kills the child when no page targets remain. */
+  windowWatcher: NodeJS.Timeout;
 }
 
 export interface ChromiumBrowserDriverOptions {
   profileManager: ProfileManager;
+}
+
+export type RunningStateChange =
+  | { kind: "launched"; profileId: ProfileId }
+  | { kind: "closed"; profileId: ProfileId; reason: "user-close" | "external-exit" };
+
+interface DriverEvents {
+  "running-changed": (change: RunningStateChange) => void;
 }
 
 /**
@@ -29,13 +40,25 @@ export interface ChromiumBrowserDriverOptions {
  * is responsible for parsing the page snapshot and producing selectors. MultiZen never
  * calls any external API.
  */
-export class ChromiumBrowserDriver implements BrowserDriver {
+export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver {
   private readonly running = new Map<ProfileId, RunningProcess>();
   private nextPort = 9222;
   private readonly profileManager: ProfileManager;
 
   constructor(opts: ChromiumBrowserDriverOptions) {
+    super();
     this.profileManager = opts.profileManager;
+  }
+
+  override on<K extends keyof DriverEvents>(event: K, listener: DriverEvents[K]): this {
+    return super.on(event, listener);
+  }
+
+  override emit<K extends keyof DriverEvents>(
+    event: K,
+    ...args: Parameters<DriverEvents[K]>
+  ): boolean {
+    return super.emit(event, ...args);
   }
 
   async launch(profileId: ProfileId): Promise<LaunchedProfile> {
@@ -87,6 +110,38 @@ export class ChromiumBrowserDriver implements BrowserDriver {
     await waitForCdpReady(port, 10000);
     await session.connect();
 
+    // Watch for "no more page targets" via CDP. On macOS Chrome stays alive
+    // after the last window closes (standard Mac app lifecycle) — the spawned
+    // process keeps running with zero windows. We poll /json/list and force-
+    // kill the child when that happens, which then fires child.on('exit') and
+    // emits the running-changed event.
+    let zeroSinceMs: number | null = null;
+    const windowWatcher = setInterval(async () => {
+      // Don't start counting "zero windows" until Chromium has had a chance
+      // to open its initial window (some 1-2s after spawn).
+      const ageMs = Date.now() - new Date(startedAt).getTime();
+      if (ageMs < 2000) return;
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/json/list`);
+        if (!res.ok) return;
+        const targets = (await res.json()) as Array<{ type?: string }>;
+        const pages = targets.filter((t) => t.type === "page").length;
+        if (pages === 0) {
+          if (zeroSinceMs === null) {
+            zeroSinceMs = Date.now();
+          } else if (Date.now() - zeroSinceMs > 1500) {
+            // Confirmed: zero pages for >1.5s. Treat as user closing the browser.
+            r.child.kill();
+          }
+        } else {
+          zeroSinceMs = null;
+        }
+      } catch {
+        // CDP unreachable — process likely already dying. exit handler will
+        // clean up.
+      }
+    }, 1000);
+
     const record: RunningProcess = {
       child,
       cdpEndpoint,
@@ -94,23 +149,38 @@ export class ChromiumBrowserDriver implements BrowserDriver {
       pid: child.pid,
       startedAt,
       session,
+      windowWatcher,
     };
+    const r = record;
     this.running.set(profileId, record);
 
     child.on("exit", () => {
+      const wasTracked = this.running.has(profileId);
+      clearInterval(record.windowWatcher);
       void session.close().catch(() => {});
       this.running.delete(profileId);
+      if (wasTracked) {
+        // close() removes from the map first so wasTracked is false there;
+        // this path covers (a) user quit Chrome directly with ⌘Q, and (b)
+        // our own kill() from the windowWatcher when the last window closed.
+        this.emit("running-changed", { kind: "closed", profileId, reason: "external-exit" });
+      }
     });
 
+    this.emit("running-changed", { kind: "launched", profileId });
     return { id: profileId, cdpEndpoint, pid: child.pid, startedAt };
   }
 
   async close(profileId: ProfileId): Promise<void> {
     const r = this.running.get(profileId);
     if (!r) return;
+    // Remove from map first so the child.on('exit') handler treats this as
+    // a planned close (no event emitted from there).
+    this.running.delete(profileId);
+    clearInterval(r.windowWatcher);
     await r.session.close().catch(() => {});
     r.child.kill();
-    this.running.delete(profileId);
+    this.emit("running-changed", { kind: "closed", profileId, reason: "user-close" });
   }
 
   isRunning(profileId: ProfileId): boolean {

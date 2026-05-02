@@ -9,7 +9,11 @@ dist/
 out/
 build/
 *.tsbuildinfo
-!build/icons
+# but keep electron-builder icon inputs (master + .icns + PNG set)
+!build/icon.png
+!build/icon.icns
+!build/icons/
+!build/icons/*.png
 
 # logs
 *.log
