@@ -1,50 +1,70 @@
 import { useCallback, useEffect, useState, type JSX } from "react";
-import { Sidebar, type Section } from "./components/Sidebar";
-import { ProfilesSection } from "./sections/ProfilesSection";
-import { ActivitySection } from "./sections/ActivitySection";
-import { SettingsSection } from "./sections/SettingsSection";
-import { ProfileDetail } from "./components/ProfileDetail";
-import { CreateProfileModal } from "./components/CreateProfileModal";
-import { PromptModal } from "./components/PromptModal";
-import { ConfirmModal } from "./components/ConfirmModal";
-import { Onboarding } from "./components/Onboarding";
-import type { ProfileSummary } from "./types";
+import { TopBar } from "./components/screens/TopBar";
+import { LeftRail, type Section } from "./components/screens/LeftRail";
+import { Constellation } from "./components/profile/Constellation";
+import { ProfilesEmptyState } from "./components/profile/EmptyState";
+import { Inspector } from "./components/profile/Inspector";
+import { NewProfileSheet } from "./components/profile/NewProfileSheet";
+import { ActivityDrawer } from "./components/activity/ActivityDrawer";
+import { ActivityPage } from "./components/activity/ActivityPage";
+import { Settings } from "./components/screens/Settings";
+import { Confirm, Prompt } from "./components/screens/Confirm";
+import { CommandPalette, type CommandAction } from "./components/palette/CommandPalette";
+import { FirstRun } from "./components/onboarding/FirstRun";
+import type { ActivityEvent, ProfileSummary, SystemInfo } from "./types";
 
-type Modal =
+const ONBOARDING_KEY = "multizen.onboarded";
+const DRAWER_KEY = "multizen.drawer.open";
+
+type ModalState =
   | { kind: "none" }
-  | { kind: "create" }
-  | { kind: "detail"; profileId: string }
   | { kind: "import-passphrase" }
   | { kind: "export-passphrase"; profileId: string }
   | { kind: "delete-confirm"; profileId: string };
 
-const ONBOARDING_KEY = "multizen.onboarded";
-
 export function App(): JSX.Element {
   const [section, setSection] = useState<Section>("profiles");
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [modal, setModal] = useState<Modal>({ kind: "none" });
-  const [toast, setToast] = useState<string | null>(null);
+  const [events, setEvents] = useState<ActivityEvent[]>([]);
+  const [info, setInfo] = useState<SystemInfo | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(() => {
     if (typeof window === "undefined") return false;
     return !window.localStorage.getItem(ONBOARDING_KEY);
   });
+  const [showSheet, setShowSheet] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return window.localStorage.getItem(DRAWER_KEY) !== "0";
+  });
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [modal, setModal] = useState<ModalState>({ kind: "none" });
+  const [toast, setToast] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    if (!window.multizen) {
-      setLoading(false);
-      return;
-    }
+    if (!window.multizen) return;
     const list = await window.multizen.profiles.list();
     setProfiles(list);
-    setLoading(false);
   }, []);
 
+  // Initial load + activity stream subscription
   useEffect(() => {
-    void refresh();
     if (!window.multizen) return;
+    void refresh();
+    void window.multizen.system.info().then(setInfo);
+    void window.multizen.activity.recent().then(setEvents);
+
     const off = window.multizen.activity.onEvent((e) => {
+      setEvents((prev) => {
+        const idx = prev.findIndex((x) => x.id === e.id);
+        if (idx >= 0) {
+          const copy = prev.slice();
+          copy[idx] = e;
+          return copy;
+        }
+        return [...prev, e].slice(-500);
+      });
+      // Refetch profiles when launch/close/create — running state changed
       if (
         e.tool === "launch_profile" ||
         e.tool === "close_profile" ||
@@ -56,6 +76,61 @@ export function App(): JSX.Element {
     return off;
   }, [refresh]);
 
+  // Persist drawer
+  useEffect(() => {
+    window.localStorage.setItem(DRAWER_KEY, drawerOpen ? "1" : "0");
+  }, [drawerOpen]);
+
+  // Keyboard shortcuts: ⌘K palette, ⌘N new profile, ⌘1/2/, sections,
+  // ⌘⇧A drawer, esc closes overlays.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent): void {
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+      if (meta && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        setShowSheet(true);
+        return;
+      }
+      if (meta && e.shiftKey && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        setDrawerOpen((v) => !v);
+        return;
+      }
+      if (meta && e.key === "1") {
+        e.preventDefault();
+        setSection("profiles");
+        return;
+      }
+      if (meta && e.key === "2") {
+        e.preventDefault();
+        setSection("activity");
+        return;
+      }
+      if (meta && e.key === ",") {
+        e.preventDefault();
+        setSection("settings");
+        return;
+      }
+      if (e.key === "Escape") {
+        if (showSheet) {
+          setShowSheet(false);
+          return;
+        }
+        if (selectedId) {
+          setSelectedId(null);
+          return;
+        }
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showSheet, selectedId]);
+
   function showToast(msg: string): void {
     setToast(msg);
     window.setTimeout(() => setToast((t) => (t === msg ? null : t)), 4000);
@@ -64,7 +139,13 @@ export function App(): JSX.Element {
   function dismissOnboarding(): void {
     window.localStorage.setItem(ONBOARDING_KEY, "1");
     setShowOnboarding(false);
-    setModal({ kind: "create" });
+  }
+
+  async function onboardCreate(name: string, tags: string[]): Promise<void> {
+    const created = await window.multizen.profiles.create({ name, tags });
+    dismissOnboarding();
+    await refresh();
+    setSelectedId(created.id);
   }
 
   async function launchProfile(id: string): Promise<void> {
@@ -85,13 +166,11 @@ export function App(): JSX.Element {
     setModal({ kind: "none" });
     const result = await window.multizen.profiles.importArchive(passphrase);
     if (!result.ok) {
-      if (result.reason !== "cancelled") {
-        showToast(`Import failed: ${result.reason}`);
-      }
+      if (result.reason !== "cancelled") showToast(`Import failed: ${result.reason}`);
       return;
     }
     await refresh();
-    setModal({ kind: "detail", profileId: result.id });
+    setSelectedId(result.id);
   }
 
   async function exportProfile(profileId: string, passphrase: string): Promise<void> {
@@ -102,7 +181,8 @@ export function App(): JSX.Element {
     }
     const result = await window.multizen.profiles.exportArchive(profileId, passphrase);
     if (result.ok) {
-      showToast(`Exported to ${result.path.split("/").slice(-1)[0]}`);
+      const file = result.path.split("/").slice(-1)[0];
+      showToast(`Exported to ${file}`);
     } else if (result.reason !== "cancelled") {
       showToast(`Export failed: ${result.reason}`);
     }
@@ -112,67 +192,152 @@ export function App(): JSX.Element {
     setModal({ kind: "none" });
     await window.multizen.profiles.close(id).catch(() => {});
     await window.multizen.profiles.delete(id);
+    if (selectedId === id) setSelectedId(null);
     await refresh();
   }
 
+  function handleCommand(a: CommandAction): void {
+    switch (a.kind) {
+      case "launch":
+        void launchProfile(a.profileId);
+        break;
+      case "open":
+        setSelectedId(a.profileId);
+        break;
+      case "create":
+        setShowSheet(true);
+        break;
+      case "import":
+        setModal({ kind: "import-passphrase" });
+        break;
+      case "export":
+        if (selectedId) setModal({ kind: "export-passphrase", profileId: selectedId });
+        break;
+      case "settings":
+        setSection("settings");
+        break;
+      case "section":
+        setSection(a.id);
+        break;
+    }
+  }
+
+  // Compute AI activity for selected profile
+  const aiActivityForSelected = (() => {
+    if (!selectedId) return undefined;
+    const recent = events
+      .slice()
+      .reverse()
+      .find(
+        (e) =>
+          e.profileId === selectedId &&
+          e.tool !== "list_profiles" &&
+          e.tool !== "launch_profile" &&
+          e.tool !== "close_profile",
+      );
+    if (!recent) return undefined;
+    if (Date.now() - new Date(recent.timestamp).getTime() > 30_000) return undefined;
+    return { tool: recent.tool, whenIso: recent.timestamp };
+  })();
+
   const runningCount = profiles.filter((p) => p.isRunning).length;
+  const selected = selectedId ? profiles.find((p) => p.id === selectedId) : undefined;
 
   if (showOnboarding && window.multizen) {
-    return <Onboarding onDone={dismissOnboarding} />;
+    return <FirstRun onCreate={onboardCreate} />;
   }
 
   return (
-    <div className="h-screen flex">
-      <Sidebar current={section} onChange={setSection} runningCount={runningCount} />
-
-      <div className="flex-1 overflow-y-auto">
-        {!window.multizen && (
-          <div className="m-6 px-4 py-3 rounded-md border border-[--color-danger]/30 bg-[--color-danger]/10 text-sm text-[--color-danger]">
-            Preload bridge missing — <code>window.multizen</code> is undefined. Open DevTools
-            (View → Toggle Developer Tools) for details.
-          </div>
-        )}
-
-        <div className="p-8">
-          {section === "profiles" && (
-            <ProfilesSection
-              profiles={profiles}
-              loading={loading}
-              onCreate={() => setModal({ kind: "create" })}
-              onImport={() => setModal({ kind: "import-passphrase" })}
-              onLaunch={launchProfile}
-              onClose={closeProfile}
-              onOpen={(id) => setModal({ kind: "detail", profileId: id })}
-              onExport={(id) => setModal({ kind: "export-passphrase", profileId: id })}
-              onDelete={(id) => setModal({ kind: "delete-confirm", profileId: id })}
-            />
-          )}
-          {section === "activity" && <ActivitySection />}
-          {section === "settings" && <SettingsSection />}
-        </div>
-      </div>
-
-      <CreateProfileModal
-        open={modal.kind === "create"}
-        onClose={() => setModal({ kind: "none" })}
-        onCreated={(id) => setModal({ kind: "detail", profileId: id })}
+    <div className="h-screen flex flex-col">
+      <TopBar
+        totalCount={profiles.length}
+        runningCount={runningCount}
+        mcpUrl={info?.mcpHttpUrl ?? null}
+        onCmdK={() => setPaletteOpen(true)}
+        onSettings={() => setSection("settings")}
       />
 
-      {modal.kind === "detail" && (
-        <ProfileDetail
-          profileId={modal.profileId}
-          onClose={() => setModal({ kind: "none" })}
-          onSaved={refresh}
-          onDeleted={refresh}
-          onExport={(id) => setModal({ kind: "export-passphrase", profileId: id })}
-          onDelete={(id) => setModal({ kind: "delete-confirm", profileId: id })}
+      <div className="flex-1 flex min-h-0">
+        <LeftRail active={section} onChange={setSection} onCmdK={() => setPaletteOpen(true)} />
+
+        <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          {!window.multizen && (
+            <div
+              className="m-6 px-4 py-3 rounded-lg text-sm text-red-300"
+              style={{ background: "rgba(239,68,68,0.06)", boxShadow: "inset 0 0 0 1px rgba(239,68,68,0.25)" }}
+            >
+              Preload bridge missing — <code>window.multizen</code> is undefined. Open DevTools for details.
+            </div>
+          )}
+
+          {section === "profiles" && (
+            <>
+              {showSheet && (
+                <NewProfileSheet
+                  onCancel={() => setShowSheet(false)}
+                  onCreated={async (id, autoLaunch) => {
+                    setShowSheet(false);
+                    await refresh();
+                    if (autoLaunch) {
+                      await launchProfile(id);
+                    }
+                    setSelectedId(id);
+                  }}
+                />
+              )}
+              {profiles.length === 0 && !showSheet ? (
+                <ProfilesEmptyState onCreate={() => setShowSheet(true)} />
+              ) : (
+                <Constellation
+                  profiles={profiles}
+                  recentEvents={events}
+                  onSelect={setSelectedId}
+                  onCreate={() => setShowSheet(true)}
+                />
+              )}
+            </>
+          )}
+
+          {section === "activity" && <ActivityPage events={events} profiles={profiles} />}
+
+          {section === "settings" && <Settings onImport={() => setModal({ kind: "import-passphrase" })} />}
+        </div>
+
+        {selected && (
+          <Inspector
+            profileId={selected.id}
+            isRunning={selected.isRunning}
+            aiActivity={aiActivityForSelected}
+            onClose={() => setSelectedId(null)}
+            onLaunch={() => void launchProfile(selected.id)}
+            onStop={() => void closeProfile(selected.id)}
+            onExport={() => setModal({ kind: "export-passphrase", profileId: selected.id })}
+            onDelete={() => setModal({ kind: "delete-confirm", profileId: selected.id })}
+            onChange={refresh}
+          />
+        )}
+      </div>
+
+      {section !== "activity" && (
+        <ActivityDrawer
+          open={drawerOpen}
+          events={events}
+          profiles={profiles}
+          onToggle={() => setDrawerOpen((v) => !v)}
         />
       )}
 
-      <PromptModal
+      <CommandPalette
+        open={paletteOpen}
+        profiles={profiles}
+        onClose={() => setPaletteOpen(false)}
+        onAction={handleCommand}
+      />
+
+      <Prompt
         open={modal.kind === "import-passphrase"}
         title="Import profile archive"
-        description="Choose a .mzar file. Provide the passphrase used at export."
+        description="Choose a .mzar file. Provide the passphrase used at export time."
         label="Passphrase"
         inputType="password"
         placeholder="Passphrase"
@@ -181,7 +346,7 @@ export function App(): JSX.Element {
         onCancel={() => setModal({ kind: "none" })}
       />
 
-      <PromptModal
+      <Prompt
         open={modal.kind === "export-passphrase"}
         title="Export profile archive"
         description="Choose a passphrase to encrypt the archive. You'll need it to import this profile elsewhere. Minimum 8 characters."
@@ -198,32 +363,32 @@ export function App(): JSX.Element {
         onCancel={() => setModal({ kind: "none" })}
       />
 
-      <ConfirmModal
+      <Confirm
         open={modal.kind === "delete-confirm"}
         title="Delete this profile?"
         description="Cookies, login state, and on-disk data will be erased permanently. This cannot be undone."
         confirmLabel="Yes, delete"
         destructive
         onConfirm={() => {
-          if (modal.kind === "delete-confirm") {
-            void deleteProfile(modal.profileId);
-          }
+          if (modal.kind === "delete-confirm") void deleteProfile(modal.profileId);
         }}
         onCancel={() => setModal({ kind: "none" })}
       />
 
       {toast && (
-        <div className="fixed bottom-6 right-6 px-4 py-3 rounded-md surface-1 shadow-[var(--shadow-modal)] text-sm animate-[slideUp_200ms_ease-out]">
+        <div
+          className="fixed right-6 px-4 py-3 rounded-lg text-sm"
+          style={{
+            bottom: 56,
+            background: "rgba(15,16,22,0.92)",
+            boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08), 0 20px 60px rgba(0,0,0,0.5)",
+            backdropFilter: "blur(20px)",
+            animation: "mz-slide-up 200ms ease-out",
+          }}
+        >
           {toast}
         </div>
       )}
-
-      <style>{`
-        @keyframes slideUp {
-          from { opacity: 0; transform: translateY(10px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
     </div>
   );
 }
