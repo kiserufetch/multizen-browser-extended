@@ -19,9 +19,9 @@ export interface BrowserDriver {
   close(profileId: ProfileId): Promise<void>;
   isRunning(profileId: ProfileId): boolean;
   navigate(profileId: ProfileId, url: string): Promise<{ url: string }>;
-  click(profileId: ProfileId, target: string): Promise<{ ok: true }>;
-  type(profileId: ProfileId, target: string, text: string): Promise<{ ok: true }>;
-  extract(profileId: ProfileId, query: string): Promise<{ result: unknown }>;
+  click(profileId: ProfileId, selector: string): Promise<{ ok: true }>;
+  type(profileId: ProfileId, selector: string, text: string): Promise<{ ok: true }>;
+  extract(profileId: ProfileId): Promise<{ result: unknown }>;
   screenshot(profileId: ProfileId): Promise<{ pngBase64: string }>;
 }
 
@@ -39,12 +39,12 @@ export interface MultizenMcpServer {
 
 const ProfileIdSchema = z.object({ profile_id: z.string().min(1) });
 const NavigateSchema = ProfileIdSchema.extend({ url: z.string().url() });
-const ClickSchema = ProfileIdSchema.extend({ target: z.string().min(1) });
+const ClickSchema = ProfileIdSchema.extend({ selector: z.string().min(1) });
 const TypeSchema = ProfileIdSchema.extend({
-  target: z.string().min(1),
+  selector: z.string().min(1),
   text: z.string(),
 });
-const ExtractSchema = ProfileIdSchema.extend({ query: z.string().min(1) });
+const ExtractSchema = ProfileIdSchema;
 const CreateProfileSchema = z.object({
   name: z.string().min(1),
   notes: z.string().optional(),
@@ -131,19 +131,19 @@ async function dispatch(
       return await browserDriver.navigate(profile_id, url);
     }
     case "click": {
-      const { profile_id, target } = ClickSchema.parse(args);
+      const { profile_id, selector } = ClickSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.click(profile_id, target);
+      return await browserDriver.click(profile_id, selector);
     }
     case "type": {
-      const { profile_id, target, text } = TypeSchema.parse(args);
+      const { profile_id, selector, text } = TypeSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.type(profile_id, target, text);
+      return await browserDriver.type(profile_id, selector, text);
     }
     case "extract": {
-      const { profile_id, query } = ExtractSchema.parse(args);
+      const { profile_id } = ExtractSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.extract(profile_id, query);
+      return await browserDriver.extract(profile_id);
     }
     case "screenshot": {
       const { profile_id } = ProfileIdSchema.parse(args);
@@ -209,25 +209,28 @@ const TOOL_DEFINITIONS = [
   {
     name: "click",
     description:
-      "Click an element. 'target' can be a CSS selector or a natural-language description ('the Sign In button').",
+      "Click an element by CSS selector. The selector must be precise — call extract first to inspect the page accessibility tree, then derive a selector from it.",
     inputSchema: {
       type: "object",
-      required: ["profile_id", "target"],
+      required: ["profile_id", "selector"],
       properties: {
         profile_id: { type: "string" },
-        target: { type: "string" },
+        selector: {
+          type: "string",
+          description: "CSS selector, e.g. 'button[type=submit]' or 'input[name=email]'",
+        },
       },
     },
   },
   {
     name: "type",
-    description: "Type text into an element selected by CSS selector or natural language.",
+    description: "Type text into an input element by CSS selector.",
     inputSchema: {
       type: "object",
-      required: ["profile_id", "target", "text"],
+      required: ["profile_id", "selector", "text"],
       properties: {
         profile_id: { type: "string" },
-        target: { type: "string" },
+        selector: { type: "string", description: "CSS selector for the input element" },
         text: { type: "string" },
       },
     },
@@ -235,13 +238,12 @@ const TOOL_DEFINITIONS = [
   {
     name: "extract",
     description:
-      "Extract structured data from the current page. 'query' is a natural-language description of what to extract.",
+      "Snapshot the current page: returns the URL, title, and a trimmed accessibility tree. The calling LLM is responsible for parsing this into whatever structured data it needs. MultiZen does not call any external API.",
     inputSchema: {
       type: "object",
-      required: ["profile_id", "query"],
+      required: ["profile_id"],
       properties: {
         profile_id: { type: "string" },
-        query: { type: "string" },
       },
     },
   },

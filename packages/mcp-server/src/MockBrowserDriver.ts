@@ -7,24 +7,22 @@ import type { LaunchedProfile, ProfileId } from "@multizen/types";
  * is hooked up.
  */
 export class MockBrowserDriver implements BrowserDriver {
-  private readonly running = new Map<ProfileId, { url: string; pid: number }>();
+  private readonly running = new Map<ProfileId, { url: string; pid: number; port: number }>();
   private port = 9222;
 
   async launch(profileId: ProfileId): Promise<LaunchedProfile> {
-    if (this.running.has(profileId)) {
-      const r = this.running.get(profileId);
-      if (r) {
-        return {
-          id: profileId,
-          cdpEndpoint: `ws://localhost:${this.port}/devtools/browser/mock-${profileId}`,
-          pid: r.pid,
-          startedAt: new Date().toISOString(),
-        };
-      }
+    const existing = this.running.get(profileId);
+    if (existing) {
+      return {
+        id: profileId,
+        cdpEndpoint: `ws://localhost:${existing.port}/devtools/browser/mock-${profileId}`,
+        pid: existing.pid,
+        startedAt: new Date().toISOString(),
+      };
     }
     this.port += 1;
     const pid = Math.floor(Math.random() * 100000) + 1000;
-    this.running.set(profileId, { url: "about:blank", pid });
+    this.running.set(profileId, { url: "about:blank", pid, port: this.port });
     return {
       id: profileId,
       cdpEndpoint: `ws://localhost:${this.port}/devtools/browser/mock-${profileId}`,
@@ -48,26 +46,24 @@ export class MockBrowserDriver implements BrowserDriver {
     return { url };
   }
 
-  async click(_profileId: ProfileId, _target: string): Promise<{ ok: true }> {
+  async click(_profileId: ProfileId, _selector: string): Promise<{ ok: true }> {
     return { ok: true };
   }
 
   async type(
     _profileId: ProfileId,
-    _target: string,
+    _selector: string,
     _text: string,
   ): Promise<{ ok: true }> {
     return { ok: true };
   }
 
-  async extract(
-    _profileId: ProfileId,
-    query: string,
-  ): Promise<{ result: unknown }> {
+  async extract(_profileId: ProfileId): Promise<{ result: unknown }> {
     return {
       result: {
-        note: "mock extraction — real implementation calls into CDP + accessibility tree",
-        query,
+        note: "mock extraction — real implementation returns the page accessibility tree",
+        url: "about:blank",
+        title: "",
       },
     };
   }

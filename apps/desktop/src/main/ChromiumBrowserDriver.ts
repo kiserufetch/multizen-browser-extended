@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { BrowserDriver } from "@multizen/mcp-server";
 import type { ProfileManager } from "@multizen/profile-manager";
 import type { LaunchedProfile, ProfileId } from "@multizen/types";
-import { CdpSession, AnthropicResolver, type NaturalLanguageResolver } from "@multizen/cdp-driver";
+import { CdpSession } from "@multizen/cdp-driver";
 
 interface RunningProcess {
   child: ChildProcess;
@@ -17,8 +17,6 @@ interface RunningProcess {
 
 export interface ChromiumBrowserDriverOptions {
   profileManager: ProfileManager;
-  /** Returns the resolver fresh on each call so settings updates take effect */
-  getResolver: () => NaturalLanguageResolver | undefined;
 }
 
 /**
@@ -26,18 +24,18 @@ export interface ChromiumBrowserDriverOptions {
  * connects to its CDP endpoint, and routes navigate / click / type / extract / screenshot
  * through the CdpSession.
  *
- * In production builds the binary is the patched anti-detect Chromium shipped from
- * the closed fingerprint engine. In dev we fall back to system Chrome.
+ * `click` and `type` accept CSS selectors only. Natural-language target resolution is
+ * intentionally not built in — the MCP client (Claude in Cursor / Claude Desktop / etc.)
+ * is responsible for parsing the page snapshot and producing selectors. MultiZen never
+ * calls any external API.
  */
 export class ChromiumBrowserDriver implements BrowserDriver {
   private readonly running = new Map<ProfileId, RunningProcess>();
   private nextPort = 9222;
   private readonly profileManager: ProfileManager;
-  private readonly getResolver: () => NaturalLanguageResolver | undefined;
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     this.profileManager = opts.profileManager;
-    this.getResolver = opts.getResolver;
   }
 
   async launch(profileId: ProfileId): Promise<LaunchedProfile> {
@@ -85,8 +83,7 @@ export class ChromiumBrowserDriver implements BrowserDriver {
     const startedAt = new Date().toISOString();
     const cdpEndpoint = `http://127.0.0.1:${port}`;
 
-    const session = new CdpSession({ port, resolver: this.getResolver() });
-    // Wait for CDP to come up before declaring success
+    const session = new CdpSession({ port });
     await waitForCdpReady(port, 10000);
     await session.connect();
 
@@ -126,21 +123,21 @@ export class ChromiumBrowserDriver implements BrowserDriver {
     return { url: result.url };
   }
 
-  async click(profileId: ProfileId, target: string): Promise<{ ok: true }> {
+  async click(profileId: ProfileId, selector: string): Promise<{ ok: true }> {
     const session = this.requireSession(profileId);
-    await session.click(target);
+    await session.click(selector);
     return { ok: true };
   }
 
-  async type(profileId: ProfileId, target: string, text: string): Promise<{ ok: true }> {
+  async type(profileId: ProfileId, selector: string, text: string): Promise<{ ok: true }> {
     const session = this.requireSession(profileId);
-    await session.type(target, text);
+    await session.type(selector, text);
     return { ok: true };
   }
 
-  async extract(profileId: ProfileId, query: string): Promise<{ result: unknown }> {
+  async extract(profileId: ProfileId): Promise<{ result: unknown }> {
     const session = this.requireSession(profileId);
-    return session.extract(query);
+    return session.extract();
   }
 
   async screenshot(profileId: ProfileId): Promise<{ pngBase64: string }> {
@@ -165,11 +162,9 @@ export class ChromiumBrowserDriver implements BrowserDriver {
 }
 
 function resolveChromiumPath(): string {
-  // Production: bundled patched Chromium under app resources
   if (app.isPackaged) {
     return join(process.resourcesPath, "chromium", platformBinary());
   }
-  // Dev: prefer system Chrome / Chromium
   if (process.platform === "darwin") {
     return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   }

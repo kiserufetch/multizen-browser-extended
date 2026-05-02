@@ -12,7 +12,6 @@ import {
   type ActivityEvent,
   type ActivityLog,
 } from "@multizen/mcp-server";
-import { AnthropicResolver, type NaturalLanguageResolver } from "@multizen/cdp-driver";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
 import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
 
@@ -25,14 +24,6 @@ let activityLog: ActivityLog;
 let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
 let cachedSettings: AppSettings | null = null;
-
-function buildResolver(): NaturalLanguageResolver | undefined {
-  if (!cachedSettings?.anthropicApiKey) return undefined;
-  return new AnthropicResolver({
-    apiKey: cachedSettings.anthropicApiKey,
-    model: cachedSettings.resolverModel,
-  });
-}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -76,10 +67,7 @@ app.whenReady().then(async () => {
     profilesRoot: join(dataRoot, "profiles"),
   });
 
-  browserDriver = new ChromiumBrowserDriver({
-    profileManager,
-    getResolver: buildResolver,
-  });
+  browserDriver = new ChromiumBrowserDriver({ profileManager });
 
   const mcp = createMultizenMcpServer({ profileManager, browserDriver });
   activityLog = mcp.activityLog;

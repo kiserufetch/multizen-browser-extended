@@ -1,14 +1,7 @@
-import keytar from "keytar";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-const SERVICE = "com.multizen.desktop";
-
 export interface AppSettings {
-  /** Anthropic key only — stored in OS keychain, never in plain JSON */
-  anthropicApiKey?: string;
-  /** Default LLM model for natural-language click/extract */
-  resolverModel: string;
   /** Theme — "dark" only for now, kept for forward compatibility */
   theme: "dark";
   /** Whether to spawn local MCP HTTP server on app start */
@@ -18,7 +11,6 @@ export interface AppSettings {
 }
 
 const DEFAULTS: AppSettings = {
-  resolverModel: "claude-sonnet-4-6",
   theme: "dark",
   mcpHttpEnabled: true,
   mcpHttpPort: 7777,
@@ -47,15 +39,6 @@ export class SettingsStore {
     }
 
     const merged: AppSettings = { ...DEFAULTS, ...raw };
-
-    // Anthropic key lives in keychain, not JSON
-    try {
-      const stored = await keytar.getPassword(SERVICE, "anthropic_api_key");
-      if (stored) merged.anthropicApiKey = stored;
-    } catch {
-      // keychain not available (CI, headless dev) — ignore
-    }
-
     this.cache = merged;
     return merged;
   }
@@ -64,24 +47,7 @@ export class SettingsStore {
     const current = await this.load();
     const next = { ...current, ...patch };
     this.cache = next;
-
-    // Persist key to keychain separately
-    if (patch.anthropicApiKey !== undefined) {
-      try {
-        if (patch.anthropicApiKey === "") {
-          await keytar.deletePassword(SERVICE, "anthropic_api_key");
-        } else {
-          await keytar.setPassword(SERVICE, "anthropic_api_key", patch.anthropicApiKey);
-        }
-      } catch {
-        // keychain not available — fall through to JSON
-      }
-    }
-
-    // JSON gets everything except the secret
-    const { anthropicApiKey: _omit, ...rest } = next;
-    writeFileSync(this.jsonPath, JSON.stringify(rest, null, 2), "utf8");
-
+    writeFileSync(this.jsonPath, JSON.stringify(next, null, 2), "utf8");
     return next;
   }
 }

@@ -12,9 +12,6 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "dependencies": {
-    "keytar": "^7.9.0"
-  },
   "devDependencies": {
     "@types/node": "^22.10.0"
   }

@@ -12,7 +12,6 @@ const NATIVE_EXTERNALS = [
   "electron",
   /^node:/,
   "better-sqlite3",
-  "keytar",
   "chrome-remote-interface",
   "ws",
   "@modelcontextprotocol/sdk",

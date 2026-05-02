@@ -14,14 +14,15 @@ This document tracks what's done and what's coming. Last updated: 2026-04-30.
 - [x] **Standalone stdio MCP runner** — spawn from Cursor / Claude Desktop without GUI
 - [x] **HTTP+SSE MCP transport** — external clients connect to running desktop app
 - [x] **Real CDP integration** in `ChromiumBrowserDriver` via chrome-remote-interface:
-      navigate / click (CSS or natural language) / type / extract / screenshot
-- [x] **BYOK Anthropic resolver** for natural-language click target resolution and
-      structured extraction — keys stored in OS keychain, never proxied
-- [x] **Settings store** with keychain-backed Anthropic key
+      navigate / click (CSS selector) / type / extract (page snapshot) / screenshot
+- [x] **No external API calls.** click and type take CSS selectors only; extract returns
+      the trimmed accessibility tree. The calling MCP client (Claude in Cursor / Claude
+      Desktop / etc.) does any natural-language reasoning on its own side.
+- [x] **Settings store** for app preferences (MCP HTTP toggle)
 - [x] **Activity log** — real-time stream of MCP tool calls forwarded to renderer
 - [x] Electron 33 + React 19 + Tailwind v4 GUI:
       ProfileList, ProfileDetail (edit name/tags/proxy/fingerprint),
-      ActivityPanel (real-time tool calls), SettingsModal (BYOK + MCP HTTP toggle)
+      ActivityPanel (real-time tool calls), SettingsSection (MCP HTTP toggle, About)
 
 ## Next — milestone v0.2 alpha
 

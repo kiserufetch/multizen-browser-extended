@@ -1,14 +1,11 @@
 import CDP from "chrome-remote-interface";
-import type { AccessibilityNode, ExtractContext, NaturalLanguageResolver } from "./types.js";
-import { resolveTarget } from "./targetResolver.js";
+import type { AccessibilityNode, ExtractContext } from "./types.js";
 
 export interface CdpSessionOptions {
   /** Port the Chromium instance is listening on */
   port: number;
   /** Optional host override, defaults to localhost */
   host?: string;
-  /** Optional resolver for natural-language click and extract */
-  resolver?: NaturalLanguageResolver;
 }
 
 /**
@@ -16,6 +13,15 @@ export interface CdpSessionOptions {
  * primitives our MCP tools call: navigate, click, type, extract,
  * screenshot. Stays connected per profile so cookies / DOM state
  * survive across calls.
+ *
+ * `click` and `type` require a CSS selector. We do not embed any LLM
+ * for natural-language target resolution — the calling MCP client
+ * (Claude in Cursor, Claude Desktop, Cline, etc.) does that on its
+ * own side, then sends us a concrete selector.
+ *
+ * `extract` returns the page's URL, title, and trimmed accessibility
+ * tree. The calling LLM is expected to parse it. We intentionally do
+ * not call any external API.
  */
 export class CdpSession {
   private client: CDP.Client | null = null;
@@ -30,7 +36,13 @@ export class CdpSession {
     const host = this.opts.host ?? "localhost";
     this.client = await CDP({ host, port: this.opts.port });
     const { Page, DOM, Runtime, Accessibility, Network } = this.client;
-    await Promise.all([Page.enable(), DOM.enable(), Runtime.enable(), Accessibility.enable(), Network.enable()]);
+    await Promise.all([
+      Page.enable(),
+      DOM.enable(),
+      Runtime.enable(),
+      Accessibility.enable(),
+      Network.enable(),
+    ]);
   }
 
   async close(): Promise<void> {
@@ -61,64 +73,30 @@ export class CdpSession {
     return JSON.parse(value) as { url: string; title: string };
   }
 
-  async click(target: string): Promise<{ ok: true }> {
-    const kind = resolveTarget(target);
-    if (kind === "css") {
-      await this.clickCss(target);
-      return { ok: true };
-    }
-    return this.clickNatural(target);
-  }
-
-  private async clickCss(selector: string): Promise<void> {
+  /**
+   * Click an element by CSS selector.
+   *
+   * The selector must be precise — we do NOT resolve natural-language
+   * descriptions. If you're driving via MCP from Cursor / Claude
+   * Desktop, the LLM should produce a selector from the snapshot
+   * returned by `extract`.
+   */
+  async click(selector: string): Promise<{ ok: true }> {
     const client = this.require();
     const result = await client.Runtime.evaluate({
       expression: `(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) return { ok: false, reason: "not_found" };
+        if (!el) return { ok: false };
         if (el.scrollIntoView) el.scrollIntoView({ block: "center" });
         const rect = el.getBoundingClientRect();
         return { ok: true, x: rect.left + rect.width/2, y: rect.top + rect.height/2 };
       })()`,
       returnByValue: true,
     });
-    const v = result.result.value as { ok: boolean; reason?: string; x?: number; y?: number };
+    const v = result.result.value as { ok: boolean; x?: number; y?: number };
     if (!v.ok) throw new Error(`Element not found for selector: ${selector}`);
     await this.dispatchMouseClick(v.x ?? 0, v.y ?? 0);
-  }
-
-  private async clickNatural(description: string): Promise<{ ok: true }> {
-    const resolver = this.opts.resolver;
-    if (!resolver) {
-      throw new Error(
-        `Natural-language click requires a resolver. Configure your Anthropic API key in MultiZen settings, or pass a CSS selector.`,
-      );
-    }
-    const snapshot = await this.snapshot();
-    const backendNodeId = await resolver.resolveClickTarget(snapshot, description);
-    if (!backendNodeId) {
-      throw new Error(`Could not resolve element for description: ${description}`);
-    }
-    await this.clickByBackendNodeId(backendNodeId);
     return { ok: true };
-  }
-
-  private async clickByBackendNodeId(backendNodeId: number): Promise<void> {
-    const client = this.require();
-    const { DOM } = client;
-    const { model } = await DOM.getBoxModel({ backendNodeId });
-    const content = model.content as number[];
-    if (content.length < 8) {
-      throw new Error("Unexpected box model from CDP");
-    }
-    // CDP returns content as [x1,y1, x2,y2, x3,y3, x4,y4] — top-left to bottom-left
-    const x1 = content[0]!;
-    const y1 = content[1]!;
-    const x3 = content[4]!;
-    const y3 = content[5]!;
-    const x = (x1 + x3) / 2;
-    const y = (y1 + y3) / 2;
-    await this.dispatchMouseClick(x, y);
   }
 
   private async dispatchMouseClick(x: number, y: number): Promise<void> {
@@ -128,36 +106,25 @@ export class CdpSession {
     await client.Input.dispatchMouseEvent({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
   }
 
-  async type(target: string, text: string): Promise<{ ok: true }> {
+  /**
+   * Type text into an element selected by CSS selector.
+   */
+  async type(selector: string, text: string): Promise<{ ok: true }> {
     const client = this.require();
-    const kind = resolveTarget(target);
 
-    if (kind === "css") {
-      // Focus + set value via JS, then dispatch input events for SPA frameworks
-      const focused = await client.Runtime.evaluate({
-        expression: `(() => {
-          const el = document.querySelector(${JSON.stringify(target)});
-          if (!el) return false;
-          el.focus();
-          return true;
-        })()`,
-        returnByValue: true,
-      });
-      if (!focused.result.value) {
-        throw new Error(`Element not found for selector: ${target}`);
-      }
-    } else if (this.opts.resolver) {
-      const snapshot = await this.snapshot();
-      const backendNodeId = await this.opts.resolver.resolveClickTarget(snapshot, target);
-      if (!backendNodeId) throw new Error(`Could not resolve element: ${target}`);
-      await client.DOM.focus({ backendNodeId });
-    } else {
-      throw new Error(
-        `Natural-language type requires a resolver. Configure Anthropic API key in MultiZen settings, or pass a CSS selector.`,
-      );
+    const focused = await client.Runtime.evaluate({
+      expression: `(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return false;
+        el.focus();
+        return true;
+      })()`,
+      returnByValue: true,
+    });
+    if (!focused.result.value) {
+      throw new Error(`Element not found for selector: ${selector}`);
     }
 
-    // Send each character as a key event so input events fire properly
     for (const ch of text) {
       await client.Input.dispatchKeyEvent({ type: "keyDown", text: ch });
       await client.Input.dispatchKeyEvent({ type: "keyUp" });
@@ -165,22 +132,14 @@ export class CdpSession {
     return { ok: true };
   }
 
-  async extract(query: string): Promise<{ result: unknown }> {
+  /**
+   * Snapshot the page: URL, title, accessibility tree, text fallback.
+   * The calling LLM is expected to parse this into whatever structured
+   * shape it needs. MultiZen does not call any external API here.
+   */
+  async extract(): Promise<{ result: ExtractContext }> {
     const snapshot = await this.snapshot();
-    const resolver = this.opts.resolver;
-    if (!resolver) {
-      // Fall back to raw snapshot — the calling LLM can interpret it
-      return {
-        result: {
-          mode: "raw_snapshot",
-          note: "No resolver configured. Returning raw page snapshot for the agent to parse.",
-          query,
-          snapshot,
-        },
-      };
-    }
-    const result = await resolver.extract(snapshot, query);
-    return { result };
+    return { result: snapshot };
   }
 
   async screenshot(): Promise<{ pngBase64: string }> {
@@ -195,11 +154,6 @@ export class CdpSession {
     return result.result.value as T;
   }
 
-  /**
-   * Snapshot the page: URL, title, accessibility tree (trimmed),
-   * and text content fallback. Used for both natural-language click
-   * resolution and structured extraction.
-   */
   async snapshot(): Promise<ExtractContext> {
     const client = this.require();
     const { Accessibility, Runtime } = client;
@@ -241,7 +195,6 @@ function trimAccessibilityTree(rawNodes: RawAxNode[]): AccessibilityNode[] {
   const byId = new Map<string, RawAxNode>();
   for (const node of rawNodes) byId.set(node.nodeId, node);
 
-  // Find roots (nodes that aren't a child of anyone)
   const childIds = new Set<string>();
   for (const node of rawNodes) {
     for (const c of node.childIds ?? []) childIds.add(c);
@@ -257,7 +210,6 @@ function trimAccessibilityTree(rawNodes: RawAxNode[]): AccessibilityNode[] {
     const value = node.value?.value;
     const description = node.description?.value;
 
-    // Skip noise
     const isInteresting =
       role !== "generic" &&
       role !== "presentation" &&
@@ -284,9 +236,7 @@ function trimAccessibilityTree(rawNodes: RawAxNode[]): AccessibilityNode[] {
     };
   }
 
-  return roots
-    .map((r) => walk(r, 0))
-    .filter((n): n is AccessibilityNode => Boolean(n));
+  return roots.map((r) => walk(r, 0)).filter((n): n is AccessibilityNode => Boolean(n));
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
