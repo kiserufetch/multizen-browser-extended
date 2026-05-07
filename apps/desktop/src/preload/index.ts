@@ -6,9 +6,41 @@ import type {
   Profile,
   UpdateProfileInput,
   LaunchedProfile,
+  FingerprintConfig,
 } from "@multizen/types";
 import type { ActivityEvent } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
+import type { ChromiumStatus, DeviceFamily, ProxyConfig } from "@multizen/types";
+
+export interface ProxyGeoResult {
+  country: string;
+  countryName: string;
+  timezone: string;
+  city: string;
+  ip: string;
+}
+
+/** Mirror of the catalog types from @multizen/profile-manager. */
+export interface DeviceCatalogEntry {
+  family: DeviceFamily;
+  label: string;
+  screens: ReadonlyArray<{ width: number; height: number; label: string }>;
+}
+export interface LocaleCatalogEntry {
+  id: string;
+  label: string;
+  locale: string;
+  country: string;
+  timezones: ReadonlyArray<string>;
+}
+export interface FingerprintReconcilePatch {
+  device?: DeviceFamily;
+  localeId?: string;
+  screen?: { width: number; height: number };
+  timezone?: string;
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+}
 
 interface SystemInfo {
   mcpHttpUrl: string | null;
@@ -62,6 +94,34 @@ const api = {
   },
   system: {
     info: (): Promise<SystemInfo> => ipcRenderer.invoke("system:info"),
+  },
+  chromium: {
+    status: (): Promise<ChromiumStatus> => ipcRenderer.invoke("chromium:status"),
+    retry: (): Promise<ChromiumStatus> => ipcRenderer.invoke("chromium:retry"),
+    onStatus: (cb: (status: ChromiumStatus) => void): (() => void) => {
+      const listener = (_: unknown, status: ChromiumStatus): void => cb(status);
+      ipcRenderer.on("chromium:status", listener);
+      return () => ipcRenderer.off("chromium:status", listener);
+    },
+  },
+  fingerprint: {
+    generate: (): Promise<FingerprintConfig> =>
+      ipcRenderer.invoke("fingerprint:generate"),
+    devices: (): Promise<ReadonlyArray<DeviceCatalogEntry>> =>
+      ipcRenderer.invoke("fingerprint:devices"),
+    locales: (): Promise<ReadonlyArray<LocaleCatalogEntry>> =>
+      ipcRenderer.invoke("fingerprint:locales"),
+    reconcile: (
+      current: FingerprintConfig,
+      patch: FingerprintReconcilePatch,
+    ): Promise<FingerprintConfig> =>
+      ipcRenderer.invoke("fingerprint:reconcile", current, patch),
+  },
+  proxy: {
+    detectGeo: (
+      proxy: ProxyConfig,
+    ): Promise<{ ok: true; geo: ProxyGeoResult } | { ok: false; error: string }> =>
+      ipcRenderer.invoke("proxy:detectGeo", proxy),
   },
 };
 

@@ -48,3 +48,4 @@ release-builds/
 vendor/multizen-private/
 
 !.gitkeep
+.claude/

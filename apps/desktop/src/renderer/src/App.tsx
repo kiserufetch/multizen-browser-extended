@@ -11,10 +11,10 @@ import { Settings } from "./components/screens/Settings";
 import { Confirm, Prompt } from "./components/screens/Confirm";
 import { CommandPalette, type CommandAction } from "./components/palette/CommandPalette";
 import { FirstRun } from "./components/onboarding/FirstRun";
+import { ChromiumBootstrapModal } from "./components/onboarding/ChromiumBootstrapModal";
+import { Modal, ConfirmHost, confirm } from "./components/atoms";
+import { readPersisted, usePersistedState, writePersisted } from "./lib/persisted";
 import type { ActivityEvent, ProfileSummary, SystemInfo } from "./types";
-
-const ONBOARDING_KEY = "multizen.onboarded";
-const DRAWER_KEY = "multizen.drawer.open";
 
 type ModalState =
   | { kind: "none" }
@@ -23,20 +23,20 @@ type ModalState =
   | { kind: "delete-confirm"; profileId: string };
 
 export function App(): JSX.Element {
-  const [section, setSection] = useState<Section>("profiles");
+  // Persisted UI state — survives app restarts under localStorage `multizen.ui.*`.
+  const [section, setSection] = usePersistedState<Section>("section", "profiles");
+  const [drawerOpen, setDrawerOpen] = usePersistedState<boolean>("drawerOpen", false);
+
+  // Ephemeral UI state.
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [showOnboarding, setShowOnboarding] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return !window.localStorage.getItem(ONBOARDING_KEY);
-  });
+  const [showOnboarding, setShowOnboarding] = useState(
+    () => !readPersisted<boolean>("onboarded", false),
+  );
   const [showSheet, setShowSheet] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(() => {
-    if (typeof window === "undefined") return true;
-    return window.localStorage.getItem(DRAWER_KEY) !== "0";
-  });
+  const [sheetDirty, setSheetDirty] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [modal, setModal] = useState<ModalState>({ kind: "none" });
   const [toast, setToast] = useState<string | null>(null);
@@ -87,11 +87,6 @@ export function App(): JSX.Element {
     };
   }, [refresh]);
 
-  // Persist drawer
-  useEffect(() => {
-    window.localStorage.setItem(DRAWER_KEY, drawerOpen ? "1" : "0");
-  }, [drawerOpen]);
-
   // Keyboard shortcuts: ⌘K palette, ⌘N new profile, ⌘1/2/, sections,
   // ⌘⇧A drawer, esc closes overlays.
   useEffect(() => {
@@ -128,10 +123,9 @@ export function App(): JSX.Element {
         return;
       }
       if (e.key === "Escape") {
-        if (showSheet) {
-          setShowSheet(false);
-          return;
-        }
+        // Sheet has its own ESC handling via <Modal> (with dirty-form
+        // confirm). Don't intercept here.
+        if (showSheet) return;
         if (selectedId) {
           setSelectedId(null);
           return;
@@ -148,7 +142,7 @@ export function App(): JSX.Element {
   }
 
   function dismissOnboarding(): void {
-    window.localStorage.setItem(ONBOARDING_KEY, "1");
+    writePersisted("onboarded", true);
     setShowOnboarding(false);
   }
 
@@ -283,11 +277,34 @@ export function App(): JSX.Element {
 
           {section === "profiles" && (
             <>
-              {showSheet && (
+              <Modal
+                open={showSheet}
+                title="New profile"
+                subtitle="Cookies, login state, and fingerprint live in this profile only."
+                width={620}
+                onClose={() => {
+                  setShowSheet(false);
+                  setSheetDirty(false);
+                }}
+                confirmClose={async () => {
+                  if (!sheetDirty) return true;
+                  return confirm({
+                    title: "Discard your changes?",
+                    body: "You haven't created the profile yet. Closing will lose what you've entered.",
+                    confirmLabel: "Discard",
+                    destructive: true,
+                  });
+                }}
+              >
                 <NewProfileSheet
-                  onCancel={() => setShowSheet(false)}
+                  onCancel={() => {
+                    setShowSheet(false);
+                    setSheetDirty(false);
+                  }}
+                  onDirtyChange={setSheetDirty}
                   onCreated={async (id, autoLaunch) => {
                     setShowSheet(false);
+                    setSheetDirty(false);
                     await refresh();
                     if (autoLaunch) {
                       await launchProfile(id);
@@ -295,8 +312,8 @@ export function App(): JSX.Element {
                     setSelectedId(id);
                   }}
                 />
-              )}
-              {profiles.length === 0 && !showSheet ? (
+              </Modal>
+              {profiles.length === 0 ? (
                 <ProfilesEmptyState onCreate={() => setShowSheet(true)} />
               ) : (
                 <Constellation
@@ -304,6 +321,10 @@ export function App(): JSX.Element {
                   recentEvents={events}
                   onSelect={setSelectedId}
                   onCreate={() => setShowSheet(true)}
+                  onLaunch={launchProfile}
+                  onStop={closeProfile}
+                  onExport={(id) => setModal({ kind: "export-passphrase", profileId: id })}
+                  onDelete={(id) => setModal({ kind: "delete-confirm", profileId: id })}
                 />
               )}
             </>
@@ -337,6 +358,11 @@ export function App(): JSX.Element {
           onToggle={() => setDrawerOpen((v) => !v)}
         />
       )}
+
+      <ChromiumBootstrapModal />
+
+      {/* Mount once at app root so confirm() works from anywhere. */}
+      <ConfirmHost />
 
       <CommandPalette
         open={paletteOpen}

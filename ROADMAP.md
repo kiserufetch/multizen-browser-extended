@@ -44,6 +44,9 @@ This document tracks what's done and what's coming. Last updated: 2026-04-30.
 - [ ] Public Show HN + Product Hunt launch
 - [ ] Submission to MCP marketplaces (mcpservers.org, glama.ai, smithery.ai)
 
+See [docs/MONETIZATION.md](docs/MONETIZATION.md) for the full free / Pro / Team
+matrix, the open-core repo split, and the auth + E2E cloud-sync architecture.
+
 ## v0.3 — team / cloud
 
 - [ ] License server (closed)

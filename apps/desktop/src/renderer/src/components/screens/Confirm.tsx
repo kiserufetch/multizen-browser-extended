@@ -68,7 +68,7 @@ export function Confirm(props: ConfirmProps): JSX.Element | null {
             onClick={props.onConfirm}
           >
             {props.confirmLabel ?? "Confirm"}
-            <Kbd>⏎</Kbd>
+            <Kbd variant={props.destructive ? "default" : "on-brand"}>⏎</Kbd>
           </button>
         </div>
       </div>

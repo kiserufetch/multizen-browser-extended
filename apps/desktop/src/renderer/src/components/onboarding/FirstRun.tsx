@@ -1,25 +1,32 @@
 import { useState, type JSX } from "react";
-import { Cube, Kbd } from "../atoms";
+import { Cube } from "../atoms";
 
 interface Props {
   onCreate: (name: string, tags: string[]) => Promise<void>;
 }
 
+const DEFAULT_NAME = "My first profile";
+
 /**
  * Two-step first-run. We omit the Anthropic-key step from the original
  * Claude Design output because MultiZen no longer calls any external API.
+ *
+ * Step 2 asks for one thing — a name — and gives a sensible default.
+ * Tags / proxy / fingerprint are NOT here: the user has been in the app
+ * for 30 seconds, they don't yet have a workflow that needs taxonomy.
+ * They can fill those in later from the Inspector.
  */
 export function FirstRun({ onCreate }: Props): JSX.Element {
   const [step, setStep] = useState<1 | 2>(1);
-  const [name, setName] = useState("acme — sales · west");
-  const [tags, setTags] = useState("linkedin, client-acme");
+  // Pre-filled with the default. The input below auto-selects on focus,
+  // so the user can hit Enter to accept or just start typing to replace.
+  const [name, setName] = useState(DEFAULT_NAME);
   const [busy, setBusy] = useState(false);
 
   async function submit(): Promise<void> {
-    if (!name.trim()) return;
     setBusy(true);
     try {
-      await onCreate(name.trim(), tags.split(",").map((s) => s.trim()).filter(Boolean));
+      await onCreate(name.trim() || DEFAULT_NAME, []);
     } finally {
       setBusy(false);
     }
@@ -34,6 +41,22 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
         overflow: "hidden",
       }}
     >
+      {/* Drag strip — invisible band at the top so the window can be dragged
+          even though we don't render the TopBar on the onboarding screen.
+          Sits behind the halo and content. */}
+      <div
+        aria-hidden
+        className="drag-region"
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 44,
+          zIndex: 1,
+        }}
+      />
+
       {/* Halo */}
       <div
         aria-hidden
@@ -66,15 +89,17 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
                 A library of isolated browsers.
               </div>
               <div className="text-[14px] text-slate-400 mt-3 leading-relaxed">
-                Each profile keeps its own cookies, login state, fingerprint, and proxy. Launch them
-                yourself, or let Claude drive them via MCP — and watch every tool call stream in.
+                Cookies, login, fingerprint, and proxy isolated per profile.
+                Drive them yourself or via any MCP agent.
               </div>
             </div>
-            <div className="flex gap-6 mt-1.5 mono text-[11px] text-slate-500">
-              <span>macOS · Windows</span>
-              <span>·</span>
+            <div className="flex items-center gap-3 mt-1.5 mono text-[11px] text-slate-500">
+              <span>macOS</span>
+              <span className="text-slate-700">·</span>
+              <span>Windows</span>
+              <span className="text-slate-700">·</span>
               <span>Chromium</span>
-              <span>·</span>
+              <span className="text-slate-700">·</span>
               <span>MCP HTTP</span>
             </div>
             <button
@@ -84,7 +109,6 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
               style={{ padding: "10px 16px", borderRadius: 11 }}
             >
               Continue
-              <Kbd>⏎</Kbd>
             </button>
           </>
         )}
@@ -96,47 +120,35 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
                 className="font-bold tracking-tight text-slate-100"
                 style={{ fontSize: 26, lineHeight: 1.15, letterSpacing: "-0.01em" }}
               >
-                Create your first profile.
+                Name your first profile.
               </div>
               <div className="text-[13px] text-slate-400 mt-2.5 leading-relaxed">
-                Give it a name and a tag. You can edit fingerprint, proxy, and notes anytime.
+                Just a label to find it later. Tags, proxy, and fingerprint are
+                editable anytime from the profile panel.
               </div>
             </div>
-            <div
-              className="w-full flex flex-col gap-2.5 text-left"
-              style={{
-                padding: 14,
-                borderRadius: 14,
-                background: "rgba(255,255,255,0.025)",
-                boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)",
-              }}
-            >
-              <Field label="Name">
-                <input
-                  autoFocus
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="input mono"
-                />
-              </Field>
-              <Field label="Tags">
-                <input
-                  value={tags}
-                  onChange={(e) => setTags(e.target.value)}
-                  placeholder="comma-separated"
-                  className="input mono"
-                />
-              </Field>
+            <div className="w-full text-left">
+              <input
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onFocus={(e) => e.currentTarget.select()}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !busy) void submit();
+                }}
+                placeholder={DEFAULT_NAME}
+                className="w-full px-4 py-3 rounded-xl bg-white/[0.03] text-[14px] text-slate-100 placeholder:text-slate-600 outline-none focus:bg-white/[0.05] transition-colors mono"
+                style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+              />
             </div>
             <button
               type="button"
-              disabled={busy || !name.trim()}
+              disabled={busy}
               onClick={() => void submit()}
               className="btn-brand text-[13px] mt-2"
               style={{ padding: "10px 16px", borderRadius: 11 }}
             >
               {busy ? "Creating…" : "Create profile"}
-              <Kbd>⌘ ⏎</Kbd>
             </button>
           </>
         )}
@@ -158,32 +170,6 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
         </div>
       </div>
 
-      <style>{`
-        .input {
-          padding: 8px 11px;
-          border-radius: 9px;
-          background: rgba(255,255,255,0.04);
-          box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
-          color: #cbd5e1;
-          font-size: 12px;
-          font-weight: 500;
-          width: 100%;
-          border: 0;
-          outline: 0;
-        }
-        .input:focus {
-          box-shadow: inset 0 0 0 1px rgba(168,85,247,0.4);
-        }
-      `}</style>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }): JSX.Element {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <div className="text-[11px] font-medium text-slate-500">{label}</div>
-      {children}
     </div>
   );
 }

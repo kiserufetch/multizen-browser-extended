@@ -6,6 +6,7 @@
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
+    "predev": "node scripts/patch-electron-info-plist.cjs",
     "dev": "electron-vite dev --watch",
     "build": "electron-vite build && electron-builder --dir",
     "build:mac": "electron-vite build && electron-builder --mac",
@@ -20,8 +21,12 @@
     "@multizen/profile-manager": "workspace:*",
     "@multizen/settings-store": "workspace:*",
     "@multizen/types": "workspace:*",
+    "extract-zip": "^2.0.1",
     "framer-motion": "^12.0.0",
-    "lucide-react": "^0.469.0"
+    "https-proxy-agent": "^9.0.0",
+    "lucide-react": "^0.469.0",
+    "proxy-chain": "^2.7.1",
+    "socks-proxy-agent": "^10.0.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",

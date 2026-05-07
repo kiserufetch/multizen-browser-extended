@@ -6,6 +6,10 @@ import {
   ProfileManager,
   exportProfile,
   importProfile,
+  generateFingerprint,
+  reconcileFingerprint,
+  deviceCatalog,
+  localeCatalog,
 } from "@multizen/profile-manager";
 import {
   HttpTransport,
@@ -14,7 +18,10 @@ import {
   type ActivityLog,
 } from "@multizen/mcp-server";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
+import type { ChromiumStatus, ProxyConfig } from "@multizen/types";
 import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
+import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
+import { probeProxyGeo, type ProxyGeoResult } from "./proxyGeo.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -44,6 +51,7 @@ function resolveAppIcon(): string | null {
 let mainWindow: BrowserWindow | null = null;
 let profileManager: ProfileManager;
 let browserDriver: ChromiumBrowserDriver;
+let chromiumBootstrap: ChromiumBootstrap;
 let activityLog: ActivityLog;
 let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
@@ -81,6 +89,14 @@ function createWindow(): void {
   });
 }
 
+// Name must be set BEFORE app.whenReady() so the dock and menu bar pick
+// it up — otherwise macOS shows "Electron" until app fully loads.
+app.setName("MultiZen");
+app.setAboutPanelOptions({
+  applicationName: "MultiZen",
+  applicationVersion: app.getVersion(),
+});
+
 app.whenReady().then(async () => {
   // macOS: explicitly set the dock icon. In packaged .app bundles macOS
   // picks the .icns automatically, but in dev (running ./node_modules/.bin/electron)
@@ -93,9 +109,6 @@ app.whenReady().then(async () => {
     }
   }
 
-  // Set application name (also influences the menu bar on macOS)
-  app.setName("MultiZen");
-
   const userData = app.getPath("userData");
   const dataRoot = join(userData, "data");
 
@@ -107,7 +120,20 @@ app.whenReady().then(async () => {
     profilesRoot: join(dataRoot, "profiles"),
   });
 
-  browserDriver = new ChromiumBrowserDriver({ profileManager });
+  // Chromium bootstrap — checks for the patched Chromium binary, downloads
+  // it from our CDN on first run, and reports progress to the renderer.
+  // In dev (not packaged) it short-circuits to system Chrome.
+  chromiumBootstrap = new ChromiumBootstrap();
+  chromiumBootstrap.on("status", (status: ChromiumStatus) => {
+    mainWindow?.webContents.send("chromium:status", status);
+  });
+  // Kick off the ensure() in the background so the UI can render immediately
+  // and show download progress. Profile launches will wait until ready.
+  void chromiumBootstrap.ensure().catch((e) => {
+    process.stderr.write(`Chromium bootstrap failed: ${String(e)}\n`);
+  });
+
+  browserDriver = new ChromiumBrowserDriver({ profileManager, chromiumBootstrap });
 
   const mcp = createMultizenMcpServer({ profileManager, browserDriver });
   activityLog = mcp.activityLog;
@@ -165,6 +191,42 @@ app.whenReady().then(async () => {
 
   // Activity IPC
   ipcMain.handle("activity:recent", () => activityLog.recent());
+
+  // Chromium bootstrap IPC
+  ipcMain.handle("chromium:status", () => chromiumBootstrap.getStatus());
+  ipcMain.handle("chromium:retry", () => chromiumBootstrap.ensure());
+
+  // Fingerprint generator IPC — called from create + edit forms when the
+  // user hits Regen. Returns a fresh, internally-consistent preset.
+  ipcMain.handle("fingerprint:generate", () => generateFingerprint());
+  ipcMain.handle("fingerprint:devices", () => deviceCatalog());
+  ipcMain.handle("fingerprint:locales", () => localeCatalog());
+  ipcMain.handle(
+    "fingerprint:reconcile",
+    (
+      _e,
+      current: Parameters<typeof reconcileFingerprint>[0],
+      patch: Parameters<typeof reconcileFingerprint>[1],
+    ) => reconcileFingerprint(current, patch),
+  );
+
+  // Proxy geo-IP probe — verifies that the profile's locale + timezone are
+  // coherent with the proxy IP's country. Detection vendors flag mismatches
+  // like "Accept-Language: ru-RU + IP in US" as suspicious.
+  ipcMain.handle(
+    "proxy:detectGeo",
+    async (
+      _e,
+      proxy: ProxyConfig,
+    ): Promise<{ ok: true; geo: ProxyGeoResult } | { ok: false; error: string }> => {
+      try {
+        const geo = await probeProxyGeo(proxy);
+        return { ok: true, geo };
+      } catch (e) {
+        return { ok: false, error: (e as Error).message };
+      }
+    },
+  );
 
   // Profile import / export
   ipcMain.handle(

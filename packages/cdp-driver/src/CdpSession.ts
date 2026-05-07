@@ -1,6 +1,38 @@
 import CDP from "chrome-remote-interface";
 import type { AccessibilityNode, ExtractContext } from "./types.js";
 
+/**
+ * Send a CDP command to a specific target/session. Returned by
+ * {@link CdpSession.bootstrapTargets} so a setup function does not have
+ * to track sessionIds itself.
+ */
+export type TargetSender = <T = unknown>(
+  method: string,
+  params?: Record<string, unknown>,
+) => Promise<T>;
+
+function buildSender(client: CDP.Client, sessionId: string | undefined): TargetSender {
+  return ((method: string, params?: Record<string, unknown>) => {
+    if (sessionId === undefined) {
+      // Root session: third arg omitted entirely.
+      return (
+        client as unknown as {
+          send: (m: string, p?: Record<string, unknown>) => Promise<unknown>;
+        }
+      ).send(method, params);
+    }
+    return (
+      client as unknown as {
+        send: (
+          m: string,
+          p: Record<string, unknown> | undefined,
+          sid: string,
+        ) => Promise<unknown>;
+      }
+    ).send(method, params, sessionId);
+  }) as TargetSender;
+}
+
 export interface CdpSessionOptions {
   /** Port the Chromium instance is listening on */
   port: number;
@@ -49,6 +81,81 @@ export class CdpSession {
     if (!this.client) return;
     await this.client.close();
     this.client = null;
+  }
+
+  /**
+   * Apply a setup function to every page target the browser has now and
+   * to every page target it opens later. Used to wire Emulation overrides
+   * (timezone, locale, Sec-CH-UA via userAgentMetadata) and preload
+   * scripts (WebRTC handler) so a fresh tab is never un-cloaked even for
+   * a single navigation.
+   *
+   * `setup` receives a `send` function pre-bound to the right session.
+   * It runs on:
+   *   1. the root connected target,
+   *   2. every existing page target (e.g. session-restored tabs),
+   *   3. every future target — auto-attached with waitForDebuggerOnStart
+   *      so we win the race against the page's first script.
+   */
+  async bootstrapTargets(
+    setup: (send: TargetSender) => Promise<void>,
+  ): Promise<void> {
+    const client = this.require();
+    const { Target } = client;
+
+    await setup(buildSender(client, undefined));
+
+    // Targets that should receive the setup. "page" covers user tabs;
+    // "iframe" covers OOPIFs (cross-origin iframes that live in a
+    // separate process — common for ad networks and 3rd-party fingerprint
+    // services like browserscan's IP probe). Without iframe coverage,
+    // RTCPeerConnection inside a cross-origin iframe goes un-spoofed and
+    // leaks the real IP via STUN even when the parent page is patched.
+    const SETUP_TARGET_TYPES = new Set(["page", "iframe"]);
+
+    try {
+      const targets = await Target.getTargets();
+      for (const t of targets.targetInfos) {
+        if (!SETUP_TARGET_TYPES.has(t.type)) continue;
+        const { sessionId } = await Target.attachToTarget({
+          targetId: t.targetId,
+          flatten: true,
+        });
+        await setup(buildSender(client, sessionId)).catch(() => {});
+      }
+    } catch {
+      // Best-effort — root is already covered.
+    }
+
+    await Target.setAutoAttach({
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true,
+    });
+    client.on(
+      "Target.attachedToTarget",
+      (params: { sessionId: string; targetInfo: { type: string } }) => {
+        void (async () => {
+          try {
+            if (SETUP_TARGET_TYPES.has(params.targetInfo.type)) {
+              await setup(buildSender(client, params.sessionId)).catch(
+                () => {},
+              );
+            }
+          } finally {
+            try {
+              await client.send(
+                "Runtime.runIfWaitingForDebugger",
+                undefined,
+                params.sessionId,
+              );
+            } catch {
+              // Already detached.
+            }
+          }
+        })();
+      },
+    );
   }
 
   private require(): CDP.Client {

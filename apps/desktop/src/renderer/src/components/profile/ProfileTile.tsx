@@ -1,26 +1,20 @@
-import type { JSX } from "react";
-import { Zap } from "lucide-react";
+import { useEffect, useRef, useState, type JSX } from "react";
+import { createPortal } from "react-dom";
+import { MoreHorizontal, Play, Square, Zap } from "lucide-react";
 import type { ProfileSummary } from "../../types";
-import { Avatar, Flag, Pill, profileInitials } from "../atoms";
+import { Avatar, Flag, Pill, ccFromTimezone, profileInitials } from "../atoms";
+import { Button } from "../atoms/Button";
 import { relativeTime } from "../../lib/relativeTime";
+import { cn } from "../../lib/cn";
 import type { ActivityEvent } from "../../types";
 
 export type TileState = "idle" | "running" | "ai" | "error";
 
 export interface TileData extends ProfileSummary {
-  /** Inferred from running state + recent AI activity */
   state: TileState;
-  /** Active page URL when running and we know it (future use) */
-  url?: string;
-  /** Country code for the proxy / locale */
-  country?: string;
-  /** Most recent MCP tool call for this profile, if AI-driven */
   lastTool?: string;
   lastDuration?: string;
-  /** Error description, when state is 'error' */
   errorMessage?: string;
-  /** Cookie / state size summary, future-use */
-  meta?: string;
 }
 
 const RING_BY_STATE: Record<TileState, string> = {
@@ -30,8 +24,14 @@ const RING_BY_STATE: Record<TileState, string> = {
   error: "rgba(239,68,68,0.30)",
 };
 
+// Use a transparent shadow for idle instead of "none". CSS does not
+// accept the literal `none` inside a comma-separated box-shadow list —
+// the entire declaration is discarded as invalid, and with the
+// `transition-all` on this element the previous (running) shadow keeps
+// rendering until something else forces a repaint. A 0-spread
+// transparent shadow keeps the syntax valid AND animates cleanly.
 const GLOW_BY_STATE: Record<TileState, string> = {
-  idle: "none",
+  idle: "0 0 0 0 rgba(0,0,0,0)",
   running: "0 0 32px rgba(16,185,129,0.18)",
   ai: "0 0 32px rgba(168,85,247,0.18)",
   error: "0 0 32px rgba(239,68,68,0.15)",
@@ -39,17 +39,64 @@ const GLOW_BY_STATE: Record<TileState, string> = {
 
 interface Props {
   profile: TileData;
-  onClick: () => void;
+  onOpen: () => void;
+  onLaunch: () => Promise<void> | void;
+  onStop: () => Promise<void> | void;
+  onExport: () => void;
+  onDelete: () => void;
 }
 
-export function ProfileTile({ profile, onClick }: Props): JSX.Element {
+export function ProfileTile({
+  profile,
+  onOpen,
+  onLaunch,
+  onStop,
+  onExport,
+  onDelete,
+}: Props): JSX.Element {
   const initials = profileInitials(profile.name);
+  const isRunning = profile.state !== "idle";
+  const country = ccFromTimezone(profile.timezone);
+  const proxyLabel = profile.proxy ? `${profile.proxy.host}:${profile.proxy.port}` : "direct";
+
+  // Disable Launch/Stop during the actual transition so the user can't
+  // double-click and spawn a second Chromium process.
+  const [pending, setPending] = useState(false);
+
+  // When the running-state actually flips, clear the pending lock.
+  // (External close, MCP-triggered launch, etc. should also unlock.)
+  useEffect(() => {
+    setPending(false);
+  }, [profile.isRunning]);
+
+  async function handleLaunch(): Promise<void> {
+    if (pending) return;
+    setPending(true);
+    try {
+      await onLaunch();
+    } catch {
+      setPending(false);
+    }
+    // pending lifts when isRunning flips via the effect above.
+    // Safety net: if the launch never produced a state change (e.g. error toast),
+    // unlock after 5s so the button doesn't stay disabled forever.
+    window.setTimeout(() => setPending(false), 5000);
+  }
+
+  async function handleStop(): Promise<void> {
+    if (pending) return;
+    setPending(true);
+    try {
+      await onStop();
+    } catch {
+      setPending(false);
+    }
+    window.setTimeout(() => setPending(false), 5000);
+  }
 
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="text-left flex flex-col gap-2.5 p-3.5 cursor-pointer relative overflow-hidden transition-all hover:-translate-y-px"
+    <div
+      className="flex flex-col gap-2.5 p-3.5 relative transition-all"
       style={{
         borderRadius: 18,
         background: "rgba(255,255,255,0.025)",
@@ -59,12 +106,16 @@ export function ProfileTile({ profile, onClick }: Props): JSX.Element {
         transitionDuration: "180ms",
       }}
     >
-      {/* Header */}
-      <div className="flex justify-between items-start gap-2.5">
+      {/* Header — clickable, opens Inspector */}
+      <button
+        type="button"
+        onClick={onOpen}
+        className="flex justify-between items-start gap-2.5 cursor-pointer text-left bg-transparent border-0 p-0"
+      >
         <div className="flex gap-2.5 items-center min-w-0">
           <Avatar initials={initials} accent={profile.state === "ai"} />
           <div className="min-w-0">
-            <div className="font-semibold text-[13px] leading-tight text-slate-100 truncate">
+            <div className="font-semibold text-[13px] leading-tight text-slate-100 truncate hover:text-white transition-colors">
               {profile.name}
             </div>
             <div className="mono text-[10px] text-slate-600 mt-[3px] truncate">
@@ -73,7 +124,7 @@ export function ProfileTile({ profile, onClick }: Props): JSX.Element {
           </div>
         </div>
         <PillForState state={profile.state} />
-      </div>
+      </button>
 
       {/* Tags */}
       {profile.tags.length > 0 && (
@@ -96,21 +147,48 @@ export function ProfileTile({ profile, onClick }: Props): JSX.Element {
         </div>
       )}
 
-      {/* Footer line — context per state */}
+      {/* Context line per state */}
       <ContextLine profile={profile} />
 
-      {/* Bottom meta */}
-      <div
-        className="flex justify-between items-center mt-auto pt-1 mono text-[10px] text-slate-600"
-        style={{ fontWeight: 500 }}
-      >
-        <span>{profile.lastOpenedAt ? relativeTime(profile.lastOpenedAt) : "never opened"}</span>
-        <span className="inline-flex items-center gap-1.5">
-          <Flag cc={profile.country} />
-          {profile.meta ?? "direct"}
+      {/* Bottom meta — last opened + proxy chip */}
+      <div className="flex justify-between items-center gap-2 mono text-[10px] text-slate-600 leading-tight">
+        <span className="truncate">
+          {profile.lastOpenedAt ? relativeTime(profile.lastOpenedAt) : "never opened"}
+        </span>
+        <span className="inline-flex items-center gap-1.5 truncate min-w-0">
+          <Flag cc={country} />
+          <span className="truncate">{proxyLabel}</span>
         </span>
       </div>
-    </button>
+
+      {/* Actions */}
+      <div className="flex gap-1.5 mt-1">
+        {!isRunning ? (
+          <Button
+            variant="accent"
+            size="md"
+            fullWidth
+            disabled={pending}
+            onClick={handleLaunch}
+            leftIcon={<Play size={11} fill="currentColor" strokeWidth={0} />}
+          >
+            {pending ? "Launching…" : "Launch"}
+          </Button>
+        ) : (
+          <Button
+            variant="secondary"
+            size="md"
+            fullWidth
+            disabled={pending}
+            onClick={handleStop}
+            leftIcon={<Square size={10} fill="currentColor" strokeWidth={0} />}
+          >
+            {pending ? "Stopping…" : "Stop"}
+          </Button>
+        )}
+        <ActionMenu onEdit={onOpen} onExport={onExport} onDelete={onDelete} />
+      </div>
+    </div>
   );
 }
 
@@ -142,19 +220,125 @@ function ContextLine({ profile }: { profile: TileData }): JSX.Element | null {
       </div>
     );
   }
-  if (profile.state === "running" && profile.url) {
-    return <div className="mono text-[11px] text-slate-400 truncate">{profile.url}</div>;
-  }
   if (profile.state === "error" && profile.errorMessage) {
-    return <div className="mono text-[11px] leading-tight text-red-400">{profile.errorMessage}</div>;
+    return (
+      <div className="mono text-[11px] leading-tight text-red-400 truncate">
+        {profile.errorMessage}
+      </div>
+    );
   }
   return null;
 }
 
 /**
- * Derive tile state + AI activity context from the profile's recent
- * activity events.
+ * Action popover that escapes the tile's clipping. Rendered into a portal
+ * with `position: fixed` coordinates so the brand glow / overflow on the
+ * tile cannot crop it.
  */
+function ActionMenu({
+  onEdit,
+  onExport,
+  onDelete,
+}: {
+  onEdit: () => void;
+  onExport: () => void;
+  onDelete: () => void;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [coords, setCoords] = useState<{ top: number; right: number } | null>(null);
+
+  useEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    setCoords({
+      top: rect.bottom + 4,
+      right: window.innerWidth - rect.right,
+    });
+    function onScroll(): void {
+      setOpen(false);
+    }
+    function onResize(): void {
+      setOpen(false);
+    }
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [open]);
+
+  return (
+    <>
+      <Button
+        ref={triggerRef}
+        variant="secondary"
+        size="icon"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="More actions"
+      >
+        <MoreHorizontal size={14} strokeWidth={1.5} />
+      </Button>
+      {open && coords &&
+        createPortal(
+          <>
+            <div
+              className="fixed inset-0 z-[60]"
+              onMouseDown={() => setOpen(false)}
+            />
+            <div
+              className="fixed z-[61] w-44 py-1 rounded-md"
+              style={{
+                top: coords.top,
+                right: coords.right,
+                background: "rgba(15,16,22,0.98)",
+                boxShadow:
+                  "inset 0 0 0 1px rgba(255,255,255,0.08), 0 20px 40px rgba(0,0,0,0.6)",
+                backdropFilter: "blur(20px)",
+              }}
+            >
+              <MenuItem onClick={() => { setOpen(false); onEdit(); }}>
+                Edit profile
+              </MenuItem>
+              <MenuItem onClick={() => { setOpen(false); onExport(); }}>
+                Export archive…
+              </MenuItem>
+              <div style={{ height: 1, margin: "4px 0", background: "rgba(255,255,255,0.06)" }} />
+              <MenuItem onClick={() => { setOpen(false); onDelete(); }} tone="danger">
+                Delete profile
+              </MenuItem>
+            </div>
+          </>,
+          document.body,
+        )}
+    </>
+  );
+}
+
+function MenuItem({
+  children,
+  onClick,
+  tone,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  tone?: "danger";
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "w-full text-left px-3 py-1.5 text-[12px] cursor-pointer transition-colors hover:bg-white/[0.05]",
+        tone === "danger" ? "text-red-400" : "text-slate-200",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function deriveTileState(
   profile: ProfileSummary,
   recentEvents: ActivityEvent[],
@@ -168,7 +352,10 @@ export function deriveTileState(
 
   const lastError = recent.find((e) => e.status === "error");
   const lastDriveCall = recent.find(
-    (e) => e.tool !== "list_profiles" && e.tool !== "launch_profile" && e.tool !== "close_profile",
+    (e) =>
+      e.tool !== "list_profiles" &&
+      e.tool !== "launch_profile" &&
+      e.tool !== "close_profile",
   );
 
   if (lastError && Date.now() - new Date(lastError.timestamp).getTime() < 30_000) {

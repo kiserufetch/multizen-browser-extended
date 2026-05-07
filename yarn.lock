@@ -1055,10 +1055,14 @@ __metadata:
     electron: "npm:^33.2.0"
     electron-builder: "npm:^25.1.8"
     electron-vite: "npm:^2.3.0"
+    extract-zip: "npm:^2.0.1"
     framer-motion: "npm:^12.0.0"
+    https-proxy-agent: "npm:^9.0.0"
     lucide-react: "npm:^0.469.0"
+    proxy-chain: "npm:^2.7.1"
     react: "npm:^19.0.0"
     react-dom: "npm:^19.0.0"
+    socks-proxy-agent: "npm:^10.0.0"
     tailwindcss: "npm:^4.0.0"
     vite: "npm:^6.0.3"
   languageName: unknown
@@ -1789,6 +1793,13 @@ __metadata:
   dependencies:
     debug: "npm:4"
   checksum: 10c0/dc4f757e40b5f3e3d674bc9beb4f1048f4ee83af189bae39be99f57bf1f48dde166a8b0a5342a84b5944ee8e6ed1e5a9d801858f4ad44764e84957122fe46261
+  languageName: node
+  linkType: hard
+
+"agent-base@npm:9.0.0":
+  version: 9.0.0
+  resolution: "agent-base@npm:9.0.0"
+  checksum: 10c0/0274cd9a2a0ee78e3fbe0e80e7e0c41df27102466f7f7b3a67c045bb4c00fc517ce0496de3045b55f5eeec1a0e77d9d0a9b9320b0362bfe61e0c9e6d7ebaee76
   languageName: node
   linkType: hard
 
@@ -3920,6 +3931,16 @@ __metadata:
   languageName: node
   linkType: hard
 
+"https-proxy-agent@npm:^9.0.0":
+  version: 9.0.0
+  resolution: "https-proxy-agent@npm:9.0.0"
+  dependencies:
+    agent-base: "npm:9.0.0"
+    debug: "npm:^4.3.4"
+  checksum: 10c0/1b55f3f79d60d5254f57afd888820e751cc28d39f4e19fd9fa098efa01ae74afcab315f02c6b067d9723fd49a0baf5eed1cde0a40a6a5bb397e3804cc81ac402
+  languageName: node
+  linkType: hard
+
 "humanize-ms@npm:^1.2.1":
   version: 1.2.1
   resolution: "humanize-ms@npm:1.2.1"
@@ -5163,6 +5184,17 @@ __metadata:
   languageName: node
   linkType: hard
 
+"proxy-chain@npm:^2.7.1":
+  version: 2.7.1
+  resolution: "proxy-chain@npm:2.7.1"
+  dependencies:
+    socks: "npm:^2.8.3"
+    socks-proxy-agent: "npm:^8.0.3"
+    tslib: "npm:^2.3.1"
+  checksum: 10c0/c0505b25d811bfc7ade8477f05e0345bc32fa769c95dbf2ea3070d76113b27b928383be1f0b01f89a428eac85c677962666e5a1d879a7ac274a346f0f8aa0c3f
+  languageName: node
+  linkType: hard
+
 "pump@npm:^3.0.0":
   version: 3.0.4
   resolution: "pump@npm:3.0.4"
@@ -5706,6 +5738,17 @@ __metadata:
   languageName: node
   linkType: hard
 
+"socks-proxy-agent@npm:^10.0.0":
+  version: 10.0.0
+  resolution: "socks-proxy-agent@npm:10.0.0"
+  dependencies:
+    agent-base: "npm:9.0.0"
+    debug: "npm:^4.3.4"
+    socks: "npm:^2.8.3"
+  checksum: 10c0/6882eab606e37d2d2ca02ce377114bcc03722fe75988a89f9c99cf9275873337af9306fe8c9d6315596fb98dc260b84210ffab649cb7fc6e99e270bdb1bcb3b5
+  languageName: node
+  linkType: hard
+
 "socks-proxy-agent@npm:^7.0.0":
   version: 7.0.0
   resolution: "socks-proxy-agent@npm:7.0.0"
@@ -5717,7 +5760,18 @@ __metadata:
   languageName: node
   linkType: hard
 
-"socks@npm:^2.6.2":
+"socks-proxy-agent@npm:^8.0.3":
+  version: 8.0.5
+  resolution: "socks-proxy-agent@npm:8.0.5"
+  dependencies:
+    agent-base: "npm:^7.1.2"
+    debug: "npm:^4.3.4"
+    socks: "npm:^2.8.3"
+  checksum: 10c0/5d2c6cecba6821389aabf18728325730504bf9bb1d9e342e7987a5d13badd7a98838cc9a55b8ed3cb866ad37cc23e1086f09c4d72d93105ce9dfe76330e9d2a6
+  languageName: node
+  linkType: hard
+
+"socks@npm:^2.6.2, socks@npm:^2.8.3":
   version: 2.8.8
   resolution: "socks@npm:2.8.8"
   dependencies:
@@ -5973,7 +6027,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"tslib@npm:^2.4.0, tslib@npm:^2.8.1":
+"tslib@npm:^2.3.1, tslib@npm:^2.4.0, tslib@npm:^2.8.1":
   version: 2.8.1
   resolution: "tslib@npm:2.8.1"
   checksum: 10c0/9c4759110a19c53f992d9aae23aac5ced636e99887b51b9e61def52611732872ff7668757d4e4c61f19691e36f4da981cd9485e869b4a7408d689f6bf1f14e62

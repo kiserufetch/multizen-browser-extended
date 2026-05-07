@@ -3,9 +3,41 @@ import type {
   ProfileId,
   ProfileSummary,
   Profile,
+  ProxyConfig,
+  FingerprintConfig,
   UpdateProfileInput,
   LaunchedProfile,
+  ChromiumStatus,
+  DeviceFamily,
 } from "@multizen/types";
+
+export interface DeviceCatalogEntry {
+  family: DeviceFamily;
+  label: string;
+  screens: ReadonlyArray<{ width: number; height: number; label: string }>;
+}
+export interface LocaleCatalogEntry {
+  id: string;
+  label: string;
+  locale: string;
+  country: string;
+  timezones: ReadonlyArray<string>;
+}
+export interface FingerprintReconcilePatch {
+  device?: DeviceFamily;
+  localeId?: string;
+  screen?: { width: number; height: number };
+  timezone?: string;
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+}
+export interface ProxyGeoResult {
+  country: string;
+  countryName: string;
+  timezone: string;
+  city: string;
+  ip: string;
+}
 import type { ActivityEvent } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
 
@@ -48,6 +80,25 @@ export interface MultizenApi {
   system: {
     info: () => Promise<SystemInfo>;
   };
+  chromium: {
+    status: () => Promise<ChromiumStatus>;
+    retry: () => Promise<ChromiumStatus>;
+    onStatus: (cb: (s: ChromiumStatus) => void) => () => void;
+  };
+  fingerprint: {
+    generate: () => Promise<FingerprintConfig>;
+    devices: () => Promise<ReadonlyArray<DeviceCatalogEntry>>;
+    locales: () => Promise<ReadonlyArray<LocaleCatalogEntry>>;
+    reconcile: (
+      current: FingerprintConfig,
+      patch: FingerprintReconcilePatch,
+    ) => Promise<FingerprintConfig>;
+  };
+  proxy: {
+    detectGeo: (
+      proxy: ProxyConfig,
+    ) => Promise<{ ok: true; geo: ProxyGeoResult } | { ok: false; error: string }>;
+  };
 }
 
 declare global {
@@ -56,4 +107,14 @@ declare global {
   }
 }
 
-export type { ActivityEvent, AppSettings, Profile, ProfileSummary, LaunchedProfile };
+export type {
+  ActivityEvent,
+  AppSettings,
+  Profile,
+  ProfileSummary,
+  ProxyConfig,
+  FingerprintConfig,
+  LaunchedProfile,
+  ChromiumStatus,
+  DeviceFamily,
+};

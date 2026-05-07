@@ -64,15 +64,26 @@ export class ProfileManager {
 
   list(): ProfileSummary[] {
     const rows = this.db
-      .prepare(`SELECT id, name, tags, last_opened_at FROM profiles ORDER BY updated_at DESC`)
-      .all() as Pick<ProfileRow, "id" | "name" | "tags" | "last_opened_at">[];
-    return rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      tags: JSON.parse(r.tags) as string[],
-      lastOpenedAt: r.last_opened_at ?? undefined,
-      isRunning: false,
-    }));
+      .prepare(
+        `SELECT id, name, tags, last_opened_at, proxy, fingerprint
+         FROM profiles ORDER BY updated_at DESC`,
+      )
+      .all() as Pick<
+      ProfileRow,
+      "id" | "name" | "tags" | "last_opened_at" | "proxy" | "fingerprint"
+    >[];
+    return rows.map((r) => {
+      const fingerprint = JSON.parse(r.fingerprint) as FingerprintConfig;
+      return {
+        id: r.id,
+        name: r.name,
+        tags: JSON.parse(r.tags) as string[],
+        lastOpenedAt: r.last_opened_at ?? undefined,
+        isRunning: false,
+        proxy: r.proxy ? (JSON.parse(r.proxy) as ProxyConfig) : undefined,
+        timezone: fingerprint.timezone,
+      };
+    });
   }
 
   get(id: ProfileId): Profile | null {

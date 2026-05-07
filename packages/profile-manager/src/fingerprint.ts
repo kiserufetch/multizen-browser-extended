@@ -1,62 +1,704 @@
-import type { FingerprintConfig } from "@multizen/types";
-
-const macFingerprints: FingerprintConfig[] = [
-  {
-    userAgent:
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    locale: "en-US",
-    timezone: "America/New_York",
-    screen: { width: 1440, height: 900 },
-    webgl: { vendor: "Apple Inc.", renderer: "Apple M1 Pro" },
-    hardwareConcurrency: 10,
-    deviceMemory: 16,
-    platform: "MacIntel",
-  },
-  {
-    userAgent:
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    locale: "en-GB",
-    timezone: "Europe/London",
-    screen: { width: 1680, height: 1050 },
-    webgl: { vendor: "Apple Inc.", renderer: "Apple M2" },
-    hardwareConcurrency: 8,
-    deviceMemory: 16,
-    platform: "MacIntel",
-  },
-];
-
-const winFingerprints: FingerprintConfig[] = [
-  {
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    locale: "en-US",
-    timezone: "America/Chicago",
-    screen: { width: 1920, height: 1080 },
-    webgl: { vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0)" },
-    hardwareConcurrency: 16,
-    deviceMemory: 32,
-    platform: "Win32",
-  },
-];
+import type {
+  ClientHints,
+  DeviceFamily,
+  FingerprintConfig,
+} from "@multizen/types";
 
 /**
- * Pick a sane fingerprint preset deterministically from a seed string.
- * In v0.2 we ship a small curated pool; the closed fingerprint engine
- * generates fresh ones in production builds.
+ * Coherent fingerprint generator.
+ *
+ * Detection vendors (Cloudflare Bot Management, DataDome, Imperva, Akamai,
+ * FingerprintJS, CreepJS) cross-check fingerprint surfaces against each
+ * other. A consistent UA + Sec-CH-UA + navigator.platform + WebGL + screen
+ * + locale + timezone story is the single most-important rule. One
+ * inconsistency is a flag.
+ *
+ * This module owns the data model. We pick a `DeviceFamily` first, then a
+ * `LocaleGroup` (geo-coherent locale + timezones), then derive every other
+ * surface from those two choices. We never let the caller mix-and-match
+ * incompatible values without going through `applyOverrides()` (which
+ * preserves coherence where it can).
+ *
+ * Limit of this open-source generator: only fields injectable via Chromium
+ * launch flags or runtime preload scripts can be applied without a patched
+ * binary. Sec-CH-UA / navigator.userAgentData / TLS JA3-JA4 / Canvas-Audio
+ * noise require the closed-source patched Chromium build (multizen-pro).
+ * The fingerprint we generate stores those fields anyway so the patched
+ * binary can apply them when it ships.
  */
-export function defaultFingerprint(seed: string): FingerprintConfig {
-  const pool = [...macFingerprints, ...winFingerprints];
-  const idx = hashString(seed) % pool.length;
-  const fp = pool[idx];
-  if (!fp) throw new Error("Fingerprint pool empty");
-  return structuredClone(fp);
+
+/** Current Chrome stable. Bumped when a new milestone goes stable on
+ * https://chromiumdash.appspot.com/schedule. As of May 2026 → Chrome 148. */
+// Must match the Chromium binary we're actually running — detection
+// vendors compare claimed UA version vs. JS-engine feature signatures
+// and flag mismatches ("UA says 148 but supports only 147 features").
+// System Chrome stable as of May 2026 is 147.0.7727.138.
+export const CHROME_VERSION_MAJOR = 147;
+export const CHROME_VERSION_FULL = "147.0.7727.138";
+
+// ─────────────────────────────────────────────────────────────────────────
+// Device profiles — real models, real specs.
+// ─────────────────────────────────────────────────────────────────────────
+
+interface DeviceSpec {
+  family: DeviceFamily;
+  /** Human-readable label for UI dropdowns */
+  label: string;
+
+  /** UA platform token (legacy User-Agent) */
+  uaPlatformToken: string;
+  /** navigator.platform value */
+  navigatorPlatform: "MacIntel" | "Win32" | "Linux x86_64";
+  /** Sec-CH-UA-Platform value */
+  secChUaPlatform: string;
+  /** Sec-CH-UA-Platform-Version value (current OS major) */
+  secChUaPlatformVersion: string;
+  secChUaArch: "arm" | "x86";
+  secChUaBitness: "64" | "32";
+
+  /** Real screen sizes for this device (logical = CSS pixels, not retina) */
+  screens: ReadonlyArray<{ width: number; height: number; label: string }>;
+  /** Device pixel ratio — 2 for Mac Retina, 1 for most Win/Linux */
+  dpr: number;
+
+  /** WebGL UNMASKED_* values typical of this device family */
+  webgl: { vendor: string; renderer: string };
+
+  /** Plausible CPU core counts for this family */
+  hardwareConcurrency: ReadonlyArray<number>;
+  /** Plausible device memory in GB */
+  deviceMemory: ReadonlyArray<number>;
 }
 
-function hashString(s: string): number {
+const DEVICES: ReadonlyArray<DeviceSpec> = [
+  {
+    family: "macbook-pro-14-m3",
+    label: "MacBook Pro 14″ (M3)",
+    uaPlatformToken: "Macintosh; Intel Mac OS X 10_15_7",
+    navigatorPlatform: "MacIntel",
+    secChUaPlatform: "macOS",
+    secChUaPlatformVersion: "14.6.0",
+    secChUaArch: "arm",
+    secChUaBitness: "64",
+    screens: [{ width: 1512, height: 982, label: "1512 × 982 (default)" }],
+    dpr: 2,
+    webgl: { vendor: "Apple Inc.", renderer: "Apple M3" },
+    hardwareConcurrency: [8],
+    deviceMemory: [8, 16, 24],
+  },
+  {
+    family: "macbook-pro-14-m3-pro",
+    label: "MacBook Pro 14″ (M3 Pro)",
+    uaPlatformToken: "Macintosh; Intel Mac OS X 10_15_7",
+    navigatorPlatform: "MacIntel",
+    secChUaPlatform: "macOS",
+    secChUaPlatformVersion: "14.6.0",
+    secChUaArch: "arm",
+    secChUaBitness: "64",
+    screens: [{ width: 1512, height: 982, label: "1512 × 982 (default)" }],
+    dpr: 2,
+    webgl: { vendor: "Apple Inc.", renderer: "Apple M3 Pro" },
+    hardwareConcurrency: [11, 12],
+    deviceMemory: [18, 36],
+  },
+  {
+    family: "macbook-pro-16-m3-pro",
+    label: "MacBook Pro 16″ (M3 Pro)",
+    uaPlatformToken: "Macintosh; Intel Mac OS X 10_15_7",
+    navigatorPlatform: "MacIntel",
+    secChUaPlatform: "macOS",
+    secChUaPlatformVersion: "14.6.0",
+    secChUaArch: "arm",
+    secChUaBitness: "64",
+    screens: [{ width: 1728, height: 1117, label: "1728 × 1117 (default)" }],
+    dpr: 2,
+    webgl: { vendor: "Apple Inc.", renderer: "Apple M3 Pro" },
+    hardwareConcurrency: [11, 12],
+    deviceMemory: [18, 36],
+  },
+  {
+    family: "macbook-air-13-m3",
+    label: "MacBook Air 13″ (M3)",
+    uaPlatformToken: "Macintosh; Intel Mac OS X 10_15_7",
+    navigatorPlatform: "MacIntel",
+    secChUaPlatform: "macOS",
+    secChUaPlatformVersion: "14.6.0",
+    secChUaArch: "arm",
+    secChUaBitness: "64",
+    screens: [{ width: 1440, height: 900, label: "1440 × 900 (default)" }],
+    dpr: 2,
+    webgl: { vendor: "Apple Inc.", renderer: "Apple M3" },
+    hardwareConcurrency: [8],
+    deviceMemory: [8, 16, 24],
+  },
+  {
+    family: "imac-24-m3",
+    label: "iMac 24″ (M3)",
+    uaPlatformToken: "Macintosh; Intel Mac OS X 10_15_7",
+    navigatorPlatform: "MacIntel",
+    secChUaPlatform: "macOS",
+    secChUaPlatformVersion: "14.6.0",
+    secChUaArch: "arm",
+    secChUaBitness: "64",
+    screens: [{ width: 2240, height: 1260, label: "2240 × 1260 (4.5K)" }],
+    dpr: 2,
+    webgl: { vendor: "Apple Inc.", renderer: "Apple M3" },
+    hardwareConcurrency: [8],
+    deviceMemory: [8, 16, 24],
+  },
+  {
+    family: "windows-laptop-intel",
+    label: "Windows laptop (Intel Iris Xe)",
+    uaPlatformToken: "Windows NT 10.0; Win64; x64",
+    navigatorPlatform: "Win32",
+    secChUaPlatform: "Windows",
+    secChUaPlatformVersion: "15.0.0",
+    secChUaArch: "x86",
+    secChUaBitness: "64",
+    screens: [
+      { width: 1366, height: 768, label: "1366 × 768 (HD)" },
+      { width: 1536, height: 864, label: "1536 × 864" },
+      { width: 1920, height: 1080, label: "1920 × 1080 (FHD)" },
+    ],
+    dpr: 1,
+    webgl: {
+      vendor: "Google Inc. (Intel)",
+      renderer:
+        "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    },
+    hardwareConcurrency: [8, 12],
+    deviceMemory: [8, 16],
+  },
+  {
+    family: "windows-laptop-nvidia",
+    label: "Windows laptop (NVIDIA RTX 4060)",
+    uaPlatformToken: "Windows NT 10.0; Win64; x64",
+    navigatorPlatform: "Win32",
+    secChUaPlatform: "Windows",
+    secChUaPlatformVersion: "15.0.0",
+    secChUaArch: "x86",
+    secChUaBitness: "64",
+    screens: [
+      { width: 1920, height: 1080, label: "1920 × 1080 (FHD)" },
+      { width: 2560, height: 1440, label: "2560 × 1440 (QHD)" },
+    ],
+    dpr: 1,
+    webgl: {
+      vendor: "Google Inc. (NVIDIA)",
+      renderer:
+        "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 (0x00002882) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    },
+    hardwareConcurrency: [12, 16],
+    deviceMemory: [16, 32],
+  },
+  {
+    family: "windows-desktop-nvidia",
+    label: "Windows desktop (NVIDIA RTX 4070)",
+    uaPlatformToken: "Windows NT 10.0; Win64; x64",
+    navigatorPlatform: "Win32",
+    secChUaPlatform: "Windows",
+    secChUaPlatformVersion: "15.0.0",
+    secChUaArch: "x86",
+    secChUaBitness: "64",
+    screens: [
+      { width: 1920, height: 1080, label: "1920 × 1080 (FHD)" },
+      { width: 2560, height: 1440, label: "2560 × 1440 (QHD)" },
+      { width: 3840, height: 2160, label: "3840 × 2160 (4K)" },
+    ],
+    dpr: 1,
+    webgl: {
+      vendor: "Google Inc. (NVIDIA)",
+      renderer:
+        "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 (0x00002786) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    },
+    hardwareConcurrency: [16, 24, 32],
+    deviceMemory: [32, 64],
+  },
+  {
+    family: "linux-desktop-intel",
+    label: "Linux desktop (Intel UHD)",
+    uaPlatformToken: "X11; Linux x86_64",
+    navigatorPlatform: "Linux x86_64",
+    secChUaPlatform: "Linux",
+    secChUaPlatformVersion: "6.6.0",
+    secChUaArch: "x86",
+    secChUaBitness: "64",
+    screens: [
+      { width: 1920, height: 1080, label: "1920 × 1080 (FHD)" },
+      { width: 2560, height: 1440, label: "2560 × 1440 (QHD)" },
+    ],
+    dpr: 1,
+    webgl: {
+      vendor: "Mesa",
+      renderer: "Mesa Intel(R) UHD Graphics 770 (RPL-S)",
+    },
+    hardwareConcurrency: [8, 16],
+    deviceMemory: [16, 32],
+  },
+];
+
+// ─────────────────────────────────────────────────────────────────────────
+// Locale groups — geographically coherent locale + timezones + country.
+// ─────────────────────────────────────────────────────────────────────────
+
+interface LocaleGroup {
+  /** Stable id for UI selection */
+  id: string;
+  label: string;
+  locale: string;
+  /** Languages array: starts with `locale`, expands to base */
+  languages: string[];
+  /** ISO 3166-1 alpha-2 */
+  country: string;
+  /** Plausible IANA timezones for this locale's country */
+  timezones: ReadonlyArray<string>;
+}
+
+const LOCALES: ReadonlyArray<LocaleGroup> = [
+  {
+    id: "en-US",
+    label: "English (United States)",
+    locale: "en-US",
+    languages: ["en-US", "en"],
+    country: "us",
+    timezones: [
+      "America/New_York",
+      "America/Chicago",
+      "America/Denver",
+      "America/Los_Angeles",
+    ],
+  },
+  {
+    id: "en-GB",
+    label: "English (United Kingdom)",
+    locale: "en-GB",
+    languages: ["en-GB", "en"],
+    country: "gb",
+    timezones: ["Europe/London"],
+  },
+  {
+    id: "en-CA",
+    label: "English (Canada)",
+    locale: "en-CA",
+    languages: ["en-CA", "en"],
+    country: "ca",
+    timezones: ["America/Toronto", "America/Vancouver"],
+  },
+  {
+    id: "en-AU",
+    label: "English (Australia)",
+    locale: "en-AU",
+    languages: ["en-AU", "en"],
+    country: "au",
+    timezones: ["Australia/Sydney", "Australia/Melbourne", "Australia/Perth"],
+  },
+  {
+    id: "en-IN",
+    label: "English (India)",
+    locale: "en-IN",
+    languages: ["en-IN", "en"],
+    country: "in",
+    timezones: ["Asia/Kolkata"],
+  },
+  {
+    id: "de-DE",
+    label: "Deutsch (Deutschland)",
+    locale: "de-DE",
+    languages: ["de-DE", "de", "en"],
+    country: "de",
+    timezones: ["Europe/Berlin"],
+  },
+  {
+    id: "fr-FR",
+    label: "Français (France)",
+    locale: "fr-FR",
+    languages: ["fr-FR", "fr", "en"],
+    country: "fr",
+    timezones: ["Europe/Paris"],
+  },
+  {
+    id: "es-ES",
+    label: "Español (España)",
+    locale: "es-ES",
+    languages: ["es-ES", "es", "en"],
+    country: "es",
+    timezones: ["Europe/Madrid"],
+  },
+  {
+    id: "es-MX",
+    label: "Español (México)",
+    locale: "es-MX",
+    languages: ["es-MX", "es", "en"],
+    country: "mx",
+    timezones: ["America/Mexico_City"],
+  },
+  {
+    id: "pt-BR",
+    label: "Português (Brasil)",
+    locale: "pt-BR",
+    languages: ["pt-BR", "pt", "en"],
+    country: "br",
+    timezones: ["America/Sao_Paulo"],
+  },
+  {
+    id: "it-IT",
+    label: "Italiano (Italia)",
+    locale: "it-IT",
+    languages: ["it-IT", "it", "en"],
+    country: "it",
+    timezones: ["Europe/Rome"],
+  },
+  {
+    id: "nl-NL",
+    label: "Nederlands",
+    locale: "nl-NL",
+    languages: ["nl-NL", "nl", "en"],
+    country: "nl",
+    timezones: ["Europe/Amsterdam"],
+  },
+  {
+    id: "ja-JP",
+    label: "日本語 (日本)",
+    locale: "ja-JP",
+    languages: ["ja-JP", "ja", "en"],
+    country: "jp",
+    timezones: ["Asia/Tokyo"],
+  },
+  {
+    id: "ko-KR",
+    label: "한국어 (대한민국)",
+    locale: "ko-KR",
+    languages: ["ko-KR", "ko", "en"],
+    country: "kr",
+    timezones: ["Asia/Seoul"],
+  },
+  {
+    id: "zh-CN",
+    label: "中文 (简体, 中国)",
+    locale: "zh-CN",
+    languages: ["zh-CN", "zh", "en"],
+    country: "cn",
+    timezones: ["Asia/Shanghai"],
+  },
+  {
+    id: "zh-TW",
+    label: "中文 (繁體, 台灣)",
+    locale: "zh-TW",
+    languages: ["zh-TW", "zh", "en"],
+    country: "tw",
+    timezones: ["Asia/Taipei"],
+  },
+  {
+    id: "ru-RU",
+    label: "Русский (Россия)",
+    locale: "ru-RU",
+    languages: ["ru-RU", "ru", "en"],
+    country: "ru",
+    timezones: ["Europe/Moscow"],
+  },
+  {
+    id: "tr-TR",
+    label: "Türkçe (Türkiye)",
+    locale: "tr-TR",
+    languages: ["tr-TR", "tr", "en"],
+    country: "tr",
+    timezones: ["Europe/Istanbul"],
+  },
+];
+
+// ─────────────────────────────────────────────────────────────────────────
+// Public catalogs (for UI)
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface DeviceCatalogEntry {
+  family: DeviceFamily;
+  label: string;
+  screens: ReadonlyArray<{ width: number; height: number; label: string }>;
+}
+
+export interface LocaleCatalogEntry {
+  id: string;
+  label: string;
+  locale: string;
+  country: string;
+  timezones: ReadonlyArray<string>;
+}
+
+export function deviceCatalog(): ReadonlyArray<DeviceCatalogEntry> {
+  return DEVICES.map((d) => ({
+    family: d.family,
+    label: d.label,
+    screens: d.screens,
+  }));
+}
+
+export function localeCatalog(): ReadonlyArray<LocaleCatalogEntry> {
+  return LOCALES.map((l) => ({
+    id: l.id,
+    label: l.label,
+    locale: l.locale,
+    country: l.country,
+    timezones: l.timezones,
+  }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Generator
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a coherent fingerprint preset.
+ *
+ * If `seed` is provided, the result is deterministic — useful so existing
+ * profiles get a stable fingerprint on every read.
+ */
+export function generateFingerprint(seed?: string): FingerprintConfig {
+  const rand = seed ? seededRand(seed) : Math.random;
+  // Device family must match the host OS — claiming Windows on a Mac
+  // binary is detectable via V8/Blink/CSS-feature signatures (browserscan,
+  // FingerprintJS, DataDome all compare actual platform behaviour vs the
+  // claimed UA platform). Cross-platform spoof would require shipping a
+  // separate Chromium binary per target OS, which we don't yet do.
+  const hostFamily = hostPlatformFamily();
+  const candidates = DEVICES.filter((d) => deviceMatchesHost(d, hostFamily));
+  const device = pick(candidates.length > 0 ? candidates : DEVICES, rand);
+  const locale = pick(LOCALES, rand);
+  const screen = pick(device.screens, rand);
+  const tz = pick(locale.timezones, rand);
+  const hwc = pick(device.hardwareConcurrency, rand);
+  const mem = pick(device.deviceMemory, rand);
+
+  return assemble(device, locale, screen, tz, hwc, mem);
+}
+
+/** Returns "mac" | "windows" | "linux" for the running Node/Electron host. */
+export function hostPlatformFamily(): "mac" | "windows" | "linux" {
+  if (typeof process !== "undefined" && process.platform) {
+    if (process.platform === "darwin") return "mac";
+    if (process.platform === "win32") return "windows";
+  }
+  return "linux";
+}
+
+function deviceMatchesHost(
+  d: DeviceSpec,
+  host: ReturnType<typeof hostPlatformFamily>,
+): boolean {
+  // Device family naming convention in DEVICES is "<os>-<form>-<gpu>",
+  // e.g. "macbook-pro-14-m3", "windows-laptop-intel", "linux-desktop-intel".
+  if (host === "mac") return d.family.startsWith("macbook") || d.family.startsWith("imac");
+  if (host === "windows") return d.family.startsWith("windows");
+  return d.family.startsWith("linux");
+}
+
+/**
+ * Reconcile a fingerprint's device family to match the host OS we're
+ * running on, preserving locale + timezone where possible. Used at
+ * launch to auto-fix profiles created on a different host or with the
+ * old "any device" generator.
+ *
+ * Why: claiming Windows 11 while running a macOS Chromium binary is
+ * detectable via V8/Blink/CSS feature signatures. The only safe match
+ * for stock binaries is "device family == host family".
+ */
+export function reconcileDeviceFamilyToHost(
+  fp: FingerprintConfig,
+): FingerprintConfig {
+  const host = hostPlatformFamily();
+  const currentDevice = DEVICES.find((d) => d.family === fp.device);
+  if (currentDevice && deviceMatchesHost(currentDevice, host)) return fp;
+
+  // Pick a deterministic device for this profile so the choice is stable
+  // across launches (locale/timezone get preserved).
+  const candidates = DEVICES.filter((d) => deviceMatchesHost(d, host));
+  if (candidates.length === 0) return fp;
+  // Use UA hash as seed so the same profile always lands on the same
+  // replacement device.
+  const seed = stringHash(fp.userAgent + fp.locale);
+  const device = candidates[seed % candidates.length]!;
+
+  const screen = device.screens[0]!;
+  const locale =
+    LOCALES.find((l) => l.locale === fp.locale) ?? LOCALES[0]!;
+  const tz = locale.timezones.includes(fp.timezone)
+    ? fp.timezone
+    : locale.timezones[0]!;
+  const hwc = device.hardwareConcurrency.includes(fp.hardwareConcurrency)
+    ? fp.hardwareConcurrency
+    : device.hardwareConcurrency[0]!;
+  const mem = device.deviceMemory.includes(fp.deviceMemory)
+    ? fp.deviceMemory
+    : device.deviceMemory[0]!;
+
+  return assemble(device, locale, screen, tz, hwc, mem);
+}
+
+function stringHash(s: string): number {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
-  return h >>> 0;
+  return Math.abs(h | 0);
+}
+
+/** Backwards-compat: deterministic fingerprint for an existing profile id. */
+export function defaultFingerprint(seed: string): FingerprintConfig {
+  return generateFingerprint(seed);
+}
+
+/**
+ * Apply user overrides while preserving as much coherence as possible.
+ * If the user changes `device`, screens are constrained to that device.
+ * If the user changes `locale`, timezone is constrained to that locale.
+ */
+export function reconcileFingerprint(
+  current: FingerprintConfig,
+  patch: Partial<{
+    device: DeviceFamily;
+    localeId: string;
+    screen: { width: number; height: number };
+    timezone: string;
+    hardwareConcurrency: number;
+    deviceMemory: number;
+  }>,
+): FingerprintConfig {
+  const device =
+    DEVICES.find((d) => d.family === (patch.device ?? current.device)) ??
+    DEVICES[0]!;
+  const locale =
+    LOCALES.find((l) => l.id === patch.localeId) ??
+    LOCALES.find((l) => l.locale === current.locale) ??
+    LOCALES[0]!;
+
+  // Screen must belong to the chosen device. If the user passed a screen
+  // that doesn't fit, fall back to the device's first screen.
+  const requestedScreen = patch.screen ?? current.screen;
+  const screen =
+    device.screens.find(
+      (s) => s.width === requestedScreen.width && s.height === requestedScreen.height,
+    ) ?? device.screens[0]!;
+
+  // Timezone must belong to the locale's group.
+  const requestedTz = patch.timezone ?? current.timezone;
+  const tz = locale.timezones.includes(requestedTz)
+    ? requestedTz
+    : locale.timezones[0]!;
+
+  const hwc = patch.hardwareConcurrency ?? current.hardwareConcurrency;
+  const validHwc = device.hardwareConcurrency.includes(hwc)
+    ? hwc
+    : device.hardwareConcurrency[0]!;
+
+  const mem = patch.deviceMemory ?? current.deviceMemory;
+  const validMem = device.deviceMemory.includes(mem)
+    ? mem
+    : device.deviceMemory[0]!;
+
+  return assemble(device, locale, screen, tz, validHwc, validMem);
+}
+
+function assemble(
+  device: DeviceSpec,
+  locale: LocaleGroup,
+  screen: { width: number; height: number },
+  timezone: string,
+  hardwareConcurrency: number,
+  deviceMemory: number,
+): FingerprintConfig {
+  const userAgent = buildUserAgent(device);
+  const clientHints = buildClientHints(device);
+  const acceptLanguage = buildAcceptLanguage(locale.languages);
+
+  return {
+    device: device.family,
+    userAgent,
+    platform: device.navigatorPlatform,
+    clientHints,
+    locale: locale.locale,
+    languages: [...locale.languages],
+    acceptLanguage,
+    timezone,
+    country: locale.country,
+    screen: { width: screen.width, height: screen.height },
+    availScreen: defaultAvail(screen, device.navigatorPlatform),
+    dpr: device.dpr,
+    webgl: device.webgl,
+    hardwareConcurrency,
+    deviceMemory,
+  };
+}
+
+function buildUserAgent(device: DeviceSpec): string {
+  return `Mozilla/5.0 (${device.uaPlatformToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION_FULL} Safari/537.36`;
+}
+
+function buildClientHints(device: DeviceSpec): ClientHints {
+  // Chromium's GREASE pattern — randomised "Not?A_Brand" entry to discourage
+  // brand allowlisting. The actual GREASE token rotates per Chromium build;
+  // we use a stable one. If a detector compares to live Chrome, this is a
+  // potential mismatch — the patched-Chromium build will randomise it.
+  const grease = '"Not?A_Brand";v="99"';
+  const secChUa = `"Chromium";v="${CHROME_VERSION_MAJOR}", "Google Chrome";v="${CHROME_VERSION_MAJOR}", ${grease}`;
+  const secChUaFullVersionList = `"Chromium";v="${CHROME_VERSION_FULL}", "Google Chrome";v="${CHROME_VERSION_FULL}", ${grease}`;
+
+  return {
+    secChUa,
+    secChUaPlatform: device.secChUaPlatform,
+    secChUaPlatformVersion: device.secChUaPlatformVersion,
+    secChUaArch: device.secChUaArch,
+    secChUaBitness: device.secChUaBitness,
+    secChUaMobile: "?0",
+    secChUaModel: "",
+    secChUaFullVersionList,
+  };
+}
+
+function buildAcceptLanguage(languages: string[]): string {
+  // Chrome formats Accept-Language as `lang-region;q=0.9,lang;q=0.8`...
+  if (languages.length === 0) return "en-US";
+  const parts: string[] = [languages[0]!];
+  let q = 0.9;
+  for (let i = 1; i < languages.length; i++) {
+    parts.push(`${languages[i]};q=${q.toFixed(1)}`);
+    q -= 0.1;
+    if (q < 0.1) q = 0.1;
+  }
+  return parts.join(",");
+}
+
+function defaultAvail(
+  screen: { width: number; height: number },
+  platform: "MacIntel" | "Win32" | "Linux x86_64",
+): { width: number; height: number } {
+  // macOS dock: ~80px bottom; Win taskbar: ~40px bottom; Linux varies.
+  const bottom =
+    platform === "MacIntel" ? 80 : platform === "Win32" ? 40 : 30;
+  return { width: screen.width, height: Math.max(0, screen.height - bottom) };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Random utilities
+// ─────────────────────────────────────────────────────────────────────────
+
+function pick<T>(items: ReadonlyArray<T>, rand: () => number): T {
+  if (items.length === 0) throw new Error("pick() got empty array");
+  const idx = Math.floor(rand() * items.length);
+  return items[idx]!;
+}
+
+function seededRand(seed: string): () => number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  let state = h >>> 0;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    state = state >>> 0;
+    return state / 0xffffffff;
+  };
 }

@@ -3,7 +3,11 @@ import { Grid3x3, List, Plus } from "lucide-react";
 import type { ProfileSummary, ActivityEvent } from "../../types";
 import { Kbd } from "../atoms";
 import { ProfileTile, deriveTileState, type TileData, type TileState } from "./ProfileTile";
+import { ProfileTable } from "./ProfileTable";
+import { usePersistedState } from "../../lib/persisted";
 import { cn } from "../../lib/cn";
+
+type ViewMode = "grid" | "list";
 
 interface FilterChip {
   id: "all" | TileState;
@@ -31,11 +35,25 @@ interface Props {
   recentEvents: ActivityEvent[];
   onSelect: (id: string) => void;
   onCreate: () => void;
+  onLaunch: (id: string) => void;
+  onStop: (id: string) => void;
+  onExport: (id: string) => void;
+  onDelete: (id: string) => void;
 }
 
-export function Constellation({ profiles, recentEvents, onSelect, onCreate }: Props): JSX.Element {
+export function Constellation({
+  profiles,
+  recentEvents,
+  onSelect,
+  onCreate,
+  onLaunch,
+  onStop,
+  onExport,
+  onDelete,
+}: Props): JSX.Element {
   const [filter, setFilter] = useState<FilterChip["id"]>("all");
   const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [viewMode, setViewMode] = usePersistedState<ViewMode>("profilesView", "grid");
 
   const tileData: TileData[] = useMemo(
     () =>
@@ -87,17 +105,33 @@ export function Constellation({ profiles, recentEvents, onSelect, onCreate }: Pr
         >
           <button
             type="button"
-            className="w-7 h-6 rounded-md flex items-center justify-center text-slate-100"
-            style={{ background: "rgba(255,255,255,0.06)" }}
+            onClick={() => setViewMode("grid")}
+            className={cn(
+              "w-7 h-6 rounded-md flex items-center justify-center transition-colors",
+              viewMode === "grid"
+                ? "text-slate-100"
+                : "text-slate-500 hover:text-slate-300",
+            )}
+            style={{
+              background: viewMode === "grid" ? "rgba(255,255,255,0.06)" : undefined,
+            }}
             title="Grid view"
           >
             <Grid3x3 size={13} strokeWidth={1.5} />
           </button>
           <button
             type="button"
-            className="w-7 h-6 rounded-md flex items-center justify-center text-slate-500 cursor-not-allowed opacity-50"
-            title="List view (coming)"
-            disabled
+            onClick={() => setViewMode("list")}
+            className={cn(
+              "w-7 h-6 rounded-md flex items-center justify-center transition-colors",
+              viewMode === "list"
+                ? "text-slate-100"
+                : "text-slate-500 hover:text-slate-300",
+            )}
+            style={{
+              background: viewMode === "list" ? "rgba(255,255,255,0.06)" : undefined,
+            }}
+            title="List view"
           >
             <List size={13} strokeWidth={1.5} />
           </button>
@@ -109,7 +143,7 @@ export function Constellation({ profiles, recentEvents, onSelect, onCreate }: Pr
         >
           <Plus size={12} strokeWidth={2} />
           New profile
-          <Kbd>⌘ N</Kbd>
+          <Kbd variant="on-brand">⌘ N</Kbd>
         </button>
       </div>
 
@@ -174,12 +208,23 @@ export function Constellation({ profiles, recentEvents, onSelect, onCreate }: Pr
         )}
       </div>
 
-      {/* Grid */}
-      <div className="flex-1 overflow-auto px-6 pb-6">
+      {/* Body — grid or list. `pt-3` keeps the running/AI glow from
+          getting clipped against the top edge of the scroll container
+          (box-shadow extends ~32px outside the tile). */}
+      <div className="flex-1 overflow-auto px-6 pb-6 pt-3">
         {filtered.length === 0 ? (
           <div className="text-sm text-slate-500 py-12 text-center">
             No profiles match the current filter.
           </div>
+        ) : viewMode === "list" ? (
+          <ProfileTable
+            profiles={filtered}
+            onSelect={onSelect}
+            onLaunch={onLaunch}
+            onStop={onStop}
+            onExport={onExport}
+            onDelete={onDelete}
+          />
         ) : (
           <div
             className="grid gap-3.5"
@@ -188,7 +233,15 @@ export function Constellation({ profiles, recentEvents, onSelect, onCreate }: Pr
             }}
           >
             {filtered.map((p) => (
-              <ProfileTile key={p.id} profile={p} onClick={() => onSelect(p.id)} />
+              <ProfileTile
+                key={p.id}
+                profile={p}
+                onOpen={() => onSelect(p.id)}
+                onLaunch={() => onLaunch(p.id)}
+                onStop={() => onStop(p.id)}
+                onExport={() => onExport(p.id)}
+                onDelete={() => onDelete(p.id)}
+              />
             ))}
           </div>
         )}
