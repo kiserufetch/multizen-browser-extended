@@ -12,6 +12,15 @@ files:
   - "package.json"
   - "!**/*.map"
 
+# Native modules (better-sqlite3 has a .node C++ binding) cannot be
+# loaded from inside an asar archive — Node's require() can't dlopen
+# a file that doesn't exist on the real filesystem. Unpack them so
+# the .node files end up at .../app.asar.unpacked/ on disk. Pattern
+# covers any future native deps too.
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/better-sqlite3/**/*"
+
 # Stable artifact names — no version baked in. The GitHub Releases page
 # still surfaces the version (from package.json) in the release title,
 # but the asset URLs stay predictable:
