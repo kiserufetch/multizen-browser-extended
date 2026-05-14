@@ -1,4 +1,4 @@
-import { createServer, Socket, type AddressInfo } from "node:net";
+import { createServer, type Socket, type AddressInfo } from "node:net";
 import { connect as netConnect } from "node:net";
 import { SocksClient } from "socks";
 import type { ProfileId, ProxyConfig } from "@multizen/types";

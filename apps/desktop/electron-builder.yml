@@ -1,5 +1,8 @@
 appId: com.multizen.desktop
 productName: MultiZen
+# Pinned to the version in package.json devDependencies so electron-builder
+# does not need to introspect node_modules. Bump in sync when upgrading.
+electronVersion: 33.2.0
 directories:
   output: release
   buildResources: ../../build

@@ -98,6 +98,8 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
               <span className="text-slate-700">·</span>
               <span>Windows</span>
               <span className="text-slate-700">·</span>
+              <span>Linux</span>
+              <span className="text-slate-700">·</span>
               <span>Chromium</span>
               <span className="text-slate-700">·</span>
               <span>MCP HTTP</span>
