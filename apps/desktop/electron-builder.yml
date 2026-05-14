@@ -18,7 +18,9 @@ files:
 #   /releases/latest/download/MultiZen-mac-arm64.dmg
 #   /releases/latest/download/MultiZen-mac-x64.dmg
 #   /releases/latest/download/MultiZen-win-x64.exe
-#   /releases/latest/download/MultiZen-linux-x64.AppImage
+#   /releases/latest/download/MultiZen-linux-x86_64.AppImage
+#     (electron-builder hardcodes the x86_64 suffix on AppImage,
+#      regardless of artifactName — the landing links to that exact name)
 # This lets the landing page hardcode links that never need updating.
 mac:
   category: public.app-category.developer-tools
@@ -67,3 +69,7 @@ publish:
   provider: github
   owner: multizenteam
   repo: multizen-browser
+  # Cut a published release (not draft) directly from CI. Default is
+  # draft which means /releases/latest redirector misses it until a
+  # human un-drafts manually — we don't want that friction.
+  releaseType: release
