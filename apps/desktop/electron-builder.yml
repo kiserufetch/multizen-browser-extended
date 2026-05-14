@@ -35,13 +35,17 @@ mac:
         - x64
         - arm64
   artifactName: "${productName}-mac-${arch}.${ext}"
-  # Open-source unsigned build: skip Apple notarization (would need a $99/yr
-  # Developer ID). Users get a Gatekeeper warning on first launch and need
-  # to right-click → Open. Documented in README releasing section.
-  hardenedRuntime: true
+  # Open-source unsigned build: skip Apple notarization (would need a
+  # $99/yr Developer ID). We use ad-hoc signing (identity "-") so the
+  # binary has at least *some* signature — without it, macOS Sequoia
+  # shows the scary "is damaged" Gatekeeper dialog with no override.
+  # With ad-hoc sig the user can right-click → Open, or run
+  # `xattr -cr /Applications/MultiZen.app` to strip the quarantine bit.
+  # Both paths are documented in the release notes.
+  hardenedRuntime: false
   gatekeeperAssess: false
   notarize: false
-  identity: null
+  identity: "-"
 
 win:
   target:
