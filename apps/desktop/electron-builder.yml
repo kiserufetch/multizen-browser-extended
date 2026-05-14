@@ -11,6 +11,11 @@ files:
   - "out/**/*"
   - "package.json"
   - "!**/*.map"
+  # Workspace packages are bundled into out/main/index.js by electron-vite.
+  # Their symlinks in node_modules/@multizen/* point outside apps/desktop
+  # which electron-builder rejects ("package.json must be under apps/desktop").
+  # Excluding them is correct — they're already in the bundle.
+  - "!node_modules/@multizen/**"
 
 # Native modules (better-sqlite3 has a .node C++ binding) cannot be
 # loaded from inside an asar archive — Node's require() can't dlopen
