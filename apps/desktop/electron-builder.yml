@@ -9,12 +9,30 @@ files:
   - "package.json"
   - "!**/*.map"
 
+# Stable artifact names — no version baked in. The GitHub Releases page
+# still surfaces the version (from package.json) in the release title,
+# but the asset URLs stay predictable:
+#   /releases/latest/download/MultiZen-mac-arm64.dmg
+#   /releases/latest/download/MultiZen-mac-x64.dmg
+#   /releases/latest/download/MultiZen-win-x64.exe
+#   /releases/latest/download/MultiZen-linux-x64.AppImage
+# This lets the landing page hardcode links that never need updating.
 mac:
   category: public.app-category.developer-tools
   icon: ../../build/icon.icns
   target:
-    - dmg
-    - zip
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  artifactName: "${productName}-mac-${arch}.${ext}"
+  # Open-source unsigned build: skip Apple notarization (would need a $99/yr
+  # Developer ID). Users get a Gatekeeper warning on first launch and need
+  # to right-click → Open. Documented in README releasing section.
   hardenedRuntime: true
   gatekeeperAssess: false
   notarize: false
@@ -22,13 +40,19 @@ mac:
 
 win:
   target:
-    - nsis
+    - target: nsis
+      arch:
+        - x64
+  artifactName: "${productName}-win-${arch}.${ext}"
   icon: ../../build/icon.png
   signAndEditExecutable: false
 
 linux:
   target:
-    - AppImage
+    - target: AppImage
+      arch:
+        - x64
+  artifactName: "${productName}-linux-${arch}.${ext}"
   icon: ../../build/icons
 
 nsis:

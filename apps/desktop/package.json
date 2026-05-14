@@ -11,6 +11,10 @@
     "build": "electron-vite build && electron-builder --dir",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:win": "electron-vite build && electron-builder --win",
+    "build:linux": "electron-vite build && electron-builder --linux",
+    "build:mac:publish": "electron-vite build && electron-builder --mac --publish always",
+    "build:win:publish": "electron-vite build && electron-builder --win --publish always",
+    "build:linux:publish": "electron-vite build && electron-builder --linux --publish always",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "preview": "electron-vite preview"
   },
