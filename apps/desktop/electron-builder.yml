@@ -11,11 +11,28 @@ files:
   - "out/**/*"
   - "package.json"
   - "!**/*.map"
-  # Workspace packages are bundled into out/main/index.js by electron-vite.
-  # Their symlinks in node_modules/@multizen/* point outside apps/desktop
-  # which electron-builder rejects ("package.json must be under apps/desktop").
-  # Excluding them is correct — they're already in the bundle.
   - "!node_modules/@multizen/**"
+
+# Override package.json metadata in the packaged app. We strip the
+# @multizen/* workspace deps because electron-vite has already inlined
+# them into out/main/index.js — there's no runtime need for the
+# symlinked dirs in node_modules/@multizen/. Without this override,
+# electron-builder follows the symlinks to packages/<x>/package.json,
+# which is outside apps/desktop, and refuses to package
+# ("package.json must be under apps/desktop").
+extraMetadata:
+  dependencies:
+    "@modelcontextprotocol/sdk": "^1.0.4"
+    better-sqlite3: "^11.7.0"
+    chrome-remote-interface: "^0.33.3"
+    extract-zip: "^2.0.1"
+    framer-motion: "^12.0.0"
+    https-proxy-agent: "^9.0.0"
+    lucide-react: "^0.469.0"
+    proxy-chain: "^2.7.1"
+    socks: "^2.8.3"
+    socks-proxy-agent: "^10.0.0"
+    uuid: "^11.0.5"
 
 # Native modules (better-sqlite3 has a .node C++ binding) cannot be
 # loaded from inside an asar archive — Node's require() can't dlopen
