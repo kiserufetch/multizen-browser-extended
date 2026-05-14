@@ -404,7 +404,455 @@ const LOCALES: ReadonlyArray<LocaleGroup> = [
     country: "tr",
     timezones: ["Europe/Istanbul"],
   },
+  // ── Europe ──────────────────────────────────────────────────────────
+  {
+    id: "en-IE",
+    label: "English (Ireland)",
+    locale: "en-IE",
+    languages: ["en-IE", "en"],
+    country: "ie",
+    timezones: ["Europe/Dublin"],
+  },
+  {
+    id: "fr-LU",
+    label: "Français (Luxembourg)",
+    locale: "fr-LU",
+    languages: ["fr-LU", "fr", "de", "en"],
+    country: "lu",
+    timezones: ["Europe/Luxembourg"],
+  },
+  {
+    id: "de-LU",
+    label: "Deutsch (Luxemburg)",
+    locale: "de-LU",
+    languages: ["de-LU", "de", "fr", "en"],
+    country: "lu",
+    timezones: ["Europe/Luxembourg"],
+  },
+  {
+    id: "nl-BE",
+    label: "Nederlands (België)",
+    locale: "nl-BE",
+    languages: ["nl-BE", "nl", "fr", "en"],
+    country: "be",
+    timezones: ["Europe/Brussels"],
+  },
+  {
+    id: "fr-BE",
+    label: "Français (Belgique)",
+    locale: "fr-BE",
+    languages: ["fr-BE", "fr", "nl", "en"],
+    country: "be",
+    timezones: ["Europe/Brussels"],
+  },
+  {
+    id: "de-CH",
+    label: "Deutsch (Schweiz)",
+    locale: "de-CH",
+    languages: ["de-CH", "de", "fr", "en"],
+    country: "ch",
+    timezones: ["Europe/Zurich"],
+  },
+  {
+    id: "fr-CH",
+    label: "Français (Suisse)",
+    locale: "fr-CH",
+    languages: ["fr-CH", "fr", "de", "en"],
+    country: "ch",
+    timezones: ["Europe/Zurich"],
+  },
+  {
+    id: "it-CH",
+    label: "Italiano (Svizzera)",
+    locale: "it-CH",
+    languages: ["it-CH", "it", "de", "en"],
+    country: "ch",
+    timezones: ["Europe/Zurich"],
+  },
+  {
+    id: "de-AT",
+    label: "Deutsch (Österreich)",
+    locale: "de-AT",
+    languages: ["de-AT", "de", "en"],
+    country: "at",
+    timezones: ["Europe/Vienna"],
+  },
+  {
+    id: "pt-PT",
+    label: "Português (Portugal)",
+    locale: "pt-PT",
+    languages: ["pt-PT", "pt", "en"],
+    country: "pt",
+    timezones: ["Europe/Lisbon"],
+  },
+  {
+    id: "el-GR",
+    label: "Ελληνικά (Ελλάδα)",
+    locale: "el-GR",
+    languages: ["el-GR", "el", "en"],
+    country: "gr",
+    timezones: ["Europe/Athens"],
+  },
+  {
+    id: "pl-PL",
+    label: "Polski (Polska)",
+    locale: "pl-PL",
+    languages: ["pl-PL", "pl", "en"],
+    country: "pl",
+    timezones: ["Europe/Warsaw"],
+  },
+  {
+    id: "cs-CZ",
+    label: "Čeština (Česko)",
+    locale: "cs-CZ",
+    languages: ["cs-CZ", "cs", "en"],
+    country: "cz",
+    timezones: ["Europe/Prague"],
+  },
+  {
+    id: "sk-SK",
+    label: "Slovenčina (Slovensko)",
+    locale: "sk-SK",
+    languages: ["sk-SK", "sk", "en"],
+    country: "sk",
+    timezones: ["Europe/Bratislava"],
+  },
+  {
+    id: "hu-HU",
+    label: "Magyar (Magyarország)",
+    locale: "hu-HU",
+    languages: ["hu-HU", "hu", "en"],
+    country: "hu",
+    timezones: ["Europe/Budapest"],
+  },
+  {
+    id: "ro-RO",
+    label: "Română (România)",
+    locale: "ro-RO",
+    languages: ["ro-RO", "ro", "en"],
+    country: "ro",
+    timezones: ["Europe/Bucharest"],
+  },
+  {
+    id: "bg-BG",
+    label: "Български (България)",
+    locale: "bg-BG",
+    languages: ["bg-BG", "bg", "en"],
+    country: "bg",
+    timezones: ["Europe/Sofia"],
+  },
+  {
+    id: "hr-HR",
+    label: "Hrvatski (Hrvatska)",
+    locale: "hr-HR",
+    languages: ["hr-HR", "hr", "en"],
+    country: "hr",
+    timezones: ["Europe/Zagreb"],
+  },
+  {
+    id: "sl-SI",
+    label: "Slovenščina (Slovenija)",
+    locale: "sl-SI",
+    languages: ["sl-SI", "sl", "en"],
+    country: "si",
+    timezones: ["Europe/Ljubljana"],
+  },
+  {
+    id: "sr-RS",
+    label: "Srpski (Srbija)",
+    locale: "sr-RS",
+    languages: ["sr-RS", "sr", "en"],
+    country: "rs",
+    timezones: ["Europe/Belgrade"],
+  },
+  {
+    id: "uk-UA",
+    label: "Українська (Україна)",
+    locale: "uk-UA",
+    languages: ["uk-UA", "uk", "ru", "en"],
+    country: "ua",
+    timezones: ["Europe/Kyiv"],
+  },
+  {
+    id: "fi-FI",
+    label: "Suomi (Suomi)",
+    locale: "fi-FI",
+    languages: ["fi-FI", "fi", "sv", "en"],
+    country: "fi",
+    timezones: ["Europe/Helsinki"],
+  },
+  {
+    id: "sv-SE",
+    label: "Svenska (Sverige)",
+    locale: "sv-SE",
+    languages: ["sv-SE", "sv", "en"],
+    country: "se",
+    timezones: ["Europe/Stockholm"],
+  },
+  {
+    id: "da-DK",
+    label: "Dansk (Danmark)",
+    locale: "da-DK",
+    languages: ["da-DK", "da", "en"],
+    country: "dk",
+    timezones: ["Europe/Copenhagen"],
+  },
+  {
+    id: "nb-NO",
+    label: "Norsk bokmål (Norge)",
+    locale: "nb-NO",
+    languages: ["nb-NO", "nb", "no", "en"],
+    country: "no",
+    timezones: ["Europe/Oslo"],
+  },
+  {
+    id: "et-EE",
+    label: "Eesti (Eesti)",
+    locale: "et-EE",
+    languages: ["et-EE", "et", "en"],
+    country: "ee",
+    timezones: ["Europe/Tallinn"],
+  },
+  {
+    id: "lv-LV",
+    label: "Latviešu (Latvija)",
+    locale: "lv-LV",
+    languages: ["lv-LV", "lv", "en"],
+    country: "lv",
+    timezones: ["Europe/Riga"],
+  },
+  {
+    id: "lt-LT",
+    label: "Lietuvių (Lietuva)",
+    locale: "lt-LT",
+    languages: ["lt-LT", "lt", "en"],
+    country: "lt",
+    timezones: ["Europe/Vilnius"],
+  },
+  {
+    id: "is-IS",
+    label: "Íslenska (Ísland)",
+    locale: "is-IS",
+    languages: ["is-IS", "is", "en"],
+    country: "is",
+    timezones: ["Atlantic/Reykjavik"],
+  },
+  {
+    id: "mt-MT",
+    label: "Malti (Malta)",
+    locale: "mt-MT",
+    languages: ["mt-MT", "mt", "en"],
+    country: "mt",
+    timezones: ["Europe/Malta"],
+  },
+  // ── Middle East / Africa ───────────────────────────────────────────
+  {
+    id: "he-IL",
+    label: "עברית (ישראל)",
+    locale: "he-IL",
+    languages: ["he-IL", "he", "en"],
+    country: "il",
+    timezones: ["Asia/Jerusalem"],
+  },
+  {
+    id: "ar-AE",
+    label: "العربية (الإمارات)",
+    locale: "ar-AE",
+    languages: ["ar-AE", "ar", "en"],
+    country: "ae",
+    timezones: ["Asia/Dubai"],
+  },
+  {
+    id: "ar-SA",
+    label: "العربية (السعودية)",
+    locale: "ar-SA",
+    languages: ["ar-SA", "ar", "en"],
+    country: "sa",
+    timezones: ["Asia/Riyadh"],
+  },
+  {
+    id: "ar-EG",
+    label: "العربية (مصر)",
+    locale: "ar-EG",
+    languages: ["ar-EG", "ar", "en"],
+    country: "eg",
+    timezones: ["Africa/Cairo"],
+  },
+  {
+    id: "ar-MA",
+    label: "العربية (المغرب)",
+    locale: "ar-MA",
+    languages: ["ar-MA", "ar", "fr", "en"],
+    country: "ma",
+    timezones: ["Africa/Casablanca"],
+  },
+  {
+    id: "en-ZA",
+    label: "English (South Africa)",
+    locale: "en-ZA",
+    languages: ["en-ZA", "en"],
+    country: "za",
+    timezones: ["Africa/Johannesburg"],
+  },
+  {
+    id: "en-NG",
+    label: "English (Nigeria)",
+    locale: "en-NG",
+    languages: ["en-NG", "en"],
+    country: "ng",
+    timezones: ["Africa/Lagos"],
+  },
+  {
+    id: "en-KE",
+    label: "English (Kenya)",
+    locale: "en-KE",
+    languages: ["en-KE", "en", "sw"],
+    country: "ke",
+    timezones: ["Africa/Nairobi"],
+  },
+  // ── Asia / Pacific ─────────────────────────────────────────────────
+  {
+    id: "th-TH",
+    label: "ไทย (ประเทศไทย)",
+    locale: "th-TH",
+    languages: ["th-TH", "th", "en"],
+    country: "th",
+    timezones: ["Asia/Bangkok"],
+  },
+  {
+    id: "vi-VN",
+    label: "Tiếng Việt (Việt Nam)",
+    locale: "vi-VN",
+    languages: ["vi-VN", "vi", "en"],
+    country: "vn",
+    timezones: ["Asia/Ho_Chi_Minh"],
+  },
+  {
+    id: "id-ID",
+    label: "Bahasa Indonesia",
+    locale: "id-ID",
+    languages: ["id-ID", "id", "en"],
+    country: "id",
+    timezones: ["Asia/Jakarta"],
+  },
+  {
+    id: "ms-MY",
+    label: "Bahasa Melayu (Malaysia)",
+    locale: "ms-MY",
+    languages: ["ms-MY", "ms", "en"],
+    country: "my",
+    timezones: ["Asia/Kuala_Lumpur"],
+  },
+  {
+    id: "en-PH",
+    label: "English (Philippines)",
+    locale: "en-PH",
+    languages: ["en-PH", "en", "tl"],
+    country: "ph",
+    timezones: ["Asia/Manila"],
+  },
+  {
+    id: "en-SG",
+    label: "English (Singapore)",
+    locale: "en-SG",
+    languages: ["en-SG", "en"],
+    country: "sg",
+    timezones: ["Asia/Singapore"],
+  },
+  {
+    id: "zh-HK",
+    label: "中文 (香港)",
+    locale: "zh-HK",
+    languages: ["zh-HK", "zh", "en"],
+    country: "hk",
+    timezones: ["Asia/Hong_Kong"],
+  },
+  {
+    id: "en-NZ",
+    label: "English (New Zealand)",
+    locale: "en-NZ",
+    languages: ["en-NZ", "en"],
+    country: "nz",
+    timezones: ["Pacific/Auckland"],
+  },
+  // ── Latin America ──────────────────────────────────────────────────
+  {
+    id: "es-AR",
+    label: "Español (Argentina)",
+    locale: "es-AR",
+    languages: ["es-AR", "es", "en"],
+    country: "ar",
+    timezones: ["America/Argentina/Buenos_Aires"],
+  },
+  {
+    id: "es-CL",
+    label: "Español (Chile)",
+    locale: "es-CL",
+    languages: ["es-CL", "es", "en"],
+    country: "cl",
+    timezones: ["America/Santiago"],
+  },
+  {
+    id: "es-CO",
+    label: "Español (Colombia)",
+    locale: "es-CO",
+    languages: ["es-CO", "es", "en"],
+    country: "co",
+    timezones: ["America/Bogota"],
+  },
+  {
+    id: "es-PE",
+    label: "Español (Perú)",
+    locale: "es-PE",
+    languages: ["es-PE", "es", "en"],
+    country: "pe",
+    timezones: ["America/Lima"],
+  },
 ];
+
+/**
+ * Map an ISO 3166-1 alpha-2 country code to a locale group id, with
+ * sensible fallbacks for multilingual countries that have several locale
+ * entries (preference is the most common browser locale we'd expect to
+ * see). Returns null if no locale fits.
+ */
+export function findLocaleIdByCountry(cc: string): string | null {
+  const found = findLocaleByCountry(cc);
+  return found?.id ?? null;
+}
+
+function findLocaleByCountry(cc: string): LocaleGroup | null {
+  const lower = cc.toLowerCase();
+  // Exact preferred locale per multilingual country. The country has more
+  // than one locale entry above; this picks the dominant one.
+  const PREFERRED_BY_CC: Record<string, string> = {
+    lu: "fr-LU", // Luxembourg: French is primary administrative language
+    be: "nl-BE", // Belgium: Dutch slightly more populous than French
+    ch: "de-CH", // Switzerland: German-speaking majority
+    ca: "en-CA", // Canada: anglo majority
+    // Country with no exact locale entry but a dominant linguistic neighbour:
+    li: "de-DE", // Liechtenstein → German
+    sm: "it-IT", // San Marino → Italian
+    mc: "fr-FR", // Monaco → French
+    ad: "es-ES", // Andorra → Spanish (Catalan unrepresented in our list)
+    cy: "el-GR", // Cyprus → Greek
+    al: "en-US", // Albania has no entry; default English
+    by: "ru-RU", // Belarus → Russian
+    kz: "ru-RU", // Kazakhstan → Russian (most common online)
+    md: "ro-RO", // Moldova → Romanian
+    me: "sr-RS", // Montenegro → Serbian (close to Montenegrin)
+    mk: "sr-RS", // North Macedonia → Serbian (closest Slavic)
+    ba: "hr-HR", // Bosnia & Herzegovina → Croatian
+    xk: "sr-RS", // Kosovo → Serbian
+  };
+  const preferredId = PREFERRED_BY_CC[lower];
+  if (preferredId) {
+    const match = LOCALES.find((l) => l.id === preferredId);
+    if (match) return match;
+  }
+  // Default: first locale whose country code matches.
+  return LOCALES.find((l) => l.country === lower) ?? null;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Public catalogs (for UI)

@@ -14,7 +14,7 @@ const DEFAULT_NAME = "My first profile";
  * Step 2 asks for one thing — a name — and gives a sensible default.
  * Tags / proxy / fingerprint are NOT here: the user has been in the app
  * for 30 seconds, they don't yet have a workflow that needs taxonomy.
- * They can fill those in later from the Inspector.
+ * They can fill those in later by clicking the profile to edit.
  */
 export function FirstRun({ onCreate }: Props): JSX.Element {
   const [step, setStep] = useState<1 | 2>(1);

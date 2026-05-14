@@ -2,7 +2,16 @@ import { useEffect, useRef, useState, type JSX } from "react";
 import { createPortal } from "react-dom";
 import { MoreHorizontal, Play, Square, Zap } from "lucide-react";
 import type { ProfileSummary } from "../../types";
-import { Avatar, Flag, Pill, ccFromTimezone, profileInitials } from "../atoms";
+import {
+  Avatar,
+  Flag,
+  PlatformIcon,
+  Pill,
+  countryNameFromCc,
+  platformFromDeviceFamily,
+  platformLabel,
+  profileInitials,
+} from "../atoms";
 import { Button } from "../atoms/Button";
 import { relativeTime } from "../../lib/relativeTime";
 import { cn } from "../../lib/cn";
@@ -56,8 +65,18 @@ export function ProfileTile({
 }: Props): JSX.Element {
   const initials = profileInitials(profile.name);
   const isRunning = profile.state !== "idle";
-  const country = ccFromTimezone(profile.timezone);
-  const proxyLabel = profile.proxy ? `${profile.proxy.host}:${profile.proxy.port}` : "direct";
+  // Flag = proxy egress country only — that's what websites actually
+  // see. Direct profiles render no flag at all (the persona's timezone
+  // is irrelevant: with no proxy, the real egress is the user's host
+  // and there's no "country" to advertise).
+  const country = profile.proxy ? profile.proxyCountry : undefined;
+  // Show country name next to the flag (e.g. "Luxembourg") instead of the
+  // raw proxy host:port — the host string is opaque ("residential.byteful.com")
+  // and the country tells the user what websites actually see. Falls back
+  // to the host if the country hasn't resolved yet, then "direct" for none.
+  const proxyLabel = profile.proxy
+    ? (countryNameFromCc(country) ?? `${profile.proxy.host}:${profile.proxy.port}`)
+    : "direct";
 
   // Disable Launch/Stop during the actual transition so the user can't
   // double-click and spawn a second Chromium process.
@@ -106,7 +125,7 @@ export function ProfileTile({
         transitionDuration: "180ms",
       }}
     >
-      {/* Header — clickable, opens Inspector */}
+      {/* Header — clickable, opens the edit modal */}
       <button
         type="button"
         onClick={onOpen}
@@ -150,10 +169,21 @@ export function ProfileTile({
       {/* Context line per state */}
       <ContextLine profile={profile} />
 
-      {/* Bottom meta — last opened + proxy chip */}
+      {/* Bottom meta — last opened + platform + proxy chip */}
       <div className="flex justify-between items-center gap-2 mono text-[10px] text-slate-600 leading-tight">
-        <span className="truncate">
-          {profile.lastOpenedAt ? relativeTime(profile.lastOpenedAt) : "never opened"}
+        <span className="inline-flex items-center gap-1.5 truncate">
+          <PlatformIcon
+            platform={platformFromDeviceFamily(profile.device)}
+            size={12}
+            className="text-slate-500"
+          />
+          <span className="text-slate-500">
+            {platformLabel(platformFromDeviceFamily(profile.device))}
+          </span>
+          <span className="text-slate-700">·</span>
+          <span className="truncate">
+            {profile.lastOpenedAt ? relativeTime(profile.lastOpenedAt) : "never opened"}
+          </span>
         </span>
         <span className="inline-flex items-center gap-1.5 truncate min-w-0">
           <Flag cc={country} />

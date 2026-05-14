@@ -68,6 +68,9 @@ export interface MultizenApi {
       passphrase: string,
     ) => Promise<{ ok: true; id: ProfileId } | { ok: false; reason: string }>;
     onRunningChanged: (cb: (change: RunningStateChange) => void) => () => void;
+    onProxyCountryUpdated: (
+      cb: (update: { id: string; country: string }) => void,
+    ) => () => void;
   };
   settings: {
     get: () => Promise<AppSettings>;
@@ -93,10 +96,12 @@ export interface MultizenApi {
       current: FingerprintConfig,
       patch: FingerprintReconcilePatch,
     ) => Promise<FingerprintConfig>;
+    localeForCountry: (cc: string) => Promise<string | null>;
   };
   proxy: {
     detectGeo: (
       proxy: ProxyConfig,
+      profileId?: string,
     ) => Promise<{ ok: true; geo: ProxyGeoResult } | { ok: false; error: string }>;
   };
 }

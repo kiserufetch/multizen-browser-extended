@@ -34,19 +34,14 @@ export function ChromiumBootstrapModal(): JSX.Element | null {
         className="rounded-2xl p-6 w-full max-w-md mx-6"
         style={{
           background: "rgba(15,16,22,0.95)",
-          boxShadow:
-            "inset 0 0 0 1px rgba(255,255,255,0.10), 0 30px 80px rgba(0,0,0,0.6)",
+          boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.10), 0 30px 80px rgba(0,0,0,0.6)",
         }}
       >
         <div className="flex items-center gap-3 mb-4">
           <Cube size={36} glow={false} />
           <div>
-            <div className="text-[15px] font-bold text-slate-100">
-              {titleFor(status)}
-            </div>
-            <div className="text-[12px] text-slate-400 mt-0.5">
-              {subtitleFor(status)}
-            </div>
+            <div className="text-[15px] font-bold text-slate-100">{titleFor(status)}</div>
+            <div className="text-[12px] text-slate-400 mt-0.5">{subtitleFor(status)}</div>
           </div>
         </div>
 
@@ -61,13 +56,13 @@ function titleFor(status: ChromiumStatus): string {
     case "missing":
       return "Setting up MultiZen";
     case "fetching-manifest":
-      return "Looking up the latest Chromium";
+      return "Looking up the browser runtime";
     case "downloading":
-      return "Downloading Chromium";
+      return "Downloading browser runtime";
     case "verifying":
       return "Verifying download";
     case "extracting":
-      return "Installing Chromium";
+      return "Installing browser runtime";
     case "error":
       return "Setup failed";
     default:
@@ -78,15 +73,15 @@ function titleFor(status: ChromiumStatus): string {
 function subtitleFor(status: ChromiumStatus): string {
   switch (status.kind) {
     case "missing":
-      return "First-run download. About 280 MB.";
+      return "First-run download. About 150-550 MB.";
     case "fetching-manifest":
-      return "Asking Google Chrome for Testing for the latest stable version";
+      return "Resolving the latest compatible build";
     case "downloading":
-      return `Chrome ${status.version}`;
+      return `Runtime ${status.version}`;
     case "verifying":
       return "Checking integrity (SHA-256 + macOS code signature)";
     case "extracting":
-      return `Unpacking Chrome ${status.version}…`;
+      return `Unpacking runtime ${status.version}…`;
     case "error":
       return "We could not download the Chromium binary.";
     default:
@@ -164,14 +159,25 @@ function Body({ status }: { status: ChromiumStatus }): JSX.Element {
     return (
       <>
         <div
-          className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg mb-4"
+          className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg mb-4 min-w-0"
           style={{
             background: "rgba(239,68,68,0.06)",
             boxShadow: "inset 0 0 0 1px rgba(239,68,68,0.25)",
           }}
         >
           <AlertTriangle size={14} className="text-red-400 mt-0.5 shrink-0" />
-          <div className="mono text-[11px] text-red-300 break-words">{status.message}</div>
+          <div
+            className="mono text-[11px] text-red-300 min-w-0 flex-1 max-h-32 overflow-auto"
+            style={{
+              // overflow-wrap:anywhere breaks long file paths / URLs that
+              // have no whitespace; word-break alone (Tailwind break-words)
+              // only splits on spaces.
+              overflowWrap: "anywhere",
+              wordBreak: "break-word",
+            }}
+          >
+            {status.message}
+          </div>
         </div>
         <Button
           variant="primary"

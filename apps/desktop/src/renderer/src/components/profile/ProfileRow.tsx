@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState, type JSX } from "react";
 import { createPortal } from "react-dom";
 import { ChevronRight, MoreHorizontal, Play, Square, Zap } from "lucide-react";
-import { Avatar, Flag, Pill, ccFromTimezone, profileInitials } from "../atoms";
+import {
+  Avatar,
+  Flag,
+  PlatformIcon,
+  Pill,
+  countryNameFromCc,
+  platformFromDeviceFamily,
+  profileInitials,
+} from "../atoms";
 import { Button } from "../atoms/Button";
 import { relativeTime } from "../../lib/relativeTime";
 import { cn } from "../../lib/cn";
@@ -35,9 +43,11 @@ export function ProfileRow({
 }: Props): JSX.Element {
   const initials = profileInitials(profile.name);
   const isRunning = profile.state !== "idle";
-  const country = ccFromTimezone(profile.timezone);
+  // Flag = proxy egress country only. Direct profiles get no flag —
+  // there's no "country" without a proxy.
+  const country = profile.proxy ? profile.proxyCountry : undefined;
   const proxyLabel = profile.proxy
-    ? `${profile.proxy.host}:${profile.proxy.port}`
+    ? (countryNameFromCc(country) ?? `${profile.proxy.host}:${profile.proxy.port}`)
     : "direct";
 
   const [pending, setPending] = useState(false);
@@ -95,8 +105,13 @@ export function ProfileRow({
               className="text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
             />
           </div>
-          <div className="mono text-[10px] text-slate-600 truncate">
-            {profile.id.slice(0, 12)}
+          <div className="flex items-center gap-1.5 mono text-[10px] text-slate-600 truncate">
+            <PlatformIcon
+              platform={platformFromDeviceFamily(profile.device)}
+              size={11}
+              className="text-slate-500 flex-shrink-0"
+            />
+            <span className="truncate">{profile.id.slice(0, 12)}</span>
           </div>
         </div>
       </div>

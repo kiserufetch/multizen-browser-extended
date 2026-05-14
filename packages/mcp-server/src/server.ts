@@ -116,8 +116,9 @@ async function dispatch(
     case "launch_profile": {
       const { profile_id } = ProfileIdSchema.parse(args);
       assertProfileExists(profileManager, profile_id);
+      // ChromiumBrowserDriver.launch() handles markOpened internally so
+      // every entry-point (UI, MCP, palette) gets the same timestamp.
       const launched = await browserDriver.launch(profile_id);
-      profileManager.markOpened(profile_id);
       return launched;
     }
     case "close_profile": {

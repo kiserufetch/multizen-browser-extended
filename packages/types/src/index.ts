@@ -106,6 +106,11 @@ export interface Profile {
   createdAt: string;
   updatedAt: string;
   lastOpenedAt?: string;
+  /** ISO 3166-1 alpha-2 country code resolved from the proxy's egress IP.
+   *  Cached on every successful proxy probe (launch flow + manual ProxyTester).
+   *  Used by the GUI to render the country flag — proxy egress trumps the
+   *  fingerprint's timezone-derived country, since that's what websites see. */
+  proxyCountry?: string;
 }
 
 export interface ProfileSummary {
@@ -118,6 +123,12 @@ export interface ProfileSummary {
   proxy?: ProxyConfig;
   /** IANA timezone from the profile's fingerprint (for flag inference) */
   timezone?: string;
+  /** Country code resolved from the proxy's egress IP — preferred over
+   *  `timezone` for flag rendering when the profile has a proxy. */
+  proxyCountry?: string;
+  /** Device family from the fingerprint — drives the platform icon
+   *  (windows-laptop-intel → 🪟, macbook-pro-14-m3 → ). */
+  device?: DeviceFamily;
 }
 
 export interface CreateProfileInput {

@@ -16,6 +16,10 @@ export interface ProxyGeoResult {
   timezone: string;
   city: string;
   ip: string;
+  /** Egress IP coordinates — fed into CloakBrowser's --fingerprint-location
+   *  so navigator.geolocation reports the proxy's geo, matching the IP. */
+  latitude?: number;
+  longitude?: number;
 }
 
 /**
@@ -90,6 +94,8 @@ export async function probeProxyGeo(
     timezone: json.timezone,
     city: json.city ?? "",
     ip: json.ip ?? "",
+    latitude: typeof json.latitude === "number" ? json.latitude : undefined,
+    longitude: typeof json.longitude === "number" ? json.longitude : undefined,
   };
 }
 
@@ -99,6 +105,8 @@ interface RawIpapi {
   country_code: string;
   country_name: string;
   timezone: string;
+  latitude?: number;
+  longitude?: number;
   error?: boolean;
   reason?: string;
 }

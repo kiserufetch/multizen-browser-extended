@@ -6,6 +6,13 @@ import type { AccessibilityNode, ExtractContext } from "./types.js";
  * {@link CdpSession.bootstrapTargets} so a setup function does not have
  * to track sessionIds itself.
  */
+export interface TargetContext {
+  /** True for the root (top-level page) session, false for nested iframes. */
+  isRoot: boolean;
+  /** Target type as reported by Target.attachedToTarget — "page" | "iframe" | etc. */
+  type: "page" | "iframe";
+}
+
 export type TargetSender = <T = unknown>(
   method: string,
   params?: Record<string, unknown>,
@@ -67,20 +74,50 @@ export class CdpSession {
     if (this.client) return;
     const host = this.opts.host ?? "localhost";
     this.client = await CDP({ host, port: this.opts.port });
-    const { Page, DOM, Runtime, Accessibility, Network } = this.client;
-    await Promise.all([
-      Page.enable(),
-      DOM.enable(),
-      Runtime.enable(),
-      Accessibility.enable(),
-      Network.enable(),
-    ]);
+    const { Page } = this.client;
+    // Stealth-minimal connect. Anti-detect Chromium forks (CloakBrowser,
+    // BotBrowser, Camoufox) DCHECK on most CDP enable commands because
+    // they're automation-presence signals. We've reduced to just
+    // Page.enable (needed for navigate/lifecycle events). Runtime, DOM,
+    // Network, Accessibility are enabled on-demand inside specific
+    // methods that need them, then disabled afterwards.
+    //
+    // The big wins from this: (a) Cloudflare/DataDome can't fingerprint
+    // our CDP presence via Runtime.enable, (b) CloakBrowser doesn't
+    // SIGTRAP on connect.
+    await Page.enable();
   }
 
   async close(): Promise<void> {
     if (!this.client) return;
     await this.client.close();
     this.client = null;
+  }
+
+  /**
+   * Canonical graceful Chromium shutdown via CDP `Browser.close`. This is
+   * the macOS ⌘Q equivalent: it walks Chromium through its full quit
+   * sequence so `Default/Sessions/Tabs_*` and `Last Session` are flushed
+   * to disk before the process exits — which is what makes the next
+   * launch's "Continue where you left off" actually restore tabs.
+   *
+   * SIGINT/SIGTERM alone are not reliable: SIGTERM kills too fast (lost
+   * tabs), SIGINT works on Linux Chrome but on macOS Chromium often
+   * exits via a path that skips the session-state writer.
+   *
+   * The websocket disconnects mid-call, so we don't await — we just fire
+   * the command and rely on the caller to wait for `child.on("exit")`.
+   */
+  async closeBrowser(): Promise<void> {
+    if (!this.client) throw new Error("CDP session not connected");
+    const send = (
+      this.client as unknown as {
+        send: (m: string, p?: Record<string, unknown>) => Promise<unknown>;
+      }
+    ).send;
+    await send.call(this.client, "Browser.close").catch(() => {
+      // Connection drops as Chromium shuts down — expected.
+    });
   }
 
   /**
@@ -98,12 +135,12 @@ export class CdpSession {
    *      so we win the race against the page's first script.
    */
   async bootstrapTargets(
-    setup: (send: TargetSender) => Promise<void>,
+    setup: (send: TargetSender, ctx: TargetContext) => Promise<void>,
   ): Promise<void> {
     const client = this.require();
     const { Target } = client;
 
-    await setup(buildSender(client, undefined));
+    await setup(buildSender(client, undefined), { isRoot: true, type: "page" });
 
     // Targets that should receive the setup. "page" covers user tabs;
     // "iframe" covers OOPIFs (cross-origin iframes that live in a
@@ -121,7 +158,10 @@ export class CdpSession {
           targetId: t.targetId,
           flatten: true,
         });
-        await setup(buildSender(client, sessionId)).catch(() => {});
+        await setup(buildSender(client, sessionId), {
+          isRoot: false,
+          type: t.type as "page" | "iframe",
+        }).catch(() => {});
       }
     } catch {
       // Best-effort — root is already covered.
@@ -138,9 +178,10 @@ export class CdpSession {
         void (async () => {
           try {
             if (SETUP_TARGET_TYPES.has(params.targetInfo.type)) {
-              await setup(buildSender(client, params.sessionId)).catch(
-                () => {},
-              );
+              await setup(buildSender(client, params.sessionId), {
+                isRoot: false,
+                type: params.targetInfo.type as "page" | "iframe",
+              }).catch(() => {});
             }
           } finally {
             try {
@@ -271,7 +312,15 @@ export class CdpSession {
     });
     const { url, title } = JSON.parse(meta.result.value as string) as { url: string; title: string };
 
-    const fullTree = await Accessibility.getFullAXTree();
+    // Enable Accessibility only for the duration of this snapshot —
+    // keeping it enabled globally is a stealth-build DCHECK trigger.
+    let fullTree: { nodes: unknown[] };
+    try {
+      await Accessibility.enable();
+      fullTree = await Accessibility.getFullAXTree();
+    } finally {
+      await Accessibility.disable().catch(() => {});
+    }
     const accessibilityTree = trimAccessibilityTree(fullTree.nodes as unknown as RawAxNode[]);
 
     let textContent: string | undefined;

@@ -35,8 +35,8 @@ const EMPTY_PROXY: DraftProxy = {
 };
 
 /**
- * Inline create-profile sheet. Uses the same `<FingerprintForm />` as the
- * Inspector edit mode so create and edit are pixel-identical.
+ * Inline create-profile sheet. Shares `<FingerprintForm />` with the edit
+ * sheet so create and edit are pixel-identical.
  */
 export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): JSX.Element {
   const [name, setName] = useState("");
@@ -120,7 +120,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
   }
 
   return (
-    <div className="px-5 py-4">
+    <div className="px-5 pt-4 pb-0">
       {/* General */}
       <Group label="General">
         <div className="grid grid-cols-2 gap-2.5">
@@ -252,7 +252,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
             )}
           </Group>
 
-          {/* Fingerprint — same component as Inspector edit */}
+          {/* Fingerprint — shared component with the edit sheet */}
           <Group label="Fingerprint">
             {fingerprint ? (
               <FingerprintForm
@@ -284,8 +284,16 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
         </div>
       )}
 
-      {/* Actions */}
-      <div className="flex items-center justify-end gap-2 mt-5">
+      {/* Actions — sticky at bottom of scroll viewport so they stay visible
+          even when the form is taller than the modal. */}
+      <div
+        className="sticky bottom-0 left-0 right-0 -mx-5 mt-5 px-5 py-3 flex items-center justify-end gap-2 z-10"
+        style={{
+          background: "rgba(15,16,22,0.95)",
+          backdropFilter: "blur(8px)",
+          borderTop: "1px solid rgba(255,255,255,0.08)",
+        }}
+      >
         <button
           type="button"
           className="btn-ghost px-3 py-[7px] text-[12px] rounded-[9px]"

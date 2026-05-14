@@ -13,9 +13,15 @@ import type { ProxyConfig, ProxyGeoResult } from "../../types";
 
 interface Props {
   proxy: ProxyConfig | undefined;
+  /** When set, the resolved country code is persisted onto this profile so
+   *  the GUI flag chip updates without waiting for the next launch. */
+  profileId?: string;
+  /** Fired once the probe lands so the host (e.g. ProfileEditSheet) can
+   *  refresh its summary list and re-render the flag immediately. */
+  onProbed?: () => void;
 }
 
-export function ProxyTester({ proxy }: Props): JSX.Element | null {
+export function ProxyTester({ proxy, profileId, onProbed }: Props): JSX.Element | null {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ProxyGeoResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -28,9 +34,11 @@ export function ProxyTester({ proxy }: Props): JSX.Element | null {
     setError(null);
     setResult(null);
     try {
-      const r = await window.multizen.proxy.detectGeo(proxy);
-      if (r.ok) setResult(r.geo);
-      else setError(r.error);
+      const r = await window.multizen.proxy.detectGeo(proxy, profileId);
+      if (r.ok) {
+        setResult(r.geo);
+        onProbed?.();
+      } else setError(r.error);
     } catch (e) {
       setError((e as Error).message);
     } finally {

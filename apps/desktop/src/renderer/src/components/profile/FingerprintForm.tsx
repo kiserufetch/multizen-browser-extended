@@ -9,8 +9,8 @@ import type {
 } from "../../types";
 
 /**
- * Coherent fingerprint editor — used in both NewProfileSheet and Inspector
- * edit mode so the UX is identical in both places.
+ * Coherent fingerprint editor — shared between NewProfileSheet and
+ * ProfileEditSheet so create + edit have identical UX.
  *
  * Three coherent dropdowns (Device → Locale → Screen) that filter each other.
  * One Regen button that picks a fresh device + locale + screen combo.
@@ -74,15 +74,27 @@ export function FingerprintForm({ fingerprint, onChange, proxy }: Props): JSX.El
         return;
       }
       setDetected(result.geo);
-      // Find the locale group whose country matches the proxy IP country.
-      const match = locales.find((l) => l.country === result.geo.country);
-      if (!match) {
+      // Resolve locale for the proxy's country. Falls back to a culturally
+      // adjacent locale for countries that don't have an explicit preset
+      // (e.g. Liechtenstein → de-DE, San Marino → it-IT).
+      const localeId = await window.multizen.fingerprint.localeForCountry(
+        result.geo.country,
+      );
+      if (!localeId) {
         setDetectError(
-          `Proxy is in ${result.geo.countryName} (${result.geo.country}) — no matching locale preset.`,
+          `Proxy is in ${result.geo.countryName} (${result.geo.country}) — no locale preset matches. Pick a locale manually below.`,
         );
         return;
       }
-      // Use the detected timezone if it's in the locale's allowed list.
+      const match = locales.find((l) => l.id === localeId);
+      if (!match) {
+        setDetectError(
+          `Locale ${localeId} not in catalog. Pick one manually.`,
+        );
+        return;
+      }
+      // Use the detected timezone if it's in the locale's allowed list,
+      // otherwise the locale's primary timezone.
       const tz = match.timezones.includes(result.geo.timezone)
         ? result.geo.timezone
         : match.timezones[0];

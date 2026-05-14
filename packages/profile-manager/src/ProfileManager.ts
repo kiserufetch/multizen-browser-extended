@@ -24,6 +24,7 @@ interface ProfileRow {
   created_at: string;
   updated_at: string;
   last_opened_at: string | null;
+  proxy_country: string | null;
 }
 
 export interface ProfileManagerOptions {
@@ -60,17 +61,22 @@ export class ProfileManager {
       );
       CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
     `);
+    // Idempotent column add — existing DBs predate proxy_country.
+    const cols = this.db.prepare(`PRAGMA table_info(profiles)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "proxy_country")) {
+      this.db.exec(`ALTER TABLE profiles ADD COLUMN proxy_country TEXT`);
+    }
   }
 
   list(): ProfileSummary[] {
     const rows = this.db
       .prepare(
-        `SELECT id, name, tags, last_opened_at, proxy, fingerprint
+        `SELECT id, name, tags, last_opened_at, proxy, fingerprint, proxy_country
          FROM profiles ORDER BY updated_at DESC`,
       )
       .all() as Pick<
       ProfileRow,
-      "id" | "name" | "tags" | "last_opened_at" | "proxy" | "fingerprint"
+      "id" | "name" | "tags" | "last_opened_at" | "proxy" | "fingerprint" | "proxy_country"
     >[];
     return rows.map((r) => {
       const fingerprint = JSON.parse(r.fingerprint) as FingerprintConfig;
@@ -82,6 +88,8 @@ export class ProfileManager {
         isRunning: false,
         proxy: r.proxy ? (JSON.parse(r.proxy) as ProxyConfig) : undefined,
         timezone: fingerprint.timezone,
+        proxyCountry: r.proxy_country ?? undefined,
+        device: fingerprint.device,
       };
     });
   }
@@ -143,6 +151,10 @@ export class ProfileManager {
     if (!existing) throw new Error(`Profile ${id} not found`);
 
     const now = new Date().toISOString();
+    const proxyChanged =
+      patch.proxy !== undefined &&
+      JSON.stringify(patch.proxy ?? null) !== JSON.stringify(existing.proxy ?? null);
+
     const merged: Profile = {
       ...existing,
       name: patch.name ?? existing.name,
@@ -151,12 +163,15 @@ export class ProfileManager {
       proxy: patch.proxy === null ? undefined : (patch.proxy ?? existing.proxy),
       fingerprint: { ...existing.fingerprint, ...patch.fingerprint },
       updatedAt: now,
+      // Stale country if proxy changed — next launch / Test re-probes.
+      proxyCountry: proxyChanged ? undefined : existing.proxyCountry,
     };
 
     this.db
       .prepare(
         `UPDATE profiles SET
-           name = ?, notes = ?, tags = ?, proxy = ?, fingerprint = ?, updated_at = ?
+           name = ?, notes = ?, tags = ?, proxy = ?, fingerprint = ?, updated_at = ?,
+           proxy_country = ?
          WHERE id = ?`,
       )
       .run(
@@ -166,10 +181,18 @@ export class ProfileManager {
         merged.proxy ? JSON.stringify(merged.proxy) : null,
         JSON.stringify(merged.fingerprint),
         merged.updatedAt,
+        merged.proxyCountry ?? null,
         id,
       );
 
     return merged;
+  }
+
+  /** Persist the country code resolved from the proxy's egress IP. */
+  setProxyCountry(id: ProfileId, country: string | null): void {
+    this.db
+      .prepare(`UPDATE profiles SET proxy_country = ? WHERE id = ?`)
+      .run(country, id);
   }
 
   delete(id: ProfileId): void {
@@ -197,6 +220,7 @@ export class ProfileManager {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       lastOpenedAt: row.last_opened_at ?? undefined,
+      proxyCountry: row.proxy_country ?? undefined,
     };
   }
 }

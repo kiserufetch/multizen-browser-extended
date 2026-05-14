@@ -10,6 +10,7 @@ import {
   reconcileFingerprint,
   deviceCatalog,
   localeCatalog,
+  findLocaleIdByCountry,
 } from "@multizen/profile-manager";
 import {
   HttpTransport,
@@ -120,10 +121,12 @@ app.whenReady().then(async () => {
     profilesRoot: join(dataRoot, "profiles"),
   });
 
-  // Chromium bootstrap — checks for the patched Chromium binary, downloads
-  // it from our CDN on first run, and reports progress to the renderer.
-  // In dev (not packaged) it short-circuits to system Chrome.
-  chromiumBootstrap = new ChromiumBootstrap();
+  // Chromium bootstrap — picks the engine from user settings (CFT default,
+  // CloakBrowser opt-in for stronger anti-detect), downloads it on first
+  // run, and reports progress to the renderer.
+  chromiumBootstrap = new ChromiumBootstrap({
+    engine: cachedSettings.browserEngine,
+  });
   chromiumBootstrap.on("status", (status: ChromiumStatus) => {
     mainWindow?.webContents.send("chromium:status", status);
   });
@@ -149,6 +152,13 @@ app.whenReady().then(async () => {
   browserDriver.on("running-changed", (change) => {
     mainWindow?.webContents.send("profiles:running-changed", change);
   });
+
+  // Background-probe proxies for profiles missing a cached country code
+  // (existing rows from before the proxy_country migration, or rows where
+  // the user changed proxy and we cleared the stale value). Runs once at
+  // startup so the GUI flag chip reflects the proxy egress without forcing
+  // the user to click "Test proxy" or relaunch.
+  void backfillProxyCountries();
 
   // Optional embedded HTTP+SSE transport so external Cursor/Claude can connect
   if (cachedSettings.mcpHttpEnabled) {
@@ -201,6 +211,9 @@ app.whenReady().then(async () => {
   ipcMain.handle("fingerprint:generate", () => generateFingerprint());
   ipcMain.handle("fingerprint:devices", () => deviceCatalog());
   ipcMain.handle("fingerprint:locales", () => localeCatalog());
+  ipcMain.handle("fingerprint:localeForCountry", (_e, cc: string) =>
+    findLocaleIdByCountry(cc),
+  );
   ipcMain.handle(
     "fingerprint:reconcile",
     (
@@ -218,9 +231,16 @@ app.whenReady().then(async () => {
     async (
       _e,
       proxy: ProxyConfig,
+      profileId?: string,
     ): Promise<{ ok: true; geo: ProxyGeoResult } | { ok: false; error: string }> => {
       try {
         const geo = await probeProxyGeo(proxy);
+        // Persist the resolved country onto the profile (if one was given)
+        // so the GUI flag chip can render it without waiting for next
+        // launch. Lower-cased for the flag-icons CSS class.
+        if (profileId && geo.country) {
+          profileManager.setProxyCountry(profileId, geo.country.toLowerCase());
+        }
         return { ok: true, geo };
       } catch (e) {
         return { ok: false, error: (e as Error).message };
@@ -297,6 +317,34 @@ app.whenReady().then(async () => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+/**
+ * Probe geo for every profile that has a proxy but no cached country code
+ * yet. Each probe takes ~1-3s; we run them sequentially so we don't hammer
+ * the same upstream proxy with parallel requests, and emit a renderer
+ * event after each one so the flag chip updates as soon as the result
+ * lands. Failures are non-fatal — the next launch will re-probe.
+ */
+async function backfillProxyCountries(): Promise<void> {
+  if (!profileManager) return;
+  const profiles = profileManager.list();
+  for (const summary of profiles) {
+    if (!summary.proxy || summary.proxyCountry) continue;
+    try {
+      const geo = await probeProxyGeo(summary.proxy, { timeoutMs: 6000 });
+      if (geo.country) {
+        profileManager.setProxyCountry(summary.id, geo.country.toLowerCase());
+        // Nudge the renderer so it refetches the list and re-renders flags.
+        mainWindow?.webContents.send("profiles:proxy-country-updated", {
+          id: summary.id,
+          country: geo.country.toLowerCase(),
+        });
+      }
+    } catch {
+      // Proxy down / probe service rate-limited — skip silently.
+    }
+  }
+}
 
 app.on("before-quit", async (e) => {
   e.preventDefault();

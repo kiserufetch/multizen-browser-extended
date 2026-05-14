@@ -78,6 +78,16 @@ const api = {
       ipcRenderer.on("profiles:running-changed", listener);
       return () => ipcRenderer.off("profiles:running-changed", listener);
     },
+    onProxyCountryUpdated: (
+      cb: (update: { id: string; country: string }) => void,
+    ): (() => void) => {
+      const listener = (
+        _: unknown,
+        update: { id: string; country: string },
+      ): void => cb(update);
+      ipcRenderer.on("profiles:proxy-country-updated", listener);
+      return () => ipcRenderer.off("profiles:proxy-country-updated", listener);
+    },
   },
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke("settings:get"),
@@ -116,12 +126,15 @@ const api = {
       patch: FingerprintReconcilePatch,
     ): Promise<FingerprintConfig> =>
       ipcRenderer.invoke("fingerprint:reconcile", current, patch),
+    localeForCountry: (cc: string): Promise<string | null> =>
+      ipcRenderer.invoke("fingerprint:localeForCountry", cc),
   },
   proxy: {
     detectGeo: (
       proxy: ProxyConfig,
+      profileId?: string,
     ): Promise<{ ok: true; geo: ProxyGeoResult } | { ok: false; error: string }> =>
-      ipcRenderer.invoke("proxy:detectGeo", proxy),
+      ipcRenderer.invoke("proxy:detectGeo", proxy, profileId),
   },
 };
 

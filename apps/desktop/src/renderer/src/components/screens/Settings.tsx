@@ -1,5 +1,5 @@
 import { useEffect, useState, type JSX, type ReactNode } from "react";
-import { Boxes, Check, Copy, Sparkles, Zap } from "lucide-react";
+import { Boxes, Check, Chrome, Copy, Sparkles, Zap } from "lucide-react";
 import { Pill } from "../atoms";
 import type { AppSettings, SystemInfo } from "../../types";
 
@@ -44,7 +44,8 @@ export function Settings({ onImport }: Props): JSX.Element {
       <div className="max-w-[720px] mx-auto">
         <div className="text-lg font-bold tracking-tight text-slate-100 mb-1.5">Settings</div>
         <div className="text-[13px] text-slate-500 mb-5">
-          MCP server, archives, build info. Configuration is local — MultiZen does not call any external API on your behalf.
+          MCP server, archives, build info. Configuration is local — MultiZen does not call any
+          external API on your behalf.
         </div>
 
         <Row
@@ -67,7 +68,9 @@ export function Settings({ onImport }: Props): JSX.Element {
                   boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.06)",
                 }}
               >
-                <span className="flex-1 mono text-[12px] text-slate-300 truncate">{info.mcpHttpUrl}</span>
+                <span className="flex-1 mono text-[12px] text-slate-300 truncate">
+                  {info.mcpHttpUrl}
+                </span>
                 <button
                   type="button"
                   onClick={copyMcpUrl}
@@ -92,12 +95,50 @@ export function Settings({ onImport }: Props): JSX.Element {
         </Row>
 
         <Row
+          icon={<Chrome size={16} strokeWidth={1.5} />}
+          title="Browser engine"
+          desc="Applied on next app launch."
+        >
+          <div className="grid gap-2 sm:grid-cols-2">
+            {engineOptions.map((option) => {
+              const selected = settings.browserEngine === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => void patch({ browserEngine: option.value })}
+                  className="text-left p-3 rounded-lg transition-colors"
+                  style={{
+                    boxShadow: selected
+                      ? "inset 0 0 0 1px rgba(168,85,247,0.45)"
+                      : "inset 0 0 0 1px rgba(255,255,255,0.07)",
+                    background: selected ? "rgba(168,85,247,0.08)" : "rgba(255,255,255,0.025)",
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[13px] font-medium text-slate-100">{option.label}</span>
+                    {selected && <Pill kind="running">active</Pill>}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                    {option.description}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </Row>
+
+        <Row
           icon={<Boxes size={16} strokeWidth={1.5} />}
           title="Archives"
           desc=".mzar files are encrypted bundles of profiles — cookies, login state, fingerprints, notes — protected with a passphrase you set at export time."
         >
           <div className="flex gap-2">
-            <button type="button" className="btn-secondary px-3 py-[7px] text-[12px] rounded-[9px]" onClick={onImport}>
+            <button
+              type="button"
+              className="btn-secondary px-3 py-[7px] text-[12px] rounded-[9px]"
+              onClick={onImport}
+            >
               Import .mzar archive
             </button>
             <a
@@ -111,19 +152,33 @@ export function Settings({ onImport }: Props): JSX.Element {
           </div>
         </Row>
 
-        <Row
-          icon={<Sparkles size={16} strokeWidth={1.5} />}
-          title="About"
-          desc=""
-        >
+        <Row icon={<Sparkles size={16} strokeWidth={1.5} />} title="About" desc="">
           <div className="mono text-[12px] text-slate-400 leading-relaxed">
-            MultiZen v{info?.appVersion ?? "0.0.0"} · {info?.platform ?? "—"} · Electron {electronVersion()}
+            MultiZen v{info?.appVersion ?? "0.0.0"} · {info?.platform ?? "—"} · Electron{" "}
+            {electronVersion()}
           </div>
         </Row>
       </div>
     </div>
   );
 }
+
+const engineOptions: Array<{
+  value: AppSettings["browserEngine"];
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "cloakbrowser",
+    label: "CloakBrowser",
+    description: "Source-patched Chromium from CloakHQ releases. Primary runtime.",
+  },
+  {
+    value: "cft",
+    label: "Chrome for Testing",
+    description: "Compatibility fallback using Google's official automation build.",
+  },
+];
 
 function electronVersion(): string {
   // Vite injects nothing useful here; just use a stable string for now.
@@ -164,7 +219,11 @@ function Row({
       </div>
       <div className="flex-1">
         <div className="text-[13px] font-semibold text-slate-100">{title}</div>
-        {desc && <div className="text-[12px] text-slate-500 mt-1 leading-relaxed max-w-[480px]">{desc}</div>}
+        {desc && (
+          <div className="text-[12px] text-slate-500 mt-1 leading-relaxed max-w-[480px]">
+            {desc}
+          </div>
+        )}
         {children && <div className="mt-2.5">{children}</div>}
       </div>
     </div>

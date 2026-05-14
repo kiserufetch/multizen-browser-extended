@@ -3,8 +3,9 @@ import { TopBar } from "./components/screens/TopBar";
 import { LeftRail, type Section } from "./components/screens/LeftRail";
 import { Constellation } from "./components/profile/Constellation";
 import { ProfilesEmptyState } from "./components/profile/EmptyState";
-import { Inspector } from "./components/profile/Inspector";
 import { NewProfileSheet } from "./components/profile/NewProfileSheet";
+import { ProfileEditSheet } from "./components/profile/ProfileEditSheet";
+import type { Profile } from "@multizen/types";
 import { ActivityDrawer } from "./components/activity/ActivityDrawer";
 import { ActivityPage } from "./components/activity/ActivityPage";
 import { Settings } from "./components/screens/Settings";
@@ -31,12 +32,23 @@ export function App(): JSX.Element {
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [info, setInfo] = useState<SystemInfo | null>(null);
+  // Last-interacted profile id — only used by the command palette's
+  // "Export" action, which exports whichever profile the user most
+  // recently opened in the edit modal.
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  async function openEditFor(id: string): Promise<void> {
+    setSelectedId(id);
+    const p = await window.multizen.profiles.get(id);
+    if (p) setEditingProfile(p);
+  }
   const [showOnboarding, setShowOnboarding] = useState(
     () => !readPersisted<boolean>("onboarded", false),
   );
   const [showSheet, setShowSheet] = useState(false);
   const [sheetDirty, setSheetDirty] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
+  const [editDirty, setEditDirty] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [modal, setModal] = useState<ModalState>({ kind: "none" });
   const [toast, setToast] = useState<string | null>(null);
@@ -81,9 +93,16 @@ export function App(): JSX.Element {
       void refresh();
     });
 
+    // Background proxy-country backfill emits this as each probe lands —
+    // refresh so the flag chip updates without the user touching anything.
+    const offProxyCountry = window.multizen.profiles.onProxyCountryUpdated(() => {
+      void refresh();
+    });
+
     return () => {
       offEvents();
       offRunning();
+      offProxyCountry();
     };
   }, [refresh]);
 
@@ -122,19 +141,12 @@ export function App(): JSX.Element {
         setSection("settings");
         return;
       }
-      if (e.key === "Escape") {
-        // Sheet has its own ESC handling via <Modal> (with dirty-form
-        // confirm). Don't intercept here.
-        if (showSheet) return;
-        if (selectedId) {
-          setSelectedId(null);
-          return;
-        }
-      }
+      // ESC: <Modal> handles its own ESC (with dirty-form confirm); no
+      // other UI listens for ESC at the app level.
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showSheet, selectedId]);
+  }, [showSheet]);
 
   function showToast(msg: string): void {
     setToast(msg);
@@ -147,10 +159,9 @@ export function App(): JSX.Element {
   }
 
   async function onboardCreate(name: string, tags: string[]): Promise<void> {
-    const created = await window.multizen.profiles.create({ name, tags });
+    await window.multizen.profiles.create({ name, tags });
     dismissOnboarding();
     await refresh();
-    setSelectedId(created.id);
   }
 
   async function launchProfile(id: string): Promise<void> {
@@ -175,7 +186,6 @@ export function App(): JSX.Element {
       return;
     }
     await refresh();
-    setSelectedId(result.id);
   }
 
   async function exportProfile(profileId: string, passphrase: string): Promise<void> {
@@ -207,7 +217,7 @@ export function App(): JSX.Element {
         void launchProfile(a.profileId);
         break;
       case "open":
-        setSelectedId(a.profileId);
+        void openEditFor(a.profileId);
         break;
       case "create":
         setShowSheet(true);
@@ -227,26 +237,7 @@ export function App(): JSX.Element {
     }
   }
 
-  // Compute AI activity for selected profile
-  const aiActivityForSelected = (() => {
-    if (!selectedId) return undefined;
-    const recent = events
-      .slice()
-      .reverse()
-      .find(
-        (e) =>
-          e.profileId === selectedId &&
-          e.tool !== "list_profiles" &&
-          e.tool !== "launch_profile" &&
-          e.tool !== "close_profile",
-      );
-    if (!recent) return undefined;
-    if (Date.now() - new Date(recent.timestamp).getTime() > 30_000) return undefined;
-    return { tool: recent.tool, whenIso: recent.timestamp };
-  })();
-
   const runningCount = profiles.filter((p) => p.isRunning).length;
-  const selected = selectedId ? profiles.find((p) => p.id === selectedId) : undefined;
 
   if (showOnboarding && window.multizen) {
     return <FirstRun onCreate={onboardCreate} />;
@@ -309,7 +300,6 @@ export function App(): JSX.Element {
                     if (autoLaunch) {
                       await launchProfile(id);
                     }
-                    setSelectedId(id);
                   }}
                 />
               </Modal>
@@ -319,7 +309,7 @@ export function App(): JSX.Element {
                 <Constellation
                   profiles={profiles}
                   recentEvents={events}
-                  onSelect={setSelectedId}
+                  onSelect={openEditFor}
                   onCreate={() => setShowSheet(true)}
                   onLaunch={launchProfile}
                   onStop={closeProfile}
@@ -335,20 +325,44 @@ export function App(): JSX.Element {
           {section === "settings" && <Settings onImport={() => setModal({ kind: "import-passphrase" })} />}
         </div>
 
-        {selected && (
-          <Inspector
-            profileId={selected.id}
-            isRunning={selected.isRunning}
-            aiActivity={aiActivityForSelected}
-            onClose={() => setSelectedId(null)}
-            onLaunch={() => void launchProfile(selected.id)}
-            onStop={() => void closeProfile(selected.id)}
-            onExport={() => setModal({ kind: "export-passphrase", profileId: selected.id })}
-            onDelete={() => setModal({ kind: "delete-confirm", profileId: selected.id })}
-            onChange={refresh}
+      </div>
+
+      {/* Edit profile — same Modal experience as Create */}
+      <Modal
+        open={editingProfile !== null}
+        title={editingProfile ? `Edit ${editingProfile.name}` : "Edit profile"}
+        subtitle="Changes apply on the next profile launch."
+        width={620}
+        onClose={() => {
+          setEditingProfile(null);
+          setEditDirty(false);
+        }}
+        confirmClose={async () => {
+          if (!editDirty) return true;
+          return confirm({
+            title: "Discard your changes?",
+            body: "Edits to this profile haven't been saved yet.",
+            confirmLabel: "Discard",
+            destructive: true,
+          });
+        }}
+      >
+        {editingProfile && (
+          <ProfileEditSheet
+            profile={editingProfile}
+            onCancel={() => {
+              setEditingProfile(null);
+              setEditDirty(false);
+            }}
+            onDirtyChange={setEditDirty}
+            onSaved={async () => {
+              setEditingProfile(null);
+              setEditDirty(false);
+              await refresh();
+            }}
           />
         )}
-      </div>
+      </Modal>
 
       {section !== "activity" && (
         <ActivityDrawer

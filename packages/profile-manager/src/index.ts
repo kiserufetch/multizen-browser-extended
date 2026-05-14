@@ -7,6 +7,7 @@ export {
   hostPlatformFamily,
   deviceCatalog,
   localeCatalog,
+  findLocaleIdByCountry,
   CHROME_VERSION_FULL,
   CHROME_VERSION_MAJOR,
   type DeviceCatalogEntry,
