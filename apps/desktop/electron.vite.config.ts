@@ -42,6 +42,11 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, "src/renderer"),
+    // file:// URLs in packaged Electron need relative asset paths.
+    // Default base "/" resolves /logo.png to filesystem root and 404s
+    // the bundled image. Switching to "./" produces ./logo.png which
+    // Vite + Electron resolve correctly in both dev and production.
+    base: "./",
     plugins: [react(), tailwindcss()],
     build: {
       rollupOptions: {

@@ -49,3 +49,8 @@ vendor/multizen-private/
 
 !.gitkeep
 .claude/
+
+# Internal strategy / planning docs — never committed
+docs/
+notes/
+INTERNAL_*.md

@@ -1,4 +1,10 @@
 import type { JSX } from "react";
+// Import as URL so Vite/electron-vite rewrite the path correctly in
+// production builds. Hardcoding "/logo.png" worked in dev (Vite's dev
+// server serves public/ at /) but 404'd in the packaged Electron
+// app — the renderer loads via file://, and / there resolves to the
+// filesystem root.
+import logoUrl from "/logo.png?url";
 
 interface Props {
   size?: number;
@@ -13,7 +19,7 @@ interface Props {
 export function Cube({ size = 28, glow = true, className }: Props): JSX.Element {
   return (
     <img
-      src="/logo.png"
+      src={logoUrl}
       alt="MultiZen"
       width={size}
       height={size}
