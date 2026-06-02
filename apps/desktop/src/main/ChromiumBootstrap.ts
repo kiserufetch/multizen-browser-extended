@@ -236,7 +236,22 @@ export class ChromiumBootstrap extends EventEmitter {
       const tmpExtract = `${versionDir}.partial`;
       await rm(tmpExtract, { recursive: true, force: true });
       await mkdir(tmpExtract, { recursive: true });
-      await extractArchive(zipPath, tmpExtract);
+      try {
+        await extractArchive(zipPath, tmpExtract);
+      } catch (e) {
+        // Corrupt or truncated archive (e.g. "ZIP bad CRC"). Scrub both
+        // partial artifacts so the next launch re-downloads from scratch
+        // instead of choking on the same bad file. Re-throw with a
+        // user-actionable message.
+        await rm(zipPath, { force: true });
+        await rm(tmpExtract, { recursive: true, force: true });
+        throw new Error(
+          `Failed to extract the browser archive — the download was likely ` +
+            `corrupted or truncated. It has been cleared; please retry. If it ` +
+            `keeps failing, add MultiZen to your antivirus exclusions or switch ` +
+            `the engine to Chrome for Testing in Settings. (${(e as Error).message})`,
+        );
+      }
       await rm(zipPath, { force: true });
 
       const binaryPath = await this.locateBinary(tmpExtract);
@@ -394,6 +409,22 @@ export class ChromiumBootstrap extends EventEmitter {
 
     const out = createWriteStream(outPath);
     await pipeline(reader, out);
+
+    // Truncation guard. fetch + pipeline can resolve "successfully" with
+    // a partial file if the connection drops, a proxy/antivirus closes
+    // the socket, or the CDN hiccups mid-transfer on the ~280MB binary.
+    // A truncated archive then fails extraction with "ZIP bad CRC" on
+    // every entry. Catch it here so the caller deletes the partial and
+    // the user gets a clean retry instead of a corrupt-extract error.
+    if (total > 0 && received !== total) {
+      await rm(outPath, { force: true });
+      throw new Error(
+        `Download truncated: received ${received} of ${total} bytes for ` +
+          `${manifest.url}. This is usually a network interruption or ` +
+          `antivirus/proxy closing the connection. Retry, or add MultiZen ` +
+          `to your antivirus exclusions.`,
+      );
+    }
 
     this.setStatus({
       kind: "downloading",
