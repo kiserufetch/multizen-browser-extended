@@ -2,7 +2,7 @@ import { app } from "electron";
 import { EventEmitter } from "node:events";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createWriteStream, existsSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -214,21 +214,16 @@ export class ChromiumBootstrap extends EventEmitter {
       const archiveExt = /\.tar\.gz$|\.tgz$/i.test(manifest.url) ? "tar.gz" : "zip";
       const zipPath = join(this.cacheDir, `${manifest.version}.${archiveExt}.partial`);
 
+      // download() now owns the full integrity story: resumable transfer,
+      // truncation detection, SHA-256 verification against the engine's
+      // published checksum (when one exists), and automatic retries. It
+      // only returns once the file on disk is byte-complete and — for
+      // CloakBrowser, which publishes SHA256SUMS — checksum-verified.
+      // CFT has no canonical published hash, so there the SHA is computed
+      // for record-keeping only and we rely on HTTPS + (macOS) codesign.
       const sha256 = await this.download(manifest, zipPath);
-      if (manifest.sha256 && sha256 !== manifest.sha256) {
-        await rm(zipPath, { force: true });
-        throw new Error(
-          `SHA-256 mismatch for Chromium download: expected ${manifest.sha256}, got ${sha256}`,
-        );
-      }
 
       this.setStatus({ kind: "verifying", version: manifest.version });
-      // SHA-256 is computed during download. We store it for future
-      // tamper detection, but Google's CFT JSON doesn't publish a
-      // canonical hash so we can't compare against an authoritative
-      // source. We trust HTTPS + (on macOS) verify code-signing below.
-      // Future hardening: cross-check against `cosign verify` if Google
-      // starts publishing a Sigstore attestation.
 
       this.setStatus({ kind: "extracting", version: manifest.version });
       // Extract into a sibling tmp dir, then atomically rename so a
@@ -373,28 +368,133 @@ export class ChromiumBootstrap extends EventEmitter {
     return { version: channel.version, url: dl.url };
   }
 
+  /**
+   * Download the archive to `outPath`, returning its SHA-256.
+   *
+   * The Chromium archives are large (CloakBrowser's Windows zip is
+   * ~560 MB) and our users are global — many on flaky international links
+   * to GitHub's CDN where a single straight-through GET reliably truncates
+   * partway, producing a corrupt zip that explodes at extraction with
+   * "ZIP bad CRC" on every entry. A plain "delete and ask the user to
+   * retry" just loops forever on such links.
+   *
+   * So this is a real downloader:
+   *   - Resumable. The CDN advertises `Accept-Ranges: bytes`, so on a
+   *     dropped/truncated transfer we resume from the byte we reached via
+   *     a `Range` request instead of re-pulling the whole file. A 560 MB
+   *     download that dies at 95% only needs the last 28 MB next try.
+   *   - Self-verifying. CloakBrowser publishes SHA256SUMS, so once the
+   *     file is byte-complete we hash it from disk and compare. A mismatch
+   *     means the bytes were mangled in transit (HTTPS-inspecting proxy,
+   *     antivirus rewriting the stream) — resuming can't fix wrong bytes,
+   *     so we scrub and re-pull from scratch on the next attempt.
+   *   - Bounded-retry. Up to MAX_ATTEMPTS with backoff before giving up
+   *     with an actionable message (switch engine / change network).
+   */
   private async download(manifest: BrowserDownloadManifest, outPath: string): Promise<string> {
+    const MAX_ATTEMPTS = 5;
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        // attempt 1 always starts clean (also scrubs any stale .partial
+        // left by an older build / previous failed run). attempts 2+
+        // resume whatever bytes survived on disk.
+        const sha = await this.downloadAttempt(manifest, outPath, /* allowResume */ attempt > 1);
+
+        if (manifest.sha256 && sha !== manifest.sha256) {
+          // Byte-complete but wrong content. Resuming would just append to
+          // already-corrupt bytes, so nuke the file and force a fresh full
+          // pull on the next attempt.
+          await rm(outPath, { force: true });
+          throw new Error(
+            `checksum mismatch (got ${sha.slice(0, 12)}…, expected ${manifest.sha256.slice(0, 12)}…) — ` +
+              `the download was altered in transit, likely by an antivirus or proxy`,
+          );
+        }
+        return sha;
+      } catch (e) {
+        lastError = e as Error;
+        if (attempt < MAX_ATTEMPTS) {
+          // Linear backoff: 2s, 4s, 6s, 8s. Enough to ride out a brief
+          // network blip without making the user stare at a frozen screen.
+          await new Promise((r) => setTimeout(r, attempt * 2000));
+        }
+      }
+    }
+
+    await rm(outPath, { force: true });
+    throw new Error(
+      `Could not download a complete, valid Chromium archive after ${MAX_ATTEMPTS} attempts. ` +
+        `Last error: ${lastError?.message ?? "unknown"}. Your network — or an antivirus / ` +
+        `corporate proxy inspecting HTTPS — is likely corrupting the large download. Try a ` +
+        `different network, add MultiZen to your antivirus exclusions, or switch the engine to ` +
+        `"Chrome for Testing" in Settings.`,
+    );
+  }
+
+  /**
+   * A single download pass. Resumes from the on-disk byte count when
+   * `allowResume` is set and a partial file exists; otherwise starts
+   * fresh. Returns the SHA-256 of the completed file (hashed from disk so
+   * resume across attempts can't desync an incremental hash). Throws if
+   * the transfer ends short of the advertised total.
+   */
+  private async downloadAttempt(
+    manifest: BrowserDownloadManifest,
+    outPath: string,
+    allowResume: boolean,
+  ): Promise<string> {
+    let have = 0;
+    if (allowResume && existsSync(outPath)) {
+      have = (await stat(outPath)).size;
+    } else {
+      await rm(outPath, { force: true });
+    }
+
     this.setStatus({
       kind: "downloading",
       version: manifest.version,
-      bytesReceived: 0,
+      bytesReceived: have,
       bytesTotal: 0,
     });
 
-    const res = await fetch(manifest.url);
-    if (!res.ok || !res.body) {
+    const headers: Record<string, string> = {};
+    if (have > 0) headers["Range"] = `bytes=${have}-`;
+
+    const res = await fetch(manifest.url, { headers });
+    if (!res.body) {
+      throw new Error(`empty response body fetching ${manifest.url} (HTTP ${res.status})`);
+    }
+
+    // Resolve the authoritative total size and the write mode.
+    //   206 Partial Content → server honored Range; Content-Range carries
+    //        the full size as "bytes start-end/total"; append to the file.
+    //   200 OK with have>0  → server ignored Range; restart from scratch.
+    //   200 OK with have==0 → normal full download.
+    let total = 0;
+    let append = false;
+    if (res.status === 206) {
+      const cr = res.headers.get("content-range");
+      const m = cr ? /\/(\d+)\s*$/.exec(cr) : null;
+      total = m ? Number(m[1]) : have + (Number(res.headers.get("content-length")) || 0);
+      append = true;
+    } else if (res.ok) {
+      total = Number(res.headers.get("content-length")) || 0;
+      if (have > 0) {
+        // Range was not honored — discard the partial and start over.
+        have = 0;
+        await rm(outPath, { force: true });
+      }
+    } else {
       throw new Error(`HTTP ${res.status} fetching ${manifest.url}`);
     }
-    const total = Number(res.headers.get("content-length")) || 0;
 
-    const sha = createHash("sha256");
-    let received = 0;
+    let received = have;
     let lastEmit = 0;
-
     const reader = Readable.fromWeb(res.body as never) as Readable;
     reader.on("data", (chunk: Buffer) => {
       received += chunk.length;
-      sha.update(chunk);
       const now = Date.now();
       if (now - lastEmit > 100) {
         lastEmit = now;
@@ -407,33 +507,29 @@ export class ChromiumBootstrap extends EventEmitter {
       }
     });
 
-    const out = createWriteStream(outPath);
+    const out = createWriteStream(outPath, { flags: append ? "a" : "w" });
     await pipeline(reader, out);
 
-    // Truncation guard. fetch + pipeline can resolve "successfully" with
-    // a partial file if the connection drops, a proxy/antivirus closes
-    // the socket, or the CDN hiccups mid-transfer on the ~280MB binary.
-    // A truncated archive then fails extraction with "ZIP bad CRC" on
-    // every entry. Catch it here so the caller deletes the partial and
-    // the user gets a clean retry instead of a corrupt-extract error.
-    if (total > 0 && received !== total) {
-      await rm(outPath, { force: true });
+    // Truncation guard. fetch + pipeline can resolve "successfully" with a
+    // short file if the connection drops or a proxy/antivirus closes the
+    // socket mid-transfer. Leave the partial on disk and throw — the
+    // retry loop will resume it rather than re-pull from zero.
+    const finalSize = (await stat(outPath)).size;
+    if (total > 0 && finalSize !== total) {
       throw new Error(
-        `Download truncated: received ${received} of ${total} bytes for ` +
-          `${manifest.url}. This is usually a network interruption or ` +
-          `antivirus/proxy closing the connection. Retry, or add MultiZen ` +
-          `to your antivirus exclusions.`,
+        `download truncated: ${finalSize} of ${total} bytes (network interruption or ` +
+          `antivirus/proxy closing the connection)`,
       );
     }
 
     this.setStatus({
       kind: "downloading",
       version: manifest.version,
-      bytesReceived: received,
-      bytesTotal: total || received,
+      bytesReceived: finalSize,
+      bytesTotal: total || finalSize,
     });
 
-    return sha.digest("hex");
+    return sha256File(outPath);
   }
 
   /**
@@ -648,6 +744,20 @@ async function fetchCloakBrowserSha256(sumsUrl: string, assetName: string): Prom
     }
   }
   throw new Error(`CloakBrowser SHA256SUMS has no checksum for ${assetName}`);
+}
+
+/**
+ * Stream a file through SHA-256 and return the lowercase hex digest.
+ * Hashing from disk (rather than incrementally during transfer) keeps the
+ * digest correct across resumed/restarted download attempts — the file on
+ * disk is the single source of truth.
+ */
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk as Buffer);
+  }
+  return hash.digest("hex");
 }
 
 /**
