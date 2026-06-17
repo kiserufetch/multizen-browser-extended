@@ -34,6 +34,12 @@ interface RunningProcess {
 export interface ChromiumBrowserDriverOptions {
   profileManager: ProfileManager;
   chromiumBootstrap: ChromiumBootstrap;
+  /**
+   * Called when the companion extension's "Add to MultiZen" button is clicked
+   * inside a running profile. `profileId` is the profile that made the call
+   * (the CDP session is profile-scoped). The host installs the extension.
+   */
+  onCompanionInstall?: (profileId: ProfileId, extensionId: string) => void;
 }
 
 export type RunningStateChange =
@@ -59,11 +65,13 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private nextPort = 9222;
   private readonly profileManager: ProfileManager;
   private readonly bootstrap: ChromiumBootstrap;
+  private readonly onCompanionInstall?: (profileId: ProfileId, extensionId: string) => void;
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     super();
     this.profileManager = opts.profileManager;
     this.bootstrap = opts.chromiumBootstrap;
+    this.onCompanionInstall = opts.onCompanionInstall;
   }
 
   override on<K extends keyof DriverEvents>(event: K, listener: DriverEvents[K]): this {
@@ -417,6 +425,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         : buildFingerprintPreloadScript(fp, { includeWebGl: true });
     await session
       .bootstrapTargets(async (send, ctx) => {
+        // 0. Companion channel: expose `window.__multizenAddExtension(payload)`
+        //    on every page so the injected "Add to MultiZen" button can hand
+        //    the chosen extension ID back to the host. Harmless on iframes.
+        await send("Runtime.addBinding", { name: "__multizenAddExtension" }).catch(() => {});
         // 1. WebRTC kill-switch / spoof when proxy is on.
         //    CloakBrowser handles WebRTC natively (webrtcScript is null).
         if (useProxy && webrtcScript) {
@@ -550,6 +562,20 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       .catch((e: unknown) => {
         console.error("[multizen] CDP bootstrap failed:", e);
       });
+
+    // Wire the companion's "Add to MultiZen" channel for this profile. The
+    // CDP session is profile-scoped, so any binding call belongs to this
+    // profileId — no cross-profile ambiguity even with several running.
+    if (this.onCompanionInstall) {
+      session.onBinding("__multizenAddExtension", (payload) => {
+        try {
+          const parsed = JSON.parse(payload) as { id?: string };
+          if (parsed.id) this.onCompanionInstall?.(profileId, parsed.id);
+        } catch {
+          // ignore malformed payloads
+        }
+      });
+    }
 
     // Watch for "no more page targets" via CDP. On macOS Chrome stays alive
     // after the last window closes (standard Mac app lifecycle) — the spawned
