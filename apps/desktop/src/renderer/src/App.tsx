@@ -13,9 +13,10 @@ import { Confirm, Prompt } from "./components/screens/Confirm";
 import { CommandPalette, type CommandAction } from "./components/palette/CommandPalette";
 import { FirstRun } from "./components/onboarding/FirstRun";
 import { ChromiumBootstrapModal } from "./components/onboarding/ChromiumBootstrapModal";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { Modal, ConfirmHost, confirm } from "./components/atoms";
 import { readPersisted, usePersistedState, writePersisted } from "./lib/persisted";
-import type { ActivityEvent, ProfileSummary, SystemInfo } from "./types";
+import type { ActivityEvent, ChromiumStatus, ProfileSummary, SystemInfo } from "./types";
 
 type ModalState =
   | { kind: "none" }
@@ -32,6 +33,16 @@ export function App(): JSX.Element {
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [info, setInfo] = useState<SystemInfo | null>(null);
+  // Whether the Chromium runtime is ready — used to suppress the update banner
+  // while the blocking first-run bootstrap modal is up, so they don't compete.
+  const [chromiumReady, setChromiumReady] = useState(false);
+  useEffect(() => {
+    if (!window.multizen) return;
+    const apply = (s: ChromiumStatus): void =>
+      setChromiumReady(s.kind === "ready" || s.kind === "dev-system");
+    void window.multizen.chromium.status().then(apply);
+    return window.multizen.chromium.onStatus(apply);
+  }, []);
   // Last-interacted profile id — only used by the command palette's
   // "Export" action, which exports whichever profile the user most
   // recently opened in the edit modal.
@@ -252,6 +263,8 @@ export function App(): JSX.Element {
         onCmdK={() => setPaletteOpen(true)}
         onSettings={() => setSection("settings")}
       />
+
+      <UpdateBanner suppressed={!chromiumReady} />
 
       <div className="flex-1 flex min-h-0">
         <LeftRail active={section} onChange={setSection} onCmdK={() => setPaletteOpen(true)} />
