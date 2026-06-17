@@ -9,6 +9,7 @@ import type {
   LaunchedProfile,
   ChromiumStatus,
   DeviceFamily,
+  UpdateStatus,
 } from "@multizen/types";
 
 export interface DeviceCatalogEntry {
@@ -88,6 +89,14 @@ export interface MultizenApi {
     retry: () => Promise<ChromiumStatus>;
     onStatus: (cb: (s: ChromiumStatus) => void) => () => void;
   };
+  update: {
+    status: () => Promise<UpdateStatus>;
+    lastChecked: () => Promise<number>;
+    check: () => Promise<UpdateStatus>;
+    install: () => Promise<void>;
+    download: (version: string) => Promise<void>;
+    onStatus: (cb: (s: UpdateStatus) => void) => () => void;
+  };
   fingerprint: {
     generate: () => Promise<FingerprintConfig>;
     devices: () => Promise<ReadonlyArray<DeviceCatalogEntry>>;
@@ -122,4 +131,5 @@ export type {
   LaunchedProfile,
   ChromiumStatus,
   DeviceFamily,
+  UpdateStatus,
 };
