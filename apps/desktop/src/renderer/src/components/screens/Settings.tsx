@@ -1,7 +1,8 @@
 import { useEffect, useState, type JSX, type ReactNode } from "react";
-import { Boxes, Check, Chrome, Copy, Sparkles, Zap } from "lucide-react";
+import { Boxes, Check, Chrome, Copy, DownloadCloud, RefreshCw, Sparkles, Zap } from "lucide-react";
 import { Pill } from "../atoms";
-import type { AppSettings, SystemInfo } from "../../types";
+import { relativeTime } from "../../lib/relativeTime";
+import type { AppSettings, SystemInfo, UpdateStatus } from "../../types";
 
 interface Props {
   onImport: () => void;
@@ -11,17 +12,27 @@ export function Settings({ onImport }: Props): JSX.Element {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [copied, setCopied] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [lastChecked, setLastChecked] = useState<number>(0);
 
   useEffect(() => {
     if (!window.multizen) return;
     void window.multizen.settings.get().then(setSettings);
     void window.multizen.system.info().then(setInfo);
+    void window.multizen.update.status().then(setUpdateStatus);
+    void window.multizen.update.lastChecked().then(setLastChecked);
+    return window.multizen.update.onStatus(setUpdateStatus);
   }, []);
 
   async function patch(p: Partial<AppSettings>): Promise<void> {
     if (!settings) return;
     const next = await window.multizen.settings.update(p);
     setSettings(next);
+  }
+
+  async function checkForUpdates(): Promise<void> {
+    await window.multizen.update.check();
+    setLastChecked(await window.multizen.update.lastChecked());
   }
 
   function copyMcpUrl(): void {
@@ -152,6 +163,44 @@ export function Settings({ onImport }: Props): JSX.Element {
           </div>
         </Row>
 
+        <Row
+          icon={<DownloadCloud size={16} strokeWidth={1.5} />}
+          title="Updates"
+          desc={
+            info?.platform === "darwin"
+              ? "Auto-install isn't available on macOS yet — we'll notify you in-app to download the new version."
+              : "MultiZen checks for updates in the background and installs them on restart."
+          }
+        >
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <button
+              type="button"
+              className="btn-secondary px-3 py-[7px] text-[12px] rounded-[9px] inline-flex items-center gap-1.5"
+              onClick={() => void checkForUpdates()}
+              disabled={updateStatus?.kind === "checking"}
+            >
+              <RefreshCw
+                size={12}
+                className={updateStatus?.kind === "checking" ? "animate-spin" : ""}
+              />
+              Check for updates
+            </button>
+            <span className="text-[12px] text-slate-400">{updateLabel(updateStatus)}</span>
+          </div>
+          <div className="text-[11px] text-slate-600 mt-2">
+            Last checked: {lastChecked ? relativeTime(new Date(lastChecked).toISOString()) : "never"}
+          </div>
+          <label className="flex items-center gap-2.5 mt-3 text-[12px] text-slate-400 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.autoUpdate}
+              onChange={(e) => void patch({ autoUpdate: e.target.checked })}
+              className="w-3.5 h-3.5 rounded accent-purple-500"
+            />
+            Automatically check for updates
+          </label>
+        </Row>
+
         <Row icon={<Sparkles size={16} strokeWidth={1.5} />} title="About" desc="">
           <div className="mono text-[12px] text-slate-400 leading-relaxed">
             MultiZen v{info?.appVersion ?? "0.0.0"} · {info?.platform ?? "—"} · Electron{" "}
@@ -183,6 +232,25 @@ const engineOptions: Array<{
 function electronVersion(): string {
   // Vite injects nothing useful here; just use a stable string for now.
   return "33";
+}
+
+function updateLabel(status: UpdateStatus | null): string {
+  switch (status?.kind) {
+    case "checking":
+      return "Checking…";
+    case "up-to-date":
+      return "You're on the latest version";
+    case "available":
+      return `v${status.version} available`;
+    case "downloading":
+      return `Downloading v${status.version}… ${status.percent}%`;
+    case "ready":
+      return `v${status.version} ready — restart to update`;
+    case "error":
+      return `Check failed: ${status.message}`;
+    default:
+      return "";
+  }
 }
 
 function Row({
