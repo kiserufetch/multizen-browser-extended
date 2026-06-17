@@ -200,22 +200,75 @@ export class CdpSession {
   }
 
   /**
-   * Listen for a JS binding (registered per target via
-   * `Runtime.addBinding`) being called from a page. `cb` receives the raw
-   * string payload the page passed to `window[name](payload)`. Fires for any
-   * target in this session — which is exactly one profile, so the caller
-   * already knows which profile the call came from.
+   * Arm a JS binding (`window[bindingName](payload)`) ONLY on targets whose URL
+   * contains `urlIncludes`, and invoke `onPayload` when the page calls it.
+   *
+   * Scoped on purpose: `Runtime.enable` (required for `bindingCalled`) is a
+   * CDP-automation tell, so we must not enable it on the user's normal browsing.
+   * We enable it + add the binding only when a target navigates to the matching
+   * URL (e.g. the Chrome Web Store, where the companion injects "Add to
+   * MultiZen"). Re-checks on navigation, not just initial attach, so opening the
+   * store in an existing tab still arms it.
    */
-  onBinding(name: string, cb: (payload: string) => void): void {
+  async watchUrlForBinding(opts: {
+    urlIncludes: string;
+    bindingName: string;
+    onPayload: (payload: string) => void;
+  }): Promise<void> {
     const client = this.require();
-    client.on(
-      "Runtime.bindingCalled",
-      (params: { name?: string; payload?: string }) => {
-        if (params?.name === name && typeof params.payload === "string") {
-          cb(params.payload);
+    const { Target } = client;
+    const armed = new Set<string>();
+
+    client.on("Runtime.bindingCalled", (p: { name?: string; payload?: string }) => {
+      if (p?.name === opts.bindingName && typeof p.payload === "string") {
+        opts.onPayload(p.payload);
+      }
+    });
+
+    const arm = async (sessionId: string): Promise<void> => {
+      if (armed.has(sessionId)) return;
+      armed.add(sessionId);
+      try {
+        await client.send("Runtime.enable", undefined, sessionId);
+        await client.send("Runtime.addBinding", { name: opts.bindingName }, sessionId);
+      } catch {
+        armed.delete(sessionId); // allow a retry on the next navigation event
+      }
+    };
+
+    const maybeArm = async (
+      targetInfo: { targetId: string; url?: string },
+      sessionId?: string,
+    ): Promise<void> => {
+      if (!targetInfo.url?.includes(opts.urlIncludes)) return;
+      let sid = sessionId;
+      if (!sid) {
+        try {
+          sid = (await Target.attachToTarget({ targetId: targetInfo.targetId, flatten: true }))
+            .sessionId;
+        } catch {
+          return;
         }
+      }
+      await arm(sid);
+    };
+
+    await Target.setDiscoverTargets({ discover: true });
+    client.on("Target.targetInfoChanged", (p: { targetInfo: { targetId: string; url?: string } }) => {
+      void maybeArm(p.targetInfo);
+    });
+    client.on(
+      "Target.attachedToTarget",
+      (p: { sessionId: string; targetInfo: { targetId: string; url?: string } }) => {
+        void maybeArm(p.targetInfo, p.sessionId);
       },
     );
+    try {
+      const { targetInfos } = await Target.getTargets();
+      for (const t of targetInfos) await maybeArm(t);
+    } catch {
+      // best-effort
+    }
   }
 
   private require(): CDP.Client {

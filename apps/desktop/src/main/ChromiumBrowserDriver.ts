@@ -425,10 +425,6 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         : buildFingerprintPreloadScript(fp, { includeWebGl: true });
     await session
       .bootstrapTargets(async (send, ctx) => {
-        // 0. Companion channel: expose `window.__multizenAddExtension(payload)`
-        //    on every page so the injected "Add to MultiZen" button can hand
-        //    the chosen extension ID back to the host. Harmless on iframes.
-        await send("Runtime.addBinding", { name: "__multizenAddExtension" }).catch(() => {});
         // 1. WebRTC kill-switch / spoof when proxy is on.
         //    CloakBrowser handles WebRTC natively (webrtcScript is null).
         if (useProxy && webrtcScript) {
@@ -563,17 +559,22 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         console.error("[multizen] CDP bootstrap failed:", e);
       });
 
-    // Wire the companion's "Add to MultiZen" channel for this profile. The
-    // CDP session is profile-scoped, so any binding call belongs to this
-    // profileId — no cross-profile ambiguity even with several running.
+    // Wire the companion's "Add to MultiZen" channel for this profile — but only
+    // on Web Store pages (Runtime.enable is a CDP tell, so we keep it off the
+    // user's normal browsing). The CDP session is profile-scoped, so any binding
+    // call belongs to this profileId — no cross-profile ambiguity.
     if (this.onCompanionInstall) {
-      session.onBinding("__multizenAddExtension", (payload) => {
-        try {
-          const parsed = JSON.parse(payload) as { id?: string };
-          if (parsed.id) this.onCompanionInstall?.(profileId, parsed.id);
-        } catch {
-          // ignore malformed payloads
-        }
+      void session.watchUrlForBinding({
+        urlIncludes: "chromewebstore.google.com",
+        bindingName: "__multizenAddExtension",
+        onPayload: (payload) => {
+          try {
+            const parsed = JSON.parse(payload) as { id?: string };
+            if (parsed.id) this.onCompanionInstall?.(profileId, parsed.id);
+          } catch {
+            // ignore malformed payloads
+          }
+        },
       });
     }
 
