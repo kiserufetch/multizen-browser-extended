@@ -1,12 +1,10 @@
-import { app } from "electron";
+import { app, net } from "electron";
 import { EventEmitter } from "node:events";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import extract from "extract-zip";
 
@@ -379,15 +377,23 @@ export class ChromiumBootstrap extends EventEmitter {
    * retry" just loops forever on such links.
    *
    * So this is a real downloader:
+   *   - Chromium network stack. The transfer goes through Electron's `net`
+   *     module, not Node's `fetch`/undici. On networks where an
+   *     HTTPS-inspecting antivirus or proxy silently rewrites bytes inside
+   *     Node's TLS sessions (length-preserving corruption that fails our
+   *     SHA-256 check), the very same file downloads cleanly in the user's
+   *     Chromium-based browser. `net` uses that identical stack, so it
+   *     inherits the browser's TLS/HTTP behaviour and the AV's allow-listing
+   *     of Chromium traffic — the difference between a working download and
+   *     an endlessly-corrupted one for these users.
    *   - Resumable. The CDN advertises `Accept-Ranges: bytes`, so on a
    *     dropped/truncated transfer we resume from the byte we reached via
    *     a `Range` request instead of re-pulling the whole file. A 560 MB
    *     download that dies at 95% only needs the last 28 MB next try.
    *   - Self-verifying. CloakBrowser publishes SHA256SUMS, so once the
    *     file is byte-complete we hash it from disk and compare. A mismatch
-   *     means the bytes were mangled in transit (HTTPS-inspecting proxy,
-   *     antivirus rewriting the stream) — resuming can't fix wrong bytes,
-   *     so we scrub and re-pull from scratch on the next attempt.
+   *     means the bytes were mangled in transit — resuming can't fix wrong
+   *     bytes, so we scrub and re-pull from scratch on the next attempt.
    *   - Bounded-retry. Up to MAX_ATTEMPTS with backoff before giving up
    *     with an actionable message (switch engine / change network).
    */
@@ -434,11 +440,12 @@ export class ChromiumBootstrap extends EventEmitter {
   }
 
   /**
-   * A single download pass. Resumes from the on-disk byte count when
-   * `allowResume` is set and a partial file exists; otherwise starts
-   * fresh. Returns the SHA-256 of the completed file (hashed from disk so
-   * resume across attempts can't desync an incremental hash). Throws if
-   * the transfer ends short of the advertised total.
+   * A single download pass over Electron's `net` (Chromium network stack).
+   * Resumes from the on-disk byte count when `allowResume` is set and a
+   * partial file exists; otherwise starts fresh. Returns the SHA-256 of the
+   * completed file (hashed from disk so resume across attempts can't desync
+   * an incremental hash). Throws if the transfer ends short of the
+   * advertised total.
    */
   private async downloadAttempt(
     manifest: BrowserDownloadManifest,
@@ -459,61 +466,105 @@ export class ChromiumBootstrap extends EventEmitter {
       bytesTotal: 0,
     });
 
-    const headers: Record<string, string> = {};
-    if (have > 0) headers["Range"] = `bytes=${have}-`;
+    const total = await new Promise<number>((resolve, reject) => {
+      // Destroyed-on-failure so a late TLS reset / write error can't leak the
+      // fd or flush a stray buffered chunk to outPath after we've rejected
+      // (which would race the next attempt's stat()/rm() and desync resume).
+      let out: ReturnType<typeof createWriteStream> | null = null;
+      const fail = (err: Error): void => {
+        if (out) {
+          out.destroy();
+          out = null;
+        }
+        reject(err);
+      };
 
-    const res = await fetch(manifest.url, { headers });
-    if (!res.body) {
-      throw new Error(`empty response body fetching ${manifest.url} (HTTP ${res.status})`);
-    }
+      // `net.request` follows redirects (GitHub → release-assets CDN) by
+      // default and runs on Chromium's stack — see download()'s rationale.
+      const request = net.request({ method: "GET", url: manifest.url, redirect: "follow" });
+      if (have > 0) request.setHeader("Range", `bytes=${have}-`);
 
-    // Resolve the authoritative total size and the write mode.
-    //   206 Partial Content → server honored Range; Content-Range carries
-    //        the full size as "bytes start-end/total"; append to the file.
-    //   200 OK with have>0  → server ignored Range; restart from scratch.
-    //   200 OK with have==0 → normal full download.
-    let total = 0;
-    let append = false;
-    if (res.status === 206) {
-      const cr = res.headers.get("content-range");
-      const m = cr ? /\/(\d+)\s*$/.exec(cr) : null;
-      total = m ? Number(m[1]) : have + (Number(res.headers.get("content-length")) || 0);
-      append = true;
-    } else if (res.ok) {
-      total = Number(res.headers.get("content-length")) || 0;
-      if (have > 0) {
-        // Range was not honored — discard the partial and start over.
-        have = 0;
-        await rm(outPath, { force: true });
-      }
-    } else {
-      throw new Error(`HTTP ${res.status} fetching ${manifest.url}`);
-    }
+      request.on("error", fail);
+      request.on("response", (response) => {
+        const status = response.statusCode;
+        const header = (name: string): string => {
+          const v = response.headers[name];
+          return Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
+        };
 
-    let received = have;
-    let lastEmit = 0;
-    const reader = Readable.fromWeb(res.body as never) as Readable;
-    reader.on("data", (chunk: Buffer) => {
-      received += chunk.length;
-      const now = Date.now();
-      if (now - lastEmit > 100) {
-        lastEmit = now;
-        this.setStatus({
-          kind: "downloading",
-          version: manifest.version,
-          bytesReceived: received,
-          bytesTotal: total,
+        // Resolve the authoritative total size and the write mode.
+        //   206 Partial Content → server honored Range; Content-Range
+        //        carries the full size as "bytes start-end/total"; append.
+        //   2xx with have>0     → server ignored Range; restart from zero.
+        //   2xx with have==0    → normal full download.
+        let total = 0;
+        let append = false;
+        let received = have;
+        if (status === 206) {
+          const cr = header("content-range");
+          const m = /\/(\d+)\s*$/.exec(cr);
+          total = m ? Number(m[1]) : have + (Number(header("content-length")) || 0);
+          append = true;
+        } else if (status === 416) {
+          // Range Not Satisfiable — we already hold the whole file (or more)
+          // on disk. Don't re-download; let the size + SHA checks below
+          // decide whether what we have is valid or needs a fresh pull.
+          response.on("data", () => {});
+          response.on("end", () => resolve(have));
+          return;
+        } else if (status >= 200 && status < 300) {
+          total = Number(header("content-length")) || 0;
+          if (have > 0) received = 0; // Range ignored → overwrite ("w").
+        } else {
+          response.on("data", () => {}); // drain so the socket can close
+          fail(new Error(`HTTP ${status} fetching ${manifest.url}`));
+          return;
+        }
+
+        const stream = createWriteStream(outPath, { flags: append ? "a" : "w" });
+        out = stream;
+        stream.on("error", fail);
+
+        // Electron's net IncomingMessage extends Readable at runtime, but its
+        // public typings only declare the EventEmitter surface. Reach for
+        // pause/resume through a narrow guarded cast so we can apply real
+        // backpressure (and degrade gracefully if a future version drops it).
+        const flow = response as unknown as { pause?: () => void; resume?: () => void };
+
+        let lastEmit = 0;
+        response.on("data", (chunk: Buffer) => {
+          received += chunk.length;
+          const now = Date.now();
+          if (now - lastEmit > 100) {
+            lastEmit = now;
+            this.setStatus({
+              kind: "downloading",
+              version: manifest.version,
+              bytesReceived: received,
+              bytesTotal: total,
+            });
+          }
+          // Manual backpressure: pause the response while the disk catches up.
+          if (!stream.write(chunk) && flow.pause && flow.resume) {
+            flow.pause();
+            stream.once("drain", () => flow.resume!());
+          }
         });
-      }
+        response.on("error", fail);
+        response.on("end", () => {
+          // Hand off ownership: a late request-level 'error' must not destroy
+          // a stream we're already finalizing.
+          out = null;
+          stream.end(() => resolve(total));
+        });
+      });
+      request.end();
     });
 
-    const out = createWriteStream(outPath, { flags: append ? "a" : "w" });
-    await pipeline(reader, out);
-
-    // Truncation guard. fetch + pipeline can resolve "successfully" with a
-    // short file if the connection drops or a proxy/antivirus closes the
-    // socket mid-transfer. Leave the partial on disk and throw — the
-    // retry loop will resume it rather than re-pull from zero.
+    // Truncation guard. The transfer can end "successfully" with a short
+    // file if the connection drops or a proxy/antivirus closes the socket
+    // mid-stream. Leave the partial on disk and throw — the retry loop will
+    // resume it rather than re-pull from zero.
     const finalSize = (await stat(outPath)).size;
     if (total > 0 && finalSize !== total) {
       throw new Error(
