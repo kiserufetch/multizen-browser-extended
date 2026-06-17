@@ -23,6 +23,12 @@ export interface AppSettings {
   mcpHttpPort: number;
   /** Which Chromium binary to download + run. Switching requires app restart. */
   browserEngine: BrowserEngine;
+  /**
+   * Automatically check for + (on Windows/Linux) download app updates in the
+   * background. On macOS the app can only notify, not auto-install. Manual
+   * "Check for updates" works regardless of this flag.
+   */
+  autoUpdate: boolean;
 }
 
 const DEFAULTS: AppSettings = {
@@ -32,6 +38,7 @@ const DEFAULTS: AppSettings = {
   // Prefer CloakBrowser as the primary runtime. Chrome for Testing stays
   // available as a compatibility fallback from Settings.
   browserEngine: "cloakbrowser",
+  autoUpdate: true,
 };
 
 export class SettingsStore {
@@ -59,6 +66,9 @@ export class SettingsStore {
     const merged: AppSettings = { ...DEFAULTS, ...raw };
     if (merged.browserEngine !== "cft" && merged.browserEngine !== "cloakbrowser") {
       merged.browserEngine = DEFAULTS.browserEngine;
+    }
+    if (typeof merged.autoUpdate !== "boolean") {
+      merged.autoUpdate = DEFAULTS.autoUpdate;
     }
     this.cache = merged;
     return merged;
