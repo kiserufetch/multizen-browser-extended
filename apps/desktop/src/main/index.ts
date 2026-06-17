@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from "electron";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
@@ -19,9 +19,10 @@ import {
   type ActivityLog,
 } from "@multizen/mcp-server";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
-import type { ChromiumStatus, ProxyConfig } from "@multizen/types";
+import type { ChromiumStatus, ProxyConfig, UpdateStatus } from "@multizen/types";
 import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
 import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
+import { UpdaterService } from "./UpdaterService.ts";
 import { probeProxyGeo, type ProxyGeoResult } from "./proxyGeo.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -53,6 +54,7 @@ let mainWindow: BrowserWindow | null = null;
 let profileManager: ProfileManager;
 let browserDriver: ChromiumBrowserDriver;
 let chromiumBootstrap: ChromiumBootstrap;
+let updater: UpdaterService;
 let activityLog: ActivityLog;
 let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
@@ -136,6 +138,14 @@ app.whenReady().then(async () => {
     process.stderr.write(`Chromium bootstrap failed: ${String(e)}\n`);
   });
 
+  // App self-update (electron-updater). No-op in dev / non-packaged. Reads
+  // settings live so the autoUpdate toggle takes effect without restart.
+  updater = new UpdaterService({ getSettings: () => cachedSettings as AppSettings });
+  updater.on("status", (status: UpdateStatus) => {
+    mainWindow?.webContents.send("update:status", status);
+  });
+  updater.init();
+
   browserDriver = new ChromiumBrowserDriver({ profileManager, chromiumBootstrap });
 
   const mcp = createMultizenMcpServer({ profileManager, browserDriver });
@@ -196,6 +206,8 @@ app.whenReady().then(async () => {
   ipcMain.handle("settings:get", () => settingsStore.load());
   ipcMain.handle("settings:update", async (_e, patch: Partial<AppSettings>) => {
     cachedSettings = await settingsStore.update(patch);
+    // Let the updater react to an autoUpdate toggle without an app restart.
+    updater?.onSettingsChanged();
     return cachedSettings;
   });
 
@@ -205,6 +217,15 @@ app.whenReady().then(async () => {
   // Chromium bootstrap IPC
   ipcMain.handle("chromium:status", () => chromiumBootstrap.getStatus());
   ipcMain.handle("chromium:retry", () => chromiumBootstrap.ensure());
+
+  // App self-update IPC
+  ipcMain.handle("update:status", () => updater.getStatus());
+  ipcMain.handle("update:lastChecked", () => updater.getLastCheckedAt());
+  ipcMain.handle("update:check", () => updater.checkForUpdates({ manual: true }));
+  ipcMain.handle("update:install", () => updater.installAndRestart());
+  ipcMain.handle("update:download", (_e, version: string) =>
+    shell.openExternal(updater.downloadUrlFor(version)),
+  );
 
   // Fingerprint generator IPC — called from create + edit forms when the
   // user hits Regen. Returns a fresh, internally-consistent preset.
