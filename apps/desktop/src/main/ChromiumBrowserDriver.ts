@@ -325,7 +325,12 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     const companion = companionDir();
     if (companion) extensionDirs.push(companion);
     for (const ext of profile.extensions ?? []) {
-      if (ext.enabled) extensionDirs.push(join(profile.dataDir, ext.dir));
+      if (!ext.enabled) continue;
+      const dir = join(profile.dataDir, ext.dir);
+      // Skip a missing dir: a single bad path makes Chromium drop the ENTIRE
+      // --load-extension list (the companion too), silently disabling all
+      // extensions for the launch.
+      if (existsSync(dir)) extensionDirs.push(dir);
     }
     if (extensionDirs.length > 0) {
       const joined = extensionDirs.join(",");

@@ -38,13 +38,15 @@ export async function unpackToProfile(input: UnpackInput): Promise<ExtensionConf
     const info = await stat(source);
     if (info.isDirectory()) {
       await cp(source, staging, { recursive: true });
-    } else if (/\.crx$/i.test(source)) {
+    } else {
+      // A file: detect CRX by its Cr24 magic, NOT the extension — a CRX saved
+      // as .zip or with no extension still unpacks. crxToZip returns the source
+      // path unchanged when it isn't a CRX, so plain .zip works too. (We do not
+      // verify the CRX signature: trust rests on HTTPS to Google / the user
+      // providing the file — acceptable for a user-initiated install.)
       const zipPath = await crxToZip(source, staging);
       await extract(zipPath, { dir: staging });
-      await rm(zipPath, { force: true });
-    } else {
-      // Treat anything else as a zip (covers .zip and store-downloaded blobs).
-      await extract(source, { dir: staging });
+      if (zipPath !== source) await rm(zipPath, { force: true });
     }
 
     // The manifest is usually at the root, but some archives wrap everything in
@@ -66,6 +68,11 @@ export async function unpackToProfile(input: UnpackInput): Promise<ExtensionConf
       );
     }
 
+    // Size cap. NOTE: this runs after extraction, so it rejects honestly-large
+    // bundles but does not pre-empt a decompression bomb (small archive → huge
+    // tree). The install is user-initiated (upload or explicit Web Store add),
+    // not remote-attacker-driven, so the residual risk is the user filling
+    // their own disk; a streamed entry-size pre-check is a follow-up.
     const size = await dirSize(root);
     if (size > MAX_UNPACKED_BYTES) {
       throw new Error(

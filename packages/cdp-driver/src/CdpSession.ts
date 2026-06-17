@@ -217,7 +217,10 @@ export class CdpSession {
   }): Promise<void> {
     const client = this.require();
     const { Target } = client;
-    const armed = new Set<string>();
+    // targetId → sessionId for targets we've enabled Runtime + the binding on.
+    // Keyed by targetId (NOT sessionId) so SPA navigation events don't cause
+    // repeat attaches / repeat Runtime.enable.
+    const armed = new Map<string, string>();
 
     client.on("Runtime.bindingCalled", (p: { name?: string; payload?: string }) => {
       if (p?.name === opts.bindingName && typeof p.payload === "string") {
@@ -225,47 +228,72 @@ export class CdpSession {
       }
     });
 
-    const arm = async (sessionId: string): Promise<void> => {
-      if (armed.has(sessionId)) return;
-      armed.add(sessionId);
+    const arm = async (targetId: string, sessionId: string): Promise<void> => {
+      if (armed.has(targetId)) return;
+      armed.set(targetId, sessionId);
       try {
         await client.send("Runtime.enable", undefined, sessionId);
         await client.send("Runtime.addBinding", { name: opts.bindingName }, sessionId);
       } catch {
-        armed.delete(sessionId); // allow a retry on the next navigation event
+        armed.delete(targetId); // retry allowed on a later event
       }
     };
 
-    const maybeArm = async (
-      targetInfo: { targetId: string; url?: string },
+    // When a target navigates AWAY from the matching URL, turn Runtime back
+    // OFF so a tab reused for normal browsing after a store visit doesn't keep
+    // the CDP automation tell.
+    const disarm = async (targetId: string): Promise<void> => {
+      const sessionId = armed.get(targetId);
+      if (!sessionId) return;
+      armed.delete(targetId);
+      try {
+        await client.send("Runtime.disable", undefined, sessionId);
+      } catch {
+        // session may already be gone
+      }
+    };
+
+    const evaluate = async (
+      targetInfo: { targetId: string; type?: string; url?: string },
       sessionId?: string,
     ): Promise<void> => {
-      if (!targetInfo.url?.includes(opts.urlIncludes)) return;
-      let sid = sessionId;
-      if (!sid) {
-        try {
-          sid = (await Target.attachToTarget({ targetId: targetInfo.targetId, flatten: true }))
-            .sessionId;
-        } catch {
-          return;
+      const matches = !!targetInfo.url?.includes(opts.urlIncludes);
+      if (matches) {
+        if (armed.has(targetInfo.targetId)) return;
+        let sid = sessionId;
+        if (!sid) {
+          try {
+            sid = (await Target.attachToTarget({ targetId: targetInfo.targetId, flatten: true }))
+              .sessionId;
+          } catch {
+            return;
+          }
         }
+        await arm(targetInfo.targetId, sid);
+      } else if (armed.has(targetInfo.targetId)) {
+        await disarm(targetInfo.targetId);
       }
-      await arm(sid);
     };
 
     await Target.setDiscoverTargets({ discover: true });
-    client.on("Target.targetInfoChanged", (p: { targetInfo: { targetId: string; url?: string } }) => {
-      void maybeArm(p.targetInfo);
-    });
+    client.on(
+      "Target.targetInfoChanged",
+      (p: { targetInfo: { targetId: string; url?: string } }) => {
+        void evaluate(p.targetInfo);
+      },
+    );
     client.on(
       "Target.attachedToTarget",
       (p: { sessionId: string; targetInfo: { targetId: string; url?: string } }) => {
-        void maybeArm(p.targetInfo, p.sessionId);
+        void evaluate(p.targetInfo, p.sessionId);
       },
     );
+    client.on("Target.targetDestroyed", (p: { targetId: string }) => {
+      armed.delete(p.targetId);
+    });
     try {
       const { targetInfos } = await Target.getTargets();
-      for (const t of targetInfos) await maybeArm(t);
+      for (const t of targetInfos) await evaluate(t);
     } catch {
       // best-effort
     }

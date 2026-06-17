@@ -163,23 +163,32 @@ app.whenReady().then(async () => {
     profileManager,
     chromiumBootstrap,
     // The companion's "Add to MultiZen" button routes here (profile-scoped).
+    // Confirm natively first: the binding lives in the page's MAIN world, so any
+    // script on the store page could call it — an explicit OS dialog makes a
+    // drive-by install impossible without the user's consent.
     onCompanionInstall: (profileId, extensionId) => {
-      void extensionsService
-        .installFromWebStore(profileId, extensionId)
-        .then((extension) => {
-          mainWindow?.webContents.send("extensions:installed", {
-            ok: true,
-            profileId,
-            extension,
-          });
-        })
-        .catch((e: unknown) => {
+      void (async () => {
+        const profile = profileManager.get(profileId);
+        const choice = await dialog.showMessageBox(mainWindow!, {
+          type: "question",
+          buttons: ["Add to MultiZen", "Cancel"],
+          defaultId: 0,
+          cancelId: 1,
+          message: "Add this extension to the profile?",
+          detail: `Extension ${extensionId} will be installed into "${profile?.name ?? profileId}" and load on the next launch.`,
+        });
+        if (choice.response !== 0) return;
+        try {
+          const extension = await extensionsService.installFromWebStore(profileId, extensionId);
+          mainWindow?.webContents.send("extensions:installed", { ok: true, profileId, extension });
+        } catch (e) {
           mainWindow?.webContents.send("extensions:installed", {
             ok: false,
             profileId,
             error: (e as Error).message,
           });
-        });
+        }
+      })();
     },
   });
 

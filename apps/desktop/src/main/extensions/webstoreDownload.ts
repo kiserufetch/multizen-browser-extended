@@ -12,11 +12,16 @@ import { tempCrxPath } from "./crxPipeline.ts";
  */
 export function parseExtensionId(urlOrId: string): string {
   const s = urlOrId.trim();
-  const m = /([a-p]{32})/.exec(s);
-  if (!m || !m[1]) {
-    throw new Error("Couldn't find a Chrome extension ID in that input.");
-  }
-  return m[1];
+  // Bare ID.
+  if (/^[a-p]{32}$/.test(s)) return s;
+  // Prefer the canonical /detail/<slug>/<id> segment so a long lowercase slug
+  // can't be mistaken for the ID.
+  const detail = /\/detail\/[^/]+\/([a-p]{32})/.exec(s);
+  if (detail?.[1]) return detail[1];
+  // Fallback: any 32-char a–p run.
+  const any = /([a-p]{32})/.exec(s);
+  if (any?.[1]) return any[1];
+  throw new Error("Couldn't find a Chrome extension ID in that input.");
 }
 
 /**
@@ -53,16 +58,26 @@ export async function downloadCrxById(id: string, prodversion: string): Promise<
     request.on("error", fail);
     request.on("response", (response) => {
       const status = response.statusCode;
+      // 204 (and sometimes an empty 200) means the endpoint has no CRX for this
+      // ID — delisted, geo-blocked, or never existed. Surface a clear message
+      // rather than writing a 0-byte file that later fails as "corrupt zip".
+      if (status === 204) {
+        response.on("data", () => {});
+        fail(new Error(`Extension ${id} isn't available from the Web Store (it may be delisted or region-restricted). Try uploading the .crx/.zip instead.`));
+        return;
+      }
       if (status < 200 || status >= 300) {
         response.on("data", () => {});
         fail(new Error(`HTTP ${status} downloading extension ${id} from the Web Store.`));
         return;
       }
+      let received = 0;
       const stream = createWriteStream(outPath);
       out = stream;
       stream.on("error", fail);
       const flow = response as unknown as { pause?: () => void; resume?: () => void };
       response.on("data", (chunk: Buffer) => {
+        received += chunk.length;
         if (!stream.write(chunk) && flow.pause && flow.resume) {
           flow.pause();
           stream.once("drain", () => flow.resume!());
@@ -71,7 +86,18 @@ export async function downloadCrxById(id: string, prodversion: string): Promise<
       response.on("error", fail);
       response.on("end", () => {
         out = null;
-        stream.end(() => resolve());
+        stream.end(() => {
+          // An empty (or absurdly tiny) body means "no CRX" even on a 200.
+          if (received < 16) {
+            fail(
+              new Error(
+                `Extension ${id} isn't available from the Web Store (empty response). Try uploading the .crx/.zip instead.`,
+              ),
+            );
+            return;
+          }
+          resolve();
+        });
       });
     });
     request.end();
