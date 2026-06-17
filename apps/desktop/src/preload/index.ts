@@ -10,7 +10,7 @@ import type {
 } from "@multizen/types";
 import type { ActivityEvent } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
-import type { ChromiumStatus, DeviceFamily, ProxyConfig } from "@multizen/types";
+import type { ChromiumStatus, DeviceFamily, ProxyConfig, UpdateStatus } from "@multizen/types";
 
 export interface ProxyGeoResult {
   country: string;
@@ -112,6 +112,19 @@ const api = {
       const listener = (_: unknown, status: ChromiumStatus): void => cb(status);
       ipcRenderer.on("chromium:status", listener);
       return () => ipcRenderer.off("chromium:status", listener);
+    },
+  },
+  update: {
+    status: (): Promise<UpdateStatus> => ipcRenderer.invoke("update:status"),
+    lastChecked: (): Promise<number> => ipcRenderer.invoke("update:lastChecked"),
+    check: (): Promise<UpdateStatus> => ipcRenderer.invoke("update:check"),
+    install: (): Promise<void> => ipcRenderer.invoke("update:install"),
+    download: (version: string): Promise<void> =>
+      ipcRenderer.invoke("update:download", version),
+    onStatus: (cb: (status: UpdateStatus) => void): (() => void) => {
+      const listener = (_: unknown, status: UpdateStatus): void => cb(status);
+      ipcRenderer.on("update:status", listener);
+      return () => ipcRenderer.off("update:status", listener);
     },
   },
   fingerprint: {
