@@ -199,6 +199,25 @@ export class CdpSession {
     );
   }
 
+  /**
+   * Listen for a JS binding (registered per target via
+   * `Runtime.addBinding`) being called from a page. `cb` receives the raw
+   * string payload the page passed to `window[name](payload)`. Fires for any
+   * target in this session — which is exactly one profile, so the caller
+   * already knows which profile the call came from.
+   */
+  onBinding(name: string, cb: (payload: string) => void): void {
+    const client = this.require();
+    client.on(
+      "Runtime.bindingCalled",
+      (params: { name?: string; payload?: string }) => {
+        if (params?.name === name && typeof params.payload === "string") {
+          cb(params.payload);
+        }
+      },
+    );
+  }
+
   private require(): CDP.Client {
     if (!this.client) throw new Error("CDP session not connected. Call connect() first.");
     return this.client;
