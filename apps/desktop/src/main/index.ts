@@ -23,6 +23,7 @@ import type { ChromiumStatus, ProxyConfig, UpdateStatus } from "@multizen/types"
 import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
 import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
 import { UpdaterService } from "./UpdaterService.ts";
+import { ExtensionsService } from "./extensions/ExtensionsService.ts";
 import { probeProxyGeo, type ProxyGeoResult } from "./proxyGeo.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -55,6 +56,7 @@ let profileManager: ProfileManager;
 let browserDriver: ChromiumBrowserDriver;
 let chromiumBootstrap: ChromiumBootstrap;
 let updater: UpdaterService;
+let extensionsService: ExtensionsService;
 let activityLog: ActivityLog;
 let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
@@ -146,7 +148,40 @@ app.whenReady().then(async () => {
   });
   updater.init();
 
-  browserDriver = new ChromiumBrowserDriver({ profileManager, chromiumBootstrap });
+  // Per-profile extension management. Engine version feeds the Web Store CRX
+  // endpoint's prodversion (falls back to a sane default before the runtime is
+  // ready).
+  extensionsService = new ExtensionsService({
+    profileManager,
+    engineVersion: () => {
+      const s = chromiumBootstrap.getStatus();
+      return s.kind === "ready" ? s.version : "145.0.0.0";
+    },
+  });
+
+  browserDriver = new ChromiumBrowserDriver({
+    profileManager,
+    chromiumBootstrap,
+    // The companion's "Add to MultiZen" button routes here (profile-scoped).
+    onCompanionInstall: (profileId, extensionId) => {
+      void extensionsService
+        .installFromWebStore(profileId, extensionId)
+        .then((extension) => {
+          mainWindow?.webContents.send("extensions:installed", {
+            ok: true,
+            profileId,
+            extension,
+          });
+        })
+        .catch((e: unknown) => {
+          mainWindow?.webContents.send("extensions:installed", {
+            ok: false,
+            profileId,
+            error: (e as Error).message,
+          });
+        });
+    },
+  });
 
   const mcp = createMultizenMcpServer({ profileManager, browserDriver });
   activityLog = mcp.activityLog;
@@ -217,6 +252,45 @@ app.whenReady().then(async () => {
   // Chromium bootstrap IPC
   ipcMain.handle("chromium:status", () => chromiumBootstrap.getStatus());
   ipcMain.handle("chromium:retry", () => chromiumBootstrap.ensure());
+
+  // Extensions IPC (per-profile)
+  ipcMain.handle("extensions:list", (_e, profileId: string) =>
+    extensionsService.list(profileId),
+  );
+  ipcMain.handle("extensions:addFromFile", async (_e, profileId: string) => {
+    const r = await dialog.showOpenDialog(mainWindow!, {
+      title: "Add extension (.crx or .zip)",
+      properties: ["openFile"],
+      filters: [{ name: "Chrome extension", extensions: ["crx", "zip"] }],
+    });
+    if (r.canceled || !r.filePaths[0]) return extensionsService.list(profileId);
+    await extensionsService.installFromFile(profileId, r.filePaths[0]);
+    return extensionsService.list(profileId);
+  });
+  ipcMain.handle("extensions:addFromFolder", async (_e, profileId: string) => {
+    const r = await dialog.showOpenDialog(mainWindow!, {
+      title: "Add unpacked extension folder",
+      properties: ["openDirectory"],
+    });
+    if (r.canceled || !r.filePaths[0]) return extensionsService.list(profileId);
+    await extensionsService.installFromFile(profileId, r.filePaths[0]);
+    return extensionsService.list(profileId);
+  });
+  ipcMain.handle("extensions:addFromWebStore", async (_e, profileId: string, urlOrId: string) => {
+    await extensionsService.installFromWebStore(profileId, urlOrId);
+    return extensionsService.list(profileId);
+  });
+  ipcMain.handle("extensions:remove", (_e, profileId: string, extId: string) => {
+    extensionsService.remove(profileId, extId);
+    return extensionsService.list(profileId);
+  });
+  ipcMain.handle(
+    "extensions:toggle",
+    (_e, profileId: string, extId: string, enabled: boolean) => {
+      extensionsService.setEnabled(profileId, extId, enabled);
+      return extensionsService.list(profileId);
+    },
+  );
 
   // App self-update IPC
   ipcMain.handle("update:status", () => updater.getStatus());
