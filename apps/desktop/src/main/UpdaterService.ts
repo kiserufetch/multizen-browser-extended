@@ -46,6 +46,7 @@ export class UpdaterService extends EventEmitter {
   private lastManual = false;
   private pendingVersion: string | null = null;
   private interval: NodeJS.Timeout | null = null;
+  private started = false;
   private readonly getSettings: () => AppSettings;
   private readonly isMac = process.platform === "darwin";
 
@@ -75,6 +76,8 @@ export class UpdaterService extends EventEmitter {
 
   /** Wire electron-updater and schedule background checks. Safe to call once. */
   init(): void {
+    if (this.started) return; // idempotent — never double-wire listeners/timers
+    this.started = true;
     if (!app.isPackaged) {
       // Dev: there is no app-update.yml and no installer to swap. Stay idle.
       return;
@@ -141,15 +144,16 @@ export class UpdaterService extends EventEmitter {
       return;
     }
     if (this.checking) return;
-    const now = Date.now();
     // Time gate (DIY — electron-updater has none) to avoid double-download.
-    if (!manual && now - this.lastCheckedAt < CHECK_INTERVAL_MS) return;
+    if (!manual && Date.now() - this.lastCheckedAt < CHECK_INTERVAL_MS) return;
 
     this.checking = true;
     this.lastManual = manual;
-    this.lastCheckedAt = now;
     try {
       await autoUpdater.checkForUpdates();
+      // Stamp only on success so a transient failure (offline, 5xx) doesn't
+      // arm the 4h gate and block the next auto-retry.
+      this.lastCheckedAt = Date.now();
     } catch (e) {
       this.handleError(e as Error);
     } finally {
@@ -157,8 +161,16 @@ export class UpdaterService extends EventEmitter {
     }
   }
 
+  /** True while we hold a terminal, user-actionable state we must not downgrade. */
+  private isStaged(): boolean {
+    return this.status.kind === "ready" || this.status.kind === "available";
+  }
+
   private wireEvents(): void {
-    autoUpdater.on("checking-for-update", () => this.set({ kind: "checking" }));
+    autoUpdater.on("checking-for-update", () => {
+      // Don't wipe an already-staged update with a transient "checking".
+      if (!this.isStaged()) this.set({ kind: "checking" });
+    });
 
     autoUpdater.on("update-available", (info: UpdateInfo) => {
       this.pendingVersion = info.version;
@@ -174,6 +186,9 @@ export class UpdaterService extends EventEmitter {
     });
 
     autoUpdater.on("update-not-available", () => {
+      // Keep a staged "ready"/"available" — a re-check must not hide a pending
+      // restart (e.g. if the published release was yanked after we staged it).
+      if (this.isStaged()) return;
       this.set(
         this.lastManual ? { kind: "up-to-date", version: app.getVersion() } : { kind: "idle" },
       );
@@ -197,13 +212,17 @@ export class UpdaterService extends EventEmitter {
 
   private handleError(err: Error): void {
     const msg = err?.message ?? "Update failed";
-    // macOS: any update error (notably the Squirrel ad-hoc signature
-    // rejection on the install path we never invoke) must not surface raw —
-    // keep whatever we had (available/idle).
-    if (this.isMac) return;
-    // Environment simply can't update (dev config, non-AppImage Linux, missing
-    // feed) — treat as "nothing to do", not a user-facing error.
-    if (/APPIMAGE|app-update\.yml|dev-app-update|is not signed/i.test(msg)) {
+    // Environment genuinely can't self-update (Linux not launched as a real
+    // .AppImage) — treat as "nothing to do", not a user-facing error.
+    if (/APPIMAGE/i.test(msg)) {
+      this.set({ kind: "idle" });
+      return;
+    }
+    // macOS install path is never invoked (autoDownload=false, no
+    // quitAndInstall), but if Squirrel ever rejects the ad-hoc signature don't
+    // surface it raw. Real check failures (offline, GitHub 5xx) DO surface so
+    // the UI never gets stuck on "checking".
+    if (this.isMac && /signature|not signed|code sign/i.test(msg)) {
       this.set({ kind: "idle" });
       return;
     }

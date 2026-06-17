@@ -21,7 +21,12 @@ export function Settings({ onImport }: Props): JSX.Element {
     void window.multizen.system.info().then(setInfo);
     void window.multizen.update.status().then(setUpdateStatus);
     void window.multizen.update.lastChecked().then(setLastChecked);
-    return window.multizen.update.onStatus(setUpdateStatus);
+    // Refresh "last checked" on every status change too, so a background
+    // auto-check updates the label live while Settings is open.
+    return window.multizen.update.onStatus((s) => {
+      setUpdateStatus(s);
+      void window.multizen.update.lastChecked().then(setLastChecked);
+    });
   }, []);
 
   async function patch(p: Partial<AppSettings>): Promise<void> {
