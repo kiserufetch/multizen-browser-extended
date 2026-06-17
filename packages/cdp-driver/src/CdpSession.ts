@@ -257,7 +257,10 @@ export class CdpSession {
       targetInfo: { targetId: string; type?: string; url?: string },
       sessionId?: string,
     ): Promise<void> => {
-      const matches = !!targetInfo.url?.includes(opts.urlIncludes);
+      // Only page targets — never the store PWA's service worker (arming
+      // Runtime there is a needless CDP tell with no companion to talk to).
+      const isPage = targetInfo.type === undefined || targetInfo.type === "page";
+      const matches = isPage && !!targetInfo.url?.includes(opts.urlIncludes);
       if (matches) {
         if (armed.has(targetInfo.targetId)) return;
         let sid = sessionId;
