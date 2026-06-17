@@ -18,6 +18,7 @@ import { CdpSession } from "@multizen/cdp-driver";
 import type { ChromiumBootstrap } from "./ChromiumBootstrap";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { probeProxyGeo } from "./proxyGeo";
+import { companionDir } from "./extensions/companion";
 
 interface RunningProcess {
   child: ChildProcess;
@@ -305,6 +306,23 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       args.push("--disable-component-update");
       args.push("--disable-domain-reliability");
       args.push("--disable-client-side-phishing-detection");
+    }
+
+    // Browser extensions: load this profile's enabled extensions plus the
+    // bundled companion (the "Add to MultiZen" injector). Same flag pair
+    // CloakBrowser's own `extension_paths` emits; requires the persistent
+    // user-data-dir we already use. Extensions live under the profile dir
+    // (shared across engines), so we pass absolute paths.
+    const extensionDirs: string[] = [];
+    const companion = companionDir();
+    if (companion) extensionDirs.push(companion);
+    for (const ext of profile.extensions ?? []) {
+      if (ext.enabled) extensionDirs.push(join(profile.dataDir, ext.dir));
+    }
+    if (extensionDirs.length > 0) {
+      const joined = extensionDirs.join(",");
+      args.push(`--load-extension=${joined}`);
+      args.push(`--disable-extensions-except=${joined}`);
     }
 
     // NOTE on Sec-CH-UA: The Client Hints headers (`Sec-CH-UA`,
