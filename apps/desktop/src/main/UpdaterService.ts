@@ -124,6 +124,8 @@ export class UpdaterService extends EventEmitter {
 
   private set(next: UpdateStatus): void {
     this.status = next;
+    const detail = "version" in next ? ` ${next.version}` : "";
+    process.stderr.write(`[updater] ${next.kind}${detail}\n`);
     this.emit("status", next);
   }
 
