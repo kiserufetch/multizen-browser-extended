@@ -38,6 +38,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: "24"
+          # setup-node@v5 enables package-manager caching by default, which runs
+          # the global Yarn 1.x before Corepack is activated and chokes on the
+          # project's "packageManager": "yarn@4.5.0". We cache Yarn ourselves
+          # below, so turn it off.
+          package-manager-cache: false
 
       - name: Enable Corepack (Yarn 4)
         run: |
