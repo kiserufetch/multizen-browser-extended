@@ -3,6 +3,7 @@ import type { FingerprintConfig, Profile, ProxyConfig } from "../../types";
 import { FingerprintForm } from "./FingerprintForm";
 import { ProxyTester } from "./ProxyTester";
 import { ExtensionsSection } from "./ExtensionsSection";
+import { parseProxyString } from "../../lib/parseProxy";
 
 /**
  * Edit existing profile — used inside `<Modal>` so the close gate +
@@ -207,7 +208,20 @@ export function ProfileEditSheet({
                 <Input
                   value={form.proxyHost}
                   onChange={(v) => update("proxyHost", v)}
-                  placeholder="proxy.example.com"
+                  onPaste={(text) => {
+                    const parsed = parseProxyString(text);
+                    if (!parsed) return false; // let the default paste fill host
+                    setForm((f) => ({
+                      ...f,
+                      proxyType: parsed.type ?? f.proxyType,
+                      proxyHost: parsed.host,
+                      proxyPort: String(parsed.port),
+                      proxyUsername: parsed.username ?? "",
+                      proxyPassword: parsed.password ?? "",
+                    }));
+                    return true;
+                  }}
+                  placeholder="host or host:port:user:pass"
                   mono
                 />
               </Field>
@@ -326,6 +340,7 @@ function Input({
   mono,
   type,
   autoFocus,
+  onPaste,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -333,6 +348,8 @@ function Input({
   mono?: boolean;
   type?: "text" | "password";
   autoFocus?: boolean;
+  /** Return true to signal the paste was consumed (default browser paste is suppressed). */
+  onPaste?: (text: string) => boolean;
 }): JSX.Element {
   return (
     <input
@@ -340,6 +357,13 @@ function Input({
       type={type ?? "text"}
       value={value}
       onChange={(e) => onChange(e.target.value)}
+      onPaste={
+        onPaste
+          ? (e) => {
+              if (onPaste(e.clipboardData.getData("text"))) e.preventDefault();
+            }
+          : undefined
+      }
       placeholder={placeholder}
       className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 placeholder:text-slate-600 outline-none focus:bg-white/[0.05] transition-colors"
       style={{
