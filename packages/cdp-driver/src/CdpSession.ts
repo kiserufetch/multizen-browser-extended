@@ -65,6 +65,8 @@ export interface CdpSessionOptions {
 export class CdpSession {
   private client: CDP.Client | null = null;
   private readonly opts: CdpSessionOptions;
+  /** Cleanups (e.g. polling intervals) to run on close(). */
+  private readonly teardowns: Array<() => void> = [];
 
   constructor(opts: CdpSessionOptions) {
     this.opts = opts;
@@ -89,6 +91,13 @@ export class CdpSession {
   }
 
   async close(): Promise<void> {
+    for (const t of this.teardowns.splice(0)) {
+      try {
+        t();
+      } catch {
+        // ignore
+      }
+    }
     if (!this.client) return;
     await this.client.close();
     this.client = null;
@@ -210,22 +219,30 @@ export class CdpSession {
    * MultiZen"). Re-checks on navigation, not just initial attach, so opening the
    * store in an existing tab still arms it.
    */
+  /**
+   * Watch for a companion signal on page targets whose URL contains
+   * `urlIncludes`. Channel: the content script writes the payload to
+   * `<html data-mz-add-ext="…">` and the host polls it via Runtime.evaluate.
+   *
+   * Why DOM, not a CDP binding/console: CloakBrowser puts content scripts in an
+   * ISOLATED world (it ignores manifest `world:MAIN`) and suppresses console
+   * CDP events, so neither bindings nor console reach the host. The DOM is
+   * shared across worlds and Runtime.evaluate works, so this is the reliable
+   * path. Polling is scoped to matching page targets only (never the user's
+   * normal browsing) and torn down on close().
+   */
   async watchUrlForBinding(opts: {
     urlIncludes: string;
-    /** Unused (kept for call-site compatibility). */
-    bindingName: string;
     onPayload: (payload: string) => void;
   }): Promise<void> {
     const client = this.require();
     const { Target } = client;
-    // Channel via a DOM attribute: CloakBrowser puts content scripts in an
-    // ISOLATED world (it ignores manifest world:MAIN) and suppresses console
-    // CDP events, so neither Runtime bindings nor console reach us. But the DOM
-    // is shared across worlds, and Runtime.evaluate works — so the content
-    // script writes the id to <html data-mz-add-ext="…"> and we poll for it.
-    // Scoped to Web Store page targets only.
     const ATTR = "data-mz-add-ext";
     const armed = new Map<string, NodeJS.Timeout>();
+    this.teardowns.push(() => {
+      for (const iv of armed.values()) clearInterval(iv);
+      armed.clear();
+    });
 
     const poll = async (sessionId: string): Promise<void> => {
       try {

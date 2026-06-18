@@ -194,7 +194,13 @@ app.whenReady().then(async () => {
           if (browserDriver.isRunning(profileId)) {
             await browserDriver.close(profileId).catch(() => {});
             await browserDriver.launch(profileId).catch((e: unknown) => {
-              process.stderr.write(`[extensions] relaunch failed: ${(e as Error).message}\n`);
+              // The profile is now closed and didn't reopen — tell the user so
+              // they're not left wondering where their browser went.
+              mainWindow?.webContents.send("extensions:installed", {
+                ok: false,
+                profileId,
+                error: `Added it, but the profile didn't reopen — launch it again. (${(e as Error).message})`,
+              });
             });
           }
         } catch (e) {

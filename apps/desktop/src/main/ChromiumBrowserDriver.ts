@@ -564,14 +564,13 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         console.error("[multizen] CDP bootstrap failed:", e);
       });
 
-    // Wire the companion's "Add to MultiZen" channel for this profile — but only
-    // on Web Store pages (Runtime.enable is a CDP tell, so we keep it off the
-    // user's normal browsing). The CDP session is profile-scoped, so any binding
-    // call belongs to this profileId — no cross-profile ambiguity.
+    // Wire the companion's "Add to MultiZen" channel for this profile — scoped
+    // to Web Store pages only (the host polls a DOM attribute there, never on
+    // the user's normal browsing). The CDP session is profile-scoped, so any
+    // signal belongs to this profileId — no cross-profile ambiguity.
     if (this.onCompanionInstall) {
       void session.watchUrlForBinding({
         urlIncludes: "chromewebstore.google.com",
-        bindingName: "__multizenAddExtension",
         onPayload: (payload) => {
           try {
             const parsed = JSON.parse(payload) as { id?: string };

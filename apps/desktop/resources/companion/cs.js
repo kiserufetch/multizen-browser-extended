@@ -1,9 +1,12 @@
-// MultiZen Companion — MAIN-world content script on Chrome Web Store detail
-// pages. Replaces the (disabled) "Add to Chrome" button with our own "Add to
-// MultiZen" button in the same spot, and hands the extension ID to the host via
-// the CDP binding `__multizenAddExtension`. Also hides Google's "Switch to
-// Chrome?" promo. The native install path is dead in CloakBrowser, so this is
-// the working one.
+// MultiZen Companion — content script on Chrome Web Store detail pages. The
+// native install path is dead in CloakBrowser, so we replace the disabled "Add
+// to Chrome" button with our own "Add to MultiZen" in the same spot and hide
+// Google's "Switch/Install Chrome" promos.
+//
+// CloakBrowser runs content scripts in an ISOLATED world (it ignores manifest
+// world:MAIN) and suppresses console CDP events, so we can't reach the host via
+// a window binding or console. Instead we write the chosen id to a DOM
+// attribute on <html> (the DOM is shared across worlds); the host polls it.
 (function () {
   "use strict";
 
@@ -120,7 +123,9 @@
       "recommends using Chrome",
       "to install extensions",
     ];
-    const nodes = document.querySelectorAll("div,span,section,a,c-wiz");
+    // Scan spans only — the promo copy always lives in a <span>, and this keeps
+    // the per-tick cost (and getBoundingClientRect reflows) bounded.
+    const nodes = document.querySelectorAll("span");
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
       const text = el.textContent || "";
@@ -160,6 +165,6 @@
     subtree: true,
   });
   // Safety net for SPA history navigations that don't mutate enough to trigger
-  // the observer in time.
-  setInterval(tick, 1000);
+  // the observer in time. Kept infrequent to avoid steady main-thread work.
+  setInterval(tick, 2000);
 })();
