@@ -209,17 +209,6 @@ export class CdpSession {
   }
 
   /**
-   * Arm a JS binding (`window[bindingName](payload)`) ONLY on targets whose URL
-   * contains `urlIncludes`, and invoke `onPayload` when the page calls it.
-   *
-   * Scoped on purpose: `Runtime.enable` (required for `bindingCalled`) is a
-   * CDP-automation tell, so we must not enable it on the user's normal browsing.
-   * We enable it + add the binding only when a target navigates to the matching
-   * URL (e.g. the Chrome Web Store, where the companion injects "Add to
-   * MultiZen"). Re-checks on navigation, not just initial attach, so opening the
-   * store in an existing tab still arms it.
-   */
-  /**
    * Watch for a companion signal on page targets whose URL contains
    * `urlIncludes`. Channel: the content script writes the payload to
    * `<html data-mz-add-ext="…">` and the host polls it via Runtime.evaluate.

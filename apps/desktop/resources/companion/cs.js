@@ -123,9 +123,10 @@
       "recommends using Chrome",
       "to install extensions",
     ];
-    // Scan spans only — the promo copy always lives in a <span>, and this keeps
-    // the per-tick cost (and getBoundingClientRect reflows) bounded.
-    const nodes = document.querySelectorAll("span");
+    // Scan spans + divs — covers a promo whose text is split across child spans
+    // (the parent div's textContent still matches), without walking the whole
+    // DOM. getBoundingClientRect only runs for the few nodes that match a needle.
+    const nodes = document.querySelectorAll("span,div");
     for (let i = 0; i < nodes.length; i++) {
       const el = nodes[i];
       const text = el.textContent || "";
