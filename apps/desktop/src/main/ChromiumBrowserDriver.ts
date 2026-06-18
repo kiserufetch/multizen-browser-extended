@@ -18,6 +18,7 @@ import { CdpSession } from "@multizen/cdp-driver";
 import type { ChromiumBootstrap } from "./ChromiumBootstrap";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { probeProxyGeo } from "./proxyGeo";
+import { companionDir } from "./extensions/companion";
 
 interface RunningProcess {
   child: ChildProcess;
@@ -33,6 +34,12 @@ interface RunningProcess {
 export interface ChromiumBrowserDriverOptions {
   profileManager: ProfileManager;
   chromiumBootstrap: ChromiumBootstrap;
+  /**
+   * Called when the companion extension's "Add to MultiZen" button is clicked
+   * inside a running profile. `profileId` is the profile that made the call
+   * (the CDP session is profile-scoped). The host installs the extension.
+   */
+  onCompanionInstall?: (profileId: ProfileId, extensionId: string) => void;
 }
 
 export type RunningStateChange =
@@ -58,11 +65,13 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private nextPort = 9222;
   private readonly profileManager: ProfileManager;
   private readonly bootstrap: ChromiumBootstrap;
+  private readonly onCompanionInstall?: (profileId: ProfileId, extensionId: string) => void;
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     super();
     this.profileManager = opts.profileManager;
     this.bootstrap = opts.chromiumBootstrap;
+    this.onCompanionInstall = opts.onCompanionInstall;
   }
 
   override on<K extends keyof DriverEvents>(event: K, listener: DriverEvents[K]): this {
@@ -307,6 +316,28 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       args.push("--disable-client-side-phishing-detection");
     }
 
+    // Browser extensions: load this profile's enabled extensions plus the
+    // bundled companion (the "Add to MultiZen" injector). Same flag pair
+    // CloakBrowser's own `extension_paths` emits; requires the persistent
+    // user-data-dir we already use. Extensions live under the profile dir
+    // (shared across engines), so we pass absolute paths.
+    const extensionDirs: string[] = [];
+    const companion = companionDir();
+    if (companion) extensionDirs.push(companion);
+    for (const ext of profile.extensions ?? []) {
+      if (!ext.enabled) continue;
+      const dir = join(profile.dataDir, ext.dir);
+      // Skip a missing dir: a single bad path makes Chromium drop the ENTIRE
+      // --load-extension list (the companion too), silently disabling all
+      // extensions for the launch.
+      if (existsSync(dir)) extensionDirs.push(dir);
+    }
+    if (extensionDirs.length > 0) {
+      const joined = extensionDirs.join(",");
+      args.push(`--load-extension=${joined}`);
+      args.push(`--disable-extensions-except=${joined}`);
+    }
+
     // NOTE on Sec-CH-UA: The Client Hints headers (`Sec-CH-UA`,
     // `Sec-CH-UA-Platform`, `Sec-CH-UA-Platform-Version`, `Sec-CH-UA-Arch`,
     // `Sec-CH-UA-Bitness`, etc.) and `navigator.userAgentData` are NOT
@@ -532,6 +563,24 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       .catch((e: unknown) => {
         console.error("[multizen] CDP bootstrap failed:", e);
       });
+
+    // Wire the companion's "Add to MultiZen" channel for this profile — scoped
+    // to Web Store pages only (the host polls a DOM attribute there, never on
+    // the user's normal browsing). The CDP session is profile-scoped, so any
+    // signal belongs to this profileId — no cross-profile ambiguity.
+    if (this.onCompanionInstall) {
+      void session.watchUrlForBinding({
+        urlIncludes: "chromewebstore.google.com",
+        onPayload: (payload) => {
+          try {
+            const parsed = JSON.parse(payload) as { id?: string };
+            if (parsed.id) this.onCompanionInstall?.(profileId, parsed.id);
+          } catch {
+            // ignore malformed payloads
+          }
+        },
+      });
+    }
 
     // Watch for "no more page targets" via CDP. On macOS Chrome stays alive
     // after the last window closes (standard Mac app lifecycle) — the spawned

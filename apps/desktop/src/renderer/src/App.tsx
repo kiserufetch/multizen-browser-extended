@@ -43,6 +43,18 @@ export function App(): JSX.Element {
     void window.multizen.chromium.status().then(apply);
     return window.multizen.chromium.onStatus(apply);
   }, []);
+  // Global toast when the companion "Add to MultiZen" button installs an
+  // extension into a running profile (the edit sheet may not be open).
+  useEffect(() => {
+    if (!window.multizen) return;
+    return window.multizen.extensions.onInstalled((e) => {
+      showToast(
+        e.ok
+          ? `Added "${e.extension.name}" — relaunch the profile to apply`
+          : `Extension install failed: ${e.error}`,
+      );
+    });
+  }, []);
   // Last-interacted profile id — only used by the command palette's
   // "Export" action, which exports whichever profile the user most
   // recently opened in the edit modal.

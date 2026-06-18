@@ -65,6 +65,8 @@ export interface CdpSessionOptions {
 export class CdpSession {
   private client: CDP.Client | null = null;
   private readonly opts: CdpSessionOptions;
+  /** Cleanups (e.g. polling intervals) to run on close(). */
+  private readonly teardowns: Array<() => void> = [];
 
   constructor(opts: CdpSessionOptions) {
     this.opts = opts;
@@ -89,6 +91,13 @@ export class CdpSession {
   }
 
   async close(): Promise<void> {
+    for (const t of this.teardowns.splice(0)) {
+      try {
+        t();
+      } catch {
+        // ignore
+      }
+    }
     if (!this.client) return;
     await this.client.close();
     this.client = null;
@@ -197,6 +206,110 @@ export class CdpSession {
         })();
       },
     );
+  }
+
+  /**
+   * Watch for a companion signal on page targets whose URL contains
+   * `urlIncludes`. Channel: the content script writes the payload to
+   * `<html data-mz-add-ext="…">` and the host polls it via Runtime.evaluate.
+   *
+   * Why DOM, not a CDP binding/console: CloakBrowser puts content scripts in an
+   * ISOLATED world (it ignores manifest `world:MAIN`) and suppresses console
+   * CDP events, so neither bindings nor console reach the host. The DOM is
+   * shared across worlds and Runtime.evaluate works, so this is the reliable
+   * path. Polling is scoped to matching page targets only (never the user's
+   * normal browsing) and torn down on close().
+   */
+  async watchUrlForBinding(opts: {
+    urlIncludes: string;
+    onPayload: (payload: string) => void;
+  }): Promise<void> {
+    const client = this.require();
+    const { Target } = client;
+    const ATTR = "data-mz-add-ext";
+    const armed = new Map<string, NodeJS.Timeout>();
+    this.teardowns.push(() => {
+      for (const iv of armed.values()) clearInterval(iv);
+      armed.clear();
+    });
+
+    const poll = async (sessionId: string): Promise<void> => {
+      try {
+        const r = (await client.send(
+          "Runtime.evaluate",
+          {
+            expression: `(function(){var e=document.documentElement,v=e.getAttribute('${ATTR}');if(v)e.removeAttribute('${ATTR}');return v;})()`,
+            returnByValue: true,
+          },
+          sessionId,
+        )) as { result?: { value?: unknown } };
+        const v = r?.result?.value;
+        if (typeof v === "string" && v) {
+          opts.onPayload(v);
+        }
+      } catch {
+        // session gone / navigating — ignore
+      }
+    };
+
+    const arm = (targetId: string, sessionId: string): void => {
+      if (armed.has(targetId)) return;
+      const interval = setInterval(() => void poll(sessionId), 600);
+      armed.set(targetId, interval);
+    };
+    const disarm = (targetId: string): void => {
+      const interval = armed.get(targetId);
+      if (interval) {
+        clearInterval(interval);
+        armed.delete(targetId);
+      }
+    };
+
+    const evaluate = async (
+      targetInfo: { targetId: string; type?: string; url?: string },
+      sessionId?: string,
+    ): Promise<void> => {
+      const isPage = targetInfo.type === undefined || targetInfo.type === "page";
+      const matches = isPage && !!targetInfo.url?.includes(opts.urlIncludes);
+      if (matches) {
+        if (armed.has(targetInfo.targetId)) return;
+        let sid = sessionId;
+        if (!sid) {
+          try {
+            sid = (await Target.attachToTarget({ targetId: targetInfo.targetId, flatten: true }))
+              .sessionId;
+          } catch {
+            return;
+          }
+        }
+        arm(targetInfo.targetId, sid);
+      } else {
+        disarm(targetInfo.targetId);
+      }
+    };
+
+    await Target.setDiscoverTargets({ discover: true });
+    client.on(
+      "Target.targetInfoChanged",
+      (p: { targetInfo: { targetId: string; url?: string } }) => {
+        void evaluate(p.targetInfo);
+      },
+    );
+    client.on(
+      "Target.attachedToTarget",
+      (p: { sessionId: string; targetInfo: { targetId: string; url?: string } }) => {
+        void evaluate(p.targetInfo, p.sessionId);
+      },
+    );
+    client.on("Target.targetDestroyed", (p: { targetId: string }) => {
+      disarm(p.targetId);
+    });
+    try {
+      const { targetInfos } = await Target.getTargets();
+      for (const t of targetInfos) await evaluate(t);
+    } catch {
+      // best-effort
+    }
   }
 
   private require(): CDP.Client {

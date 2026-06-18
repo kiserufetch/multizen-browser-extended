@@ -3,6 +3,7 @@ import { ChevronDown, Settings2 } from "lucide-react";
 import { Kbd } from "../atoms";
 import { FingerprintForm } from "./FingerprintForm";
 import { ProxyTester } from "./ProxyTester";
+import { ExtensionsSection } from "./ExtensionsSection";
 import type { FingerprintConfig, ProxyConfig } from "../../types";
 
 interface Props {
@@ -250,6 +251,11 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
                 <ProxyTester proxy={proxyForForm} />
               </div>
             )}
+          </Group>
+
+          {/* Extensions — added after the profile is created (needs an id). */}
+          <Group label="Extensions">
+            <ExtensionsSection profileId={null} />
           </Group>
 
           {/* Fingerprint — shared component with the edit sheet */}

@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type {
   Profile,
@@ -10,6 +10,7 @@ import type {
   UpdateProfileInput,
   ProxyConfig,
   FingerprintConfig,
+  ExtensionConfig,
 } from "@multizen/types";
 import { defaultFingerprint } from "./fingerprint.js";
 
@@ -25,6 +26,7 @@ interface ProfileRow {
   updated_at: string;
   last_opened_at: string | null;
   proxy_country: string | null;
+  extensions: string | null;
 }
 
 export interface ProfileManagerOptions {
@@ -65,6 +67,9 @@ export class ProfileManager {
     const cols = this.db.prepare(`PRAGMA table_info(profiles)`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === "proxy_country")) {
       this.db.exec(`ALTER TABLE profiles ADD COLUMN proxy_country TEXT`);
+    }
+    if (!cols.some((c) => c.name === "extensions")) {
+      this.db.exec(`ALTER TABLE profiles ADD COLUMN extensions TEXT`);
     }
   }
 
@@ -120,6 +125,7 @@ export class ProfileManager {
       tags: input.tags ?? [],
       proxy: input.proxy,
       fingerprint,
+      extensions: input.extensions ?? [],
       dataDir,
       createdAt: now,
       updatedAt: now,
@@ -128,8 +134,8 @@ export class ProfileManager {
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, data_dir, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, data_dir, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
@@ -138,6 +144,7 @@ export class ProfileManager {
         JSON.stringify(profile.tags),
         profile.proxy ? JSON.stringify(profile.proxy) : null,
         JSON.stringify(profile.fingerprint),
+        JSON.stringify(profile.extensions ?? []),
         profile.dataDir,
         profile.createdAt,
         profile.updatedAt,
@@ -162,6 +169,7 @@ export class ProfileManager {
       tags: patch.tags ?? existing.tags,
       proxy: patch.proxy === null ? undefined : (patch.proxy ?? existing.proxy),
       fingerprint: { ...existing.fingerprint, ...patch.fingerprint },
+      extensions: patch.extensions ?? existing.extensions,
       updatedAt: now,
       // Stale country if proxy changed — next launch / Test re-probes.
       proxyCountry: proxyChanged ? undefined : existing.proxyCountry,
@@ -170,8 +178,8 @@ export class ProfileManager {
     this.db
       .prepare(
         `UPDATE profiles SET
-           name = ?, notes = ?, tags = ?, proxy = ?, fingerprint = ?, updated_at = ?,
-           proxy_country = ?
+           name = ?, notes = ?, tags = ?, proxy = ?, fingerprint = ?, extensions = ?,
+           updated_at = ?, proxy_country = ?
          WHERE id = ?`,
       )
       .run(
@@ -180,6 +188,7 @@ export class ProfileManager {
         JSON.stringify(merged.tags),
         merged.proxy ? JSON.stringify(merged.proxy) : null,
         JSON.stringify(merged.fingerprint),
+        JSON.stringify(merged.extensions ?? []),
         merged.updatedAt,
         merged.proxyCountry ?? null,
         id,
@@ -196,7 +205,19 @@ export class ProfileManager {
   }
 
   delete(id: ProfileId): void {
+    // Remove the on-disk profile directory (cookies, Chromium state, and any
+    // installed extensions under dataDir/extensions/) so deleting a profile
+    // doesn't orphan its data. Best-effort — a locked dir shouldn't block the
+    // DB delete.
+    const existing = this.get(id);
     this.db.prepare(`DELETE FROM profiles WHERE id = ?`).run(id);
+    if (existing) {
+      try {
+        rmSync(existing.dataDir, { recursive: true, force: true });
+      } catch {
+        // ignore — directory may be in use; DB row is already gone.
+      }
+    }
   }
 
   markOpened(id: ProfileId): void {
@@ -216,6 +237,7 @@ export class ProfileManager {
       tags: JSON.parse(row.tags) as string[],
       proxy: row.proxy ? (JSON.parse(row.proxy) as ProxyConfig) : undefined,
       fingerprint: JSON.parse(row.fingerprint) as FingerprintConfig,
+      extensions: row.extensions ? (JSON.parse(row.extensions) as ExtensionConfig[]) : [],
       dataDir: row.data_dir,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

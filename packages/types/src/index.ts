@@ -95,6 +95,27 @@ export interface FingerprintConfig {
   deviceMemory: number;
 }
 
+/**
+ * A Chrome extension installed into a single profile. Unpacked on disk under
+ * `{profile.dataDir}/extensions/{id}/` and loaded via Chromium's
+ * `--load-extension` at launch. `id` is the Chromium-derived extension ID
+ * (deterministic from the absolute install path). The companion "Add to
+ * MultiZen" helper extension is NOT represented here — it's app-managed and
+ * invisible to the user.
+ */
+export interface ExtensionConfig {
+  /** Chromium extension ID (32 a–p chars), derived from the install dir. */
+  id: string;
+  /** Display name from the extension's manifest. */
+  name: string;
+  /** Whether to load this extension on the next profile launch. */
+  enabled: boolean;
+  /** Install directory, relative to the profile's dataDir (e.g. "extensions/<id>"). */
+  dir: string;
+  /** How it was added. */
+  source: "web-store" | "file" | "folder";
+}
+
 export interface Profile {
   id: ProfileId;
   name: string;
@@ -102,6 +123,8 @@ export interface Profile {
   tags: string[];
   proxy?: ProxyConfig;
   fingerprint: FingerprintConfig;
+  /** Extensions installed into this profile (see {@link ExtensionConfig}). */
+  extensions?: ExtensionConfig[];
   dataDir: string;
   createdAt: string;
   updatedAt: string;
@@ -137,6 +160,7 @@ export interface CreateProfileInput {
   tags?: string[];
   proxy?: ProxyConfig;
   fingerprint?: Partial<FingerprintConfig>;
+  extensions?: ExtensionConfig[];
 }
 
 export interface UpdateProfileInput {
@@ -145,6 +169,7 @@ export interface UpdateProfileInput {
   tags?: string[];
   proxy?: ProxyConfig | null;
   fingerprint?: Partial<FingerprintConfig>;
+  extensions?: ExtensionConfig[];
 }
 
 export interface LaunchedProfile {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type JSX, type ReactNode } from "react";
 import type { FingerprintConfig, Profile, ProxyConfig } from "../../types";
 import { FingerprintForm } from "./FingerprintForm";
 import { ProxyTester } from "./ProxyTester";
+import { ExtensionsSection } from "./ExtensionsSection";
 
 /**
  * Edit existing profile — used inside `<Modal>` so the close gate +
@@ -239,6 +240,11 @@ export function ProfileEditSheet({
             <ProxyTester proxy={proxyForForm} profileId={profile.id} />
           </div>
         )}
+      </Group>
+
+      {/* Extensions */}
+      <Group label="Extensions">
+        <ExtensionsSection profileId={profile.id} />
       </Group>
 
       {/* Fingerprint */}

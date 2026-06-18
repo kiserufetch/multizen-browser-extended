@@ -10,7 +10,13 @@ import type {
   ChromiumStatus,
   DeviceFamily,
   UpdateStatus,
+  ExtensionConfig,
 } from "@multizen/types";
+
+/** Payload for the `extensions:installed` push (companion "Add to MultiZen"). */
+export type ExtensionInstalledEvent =
+  | { ok: true; profileId: string; extension: ExtensionConfig }
+  | { ok: false; profileId: string; error: string };
 
 export interface DeviceCatalogEntry {
   family: DeviceFamily;
@@ -89,6 +95,15 @@ export interface MultizenApi {
     retry: () => Promise<ChromiumStatus>;
     onStatus: (cb: (s: ChromiumStatus) => void) => () => void;
   };
+  extensions: {
+    list: (profileId: string) => Promise<ExtensionConfig[]>;
+    addFromFile: (profileId: string) => Promise<ExtensionConfig[]>;
+    addFromFolder: (profileId: string) => Promise<ExtensionConfig[]>;
+    addFromWebStore: (profileId: string, urlOrId: string) => Promise<ExtensionConfig[]>;
+    remove: (profileId: string, extId: string) => Promise<ExtensionConfig[]>;
+    toggle: (profileId: string, extId: string, enabled: boolean) => Promise<ExtensionConfig[]>;
+    onInstalled: (cb: (e: ExtensionInstalledEvent) => void) => () => void;
+  };
   update: {
     status: () => Promise<UpdateStatus>;
     lastChecked: () => Promise<number>;
@@ -132,4 +147,5 @@ export type {
   ChromiumStatus,
   DeviceFamily,
   UpdateStatus,
+  ExtensionConfig,
 };

@@ -10,7 +10,18 @@ import type {
 } from "@multizen/types";
 import type { ActivityEvent } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
-import type { ChromiumStatus, DeviceFamily, ProxyConfig, UpdateStatus } from "@multizen/types";
+import type {
+  ChromiumStatus,
+  DeviceFamily,
+  ExtensionConfig,
+  ProxyConfig,
+  UpdateStatus,
+} from "@multizen/types";
+
+/** Payload for the `extensions:installed` push (companion "Add to MultiZen"). */
+export type ExtensionInstalledEvent =
+  | { ok: true; profileId: string; extension: ExtensionConfig }
+  | { ok: false; profileId: string; error: string };
 
 export interface ProxyGeoResult {
   country: string;
@@ -112,6 +123,25 @@ const api = {
       const listener = (_: unknown, status: ChromiumStatus): void => cb(status);
       ipcRenderer.on("chromium:status", listener);
       return () => ipcRenderer.off("chromium:status", listener);
+    },
+  },
+  extensions: {
+    list: (profileId: string): Promise<ExtensionConfig[]> =>
+      ipcRenderer.invoke("extensions:list", profileId),
+    addFromFile: (profileId: string): Promise<ExtensionConfig[]> =>
+      ipcRenderer.invoke("extensions:addFromFile", profileId),
+    addFromFolder: (profileId: string): Promise<ExtensionConfig[]> =>
+      ipcRenderer.invoke("extensions:addFromFolder", profileId),
+    addFromWebStore: (profileId: string, urlOrId: string): Promise<ExtensionConfig[]> =>
+      ipcRenderer.invoke("extensions:addFromWebStore", profileId, urlOrId),
+    remove: (profileId: string, extId: string): Promise<ExtensionConfig[]> =>
+      ipcRenderer.invoke("extensions:remove", profileId, extId),
+    toggle: (profileId: string, extId: string, enabled: boolean): Promise<ExtensionConfig[]> =>
+      ipcRenderer.invoke("extensions:toggle", profileId, extId, enabled),
+    onInstalled: (cb: (e: ExtensionInstalledEvent) => void): (() => void) => {
+      const listener = (_: unknown, e: ExtensionInstalledEvent): void => cb(e);
+      ipcRenderer.on("extensions:installed", listener);
+      return () => ipcRenderer.off("extensions:installed", listener);
     },
   },
   update: {

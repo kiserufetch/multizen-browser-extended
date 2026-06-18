@@ -43,6 +43,13 @@ asarUnpack:
   - "**/*.node"
   - "node_modules/better-sqlite3/**/*"
 
+# Bundled first-party "companion" extension (injects the "Add to MultiZen"
+# button on Web Store pages). Copied verbatim into <resources>/companion so the
+# driver can pass it to --load-extension for every profile.
+extraResources:
+  - from: resources/companion
+    to: companion
+
 # Stable artifact names — no version baked in. The GitHub Releases page
 # still surfaces the version (from package.json) in the release title,
 # but the asset URLs stay predictable:
