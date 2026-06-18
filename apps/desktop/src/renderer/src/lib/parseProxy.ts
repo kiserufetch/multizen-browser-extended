@@ -55,10 +55,23 @@ export function parseProxyString(raw: string): ParsedProxy | null {
   if (at !== -1) {
     const left = s.slice(0, at);
     const right = s.slice(at + 1);
-    if (looksLikeHostPort(right)) {
+    const leftHP = looksLikeHostPort(left);
+    const rightHP = looksLikeHostPort(right);
+    if (leftHP && rightHP) {
+      // Both sides look like host:port (e.g. `host:port@user:<numeric pass>`).
+      // Prefer the side whose first segment looks like a real hostname/IP;
+      // otherwise default to the right (standard `user:pass@host:port`).
+      if (hostLooksReal(left) && !hostLooksReal(right)) {
+        hostPart = left;
+        credsPart = right;
+      } else {
+        hostPart = right;
+        credsPart = left;
+      }
+    } else if (rightHP) {
       hostPart = right;
       credsPart = left;
-    } else if (looksLikeHostPort(left)) {
+    } else if (leftHP) {
       hostPart = left;
       credsPart = right;
     }
@@ -102,4 +115,10 @@ function looksLikeHostPort(s: string): boolean {
   if (parts.length < 2 || !parts[0]) return false;
   const port = Number((parts[1] ?? "").trim());
   return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+/** True if the first segment looks like a real hostname/IP, not a bare username. */
+function hostLooksReal(s: string): boolean {
+  const host = (s.split(":")[0] ?? "").trim();
+  return host === "localhost" || host.includes(".");
 }
