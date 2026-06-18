@@ -57,6 +57,8 @@ let browserDriver: ChromiumBrowserDriver;
 let chromiumBootstrap: ChromiumBootstrap;
 let updater: UpdaterService;
 let extensionsService: ExtensionsService;
+/** Recent companion installs, to de-dupe the marker's retry logs. */
+const recentCompanionInstalls = new Set<string>();
 let activityLog: ActivityLog;
 let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
@@ -163,10 +165,15 @@ app.whenReady().then(async () => {
     profileManager,
     chromiumBootstrap,
     // The companion's "Add to MultiZen" button routes here (profile-scoped).
-    // Confirm natively first: the binding lives in the page's MAIN world, so any
-    // script on the store page could call it — an explicit OS dialog makes a
-    // drive-by install impossible without the user's consent.
+    // Confirm natively first: any script on the store page could trigger the
+    // channel, so an explicit OS dialog makes a drive-by install impossible.
     onCompanionInstall: (profileId, extensionId) => {
+      // De-dupe: the companion logs the marker a few times to beat a race, so
+      // ignore repeats of the same {profile,extension} within a short window.
+      const dedupeKey = `${profileId}:${extensionId}`;
+      if (recentCompanionInstalls.has(dedupeKey)) return;
+      recentCompanionInstalls.add(dedupeKey);
+      setTimeout(() => recentCompanionInstalls.delete(dedupeKey), 15000);
       void (async () => {
         const profile = profileManager.get(profileId);
         const choice = await dialog.showMessageBox(mainWindow!, {
@@ -181,6 +188,15 @@ app.whenReady().then(async () => {
         try {
           const extension = await extensionsService.installFromWebStore(profileId, extensionId);
           mainWindow?.webContents.send("extensions:installed", { ok: true, profileId, extension });
+          // Apply immediately: Chromium only reads --load-extension at startup,
+          // so relaunch the profile (session restore brings tabs back) instead
+          // of making the user close + reopen it by hand.
+          if (browserDriver.isRunning(profileId)) {
+            await browserDriver.close(profileId).catch(() => {});
+            await browserDriver.launch(profileId).catch((e: unknown) => {
+              process.stderr.write(`[extensions] relaunch failed: ${(e as Error).message}\n`);
+            });
+          }
         } catch (e) {
           mainWindow?.webContents.send("extensions:installed", {
             ok: false,
@@ -286,7 +302,12 @@ app.whenReady().then(async () => {
     return extensionsService.list(profileId);
   });
   ipcMain.handle("extensions:addFromWebStore", async (_e, profileId: string, urlOrId: string) => {
-    await extensionsService.installFromWebStore(profileId, urlOrId);
+    try {
+      await extensionsService.installFromWebStore(profileId, urlOrId);
+    } catch (e) {
+      process.stderr.write(`[extensions] addFromWebStore FAILED: ${(e as Error).stack ?? (e as Error).message}\n`);
+      throw e;
+    }
     return extensionsService.list(profileId);
   });
   ipcMain.handle("extensions:remove", (_e, profileId: string, extId: string) => {

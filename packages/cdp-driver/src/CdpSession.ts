@@ -212,44 +212,50 @@ export class CdpSession {
    */
   async watchUrlForBinding(opts: {
     urlIncludes: string;
+    /** Unused (kept for call-site compatibility). */
     bindingName: string;
     onPayload: (payload: string) => void;
   }): Promise<void> {
     const client = this.require();
     const { Target } = client;
-    // targetId → sessionId for targets we've enabled Runtime + the binding on.
-    // Keyed by targetId (NOT sessionId) so SPA navigation events don't cause
-    // repeat attaches / repeat Runtime.enable.
-    const armed = new Map<string, string>();
+    // Channel via a DOM attribute: CloakBrowser puts content scripts in an
+    // ISOLATED world (it ignores manifest world:MAIN) and suppresses console
+    // CDP events, so neither Runtime bindings nor console reach us. But the DOM
+    // is shared across worlds, and Runtime.evaluate works — so the content
+    // script writes the id to <html data-mz-add-ext="…"> and we poll for it.
+    // Scoped to Web Store page targets only.
+    const ATTR = "data-mz-add-ext";
+    const armed = new Map<string, NodeJS.Timeout>();
 
-    client.on("Runtime.bindingCalled", (p: { name?: string; payload?: string }) => {
-      if (p?.name === opts.bindingName && typeof p.payload === "string") {
-        opts.onPayload(p.payload);
-      }
-    });
-
-    const arm = async (targetId: string, sessionId: string): Promise<void> => {
-      if (armed.has(targetId)) return;
-      armed.set(targetId, sessionId);
+    const poll = async (sessionId: string): Promise<void> => {
       try {
-        await client.send("Runtime.enable", undefined, sessionId);
-        await client.send("Runtime.addBinding", { name: opts.bindingName }, sessionId);
+        const r = (await client.send(
+          "Runtime.evaluate",
+          {
+            expression: `(function(){var e=document.documentElement,v=e.getAttribute('${ATTR}');if(v)e.removeAttribute('${ATTR}');return v;})()`,
+            returnByValue: true,
+          },
+          sessionId,
+        )) as { result?: { value?: unknown } };
+        const v = r?.result?.value;
+        if (typeof v === "string" && v) {
+          opts.onPayload(v);
+        }
       } catch {
-        armed.delete(targetId); // retry allowed on a later event
+        // session gone / navigating — ignore
       }
     };
 
-    // When a target navigates AWAY from the matching URL, turn Runtime back
-    // OFF so a tab reused for normal browsing after a store visit doesn't keep
-    // the CDP automation tell.
-    const disarm = async (targetId: string): Promise<void> => {
-      const sessionId = armed.get(targetId);
-      if (!sessionId) return;
-      armed.delete(targetId);
-      try {
-        await client.send("Runtime.disable", undefined, sessionId);
-      } catch {
-        // session may already be gone
+    const arm = (targetId: string, sessionId: string): void => {
+      if (armed.has(targetId)) return;
+      const interval = setInterval(() => void poll(sessionId), 600);
+      armed.set(targetId, interval);
+    };
+    const disarm = (targetId: string): void => {
+      const interval = armed.get(targetId);
+      if (interval) {
+        clearInterval(interval);
+        armed.delete(targetId);
       }
     };
 
@@ -257,8 +263,6 @@ export class CdpSession {
       targetInfo: { targetId: string; type?: string; url?: string },
       sessionId?: string,
     ): Promise<void> => {
-      // Only page targets — never the store PWA's service worker (arming
-      // Runtime there is a needless CDP tell with no companion to talk to).
       const isPage = targetInfo.type === undefined || targetInfo.type === "page";
       const matches = isPage && !!targetInfo.url?.includes(opts.urlIncludes);
       if (matches) {
@@ -272,9 +276,9 @@ export class CdpSession {
             return;
           }
         }
-        await arm(targetInfo.targetId, sid);
-      } else if (armed.has(targetInfo.targetId)) {
-        await disarm(targetInfo.targetId);
+        arm(targetInfo.targetId, sid);
+      } else {
+        disarm(targetInfo.targetId);
       }
     };
 
@@ -292,7 +296,7 @@ export class CdpSession {
       },
     );
     client.on("Target.targetDestroyed", (p: { targetId: string }) => {
-      armed.delete(p.targetId);
+      disarm(p.targetId);
     });
     try {
       const { targetInfos } = await Target.getTargets();
