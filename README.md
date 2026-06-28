@@ -35,6 +35,15 @@
   <br/><br/>
 </div>
 
+## About this fork
+
+This repository is a fork of [`multizenteam/multizen-browser`](https://github.com/multizenteam/multizen-browser).
+
+<!-- FORK-BASE: update this version whenever you pull changes from upstream -->
+**Based on upstream release:** `v0.2.10`
+
+Fork-specific changes are tracked in [`CHANGELOG.md`](CHANGELOG.md) from `v0.2.11` onward. Whenever you merge changes from the original repository, update the **Based on upstream release** line above to the latest upstream release you synced from.
+
 ## What it is
 
 MultiZen is a desktop app that runs a library of isolated Chromium browser profiles. Each profile has its own cookies, login state, fingerprint, and proxy. A local MCP server on `localhost:7777` exposes browser-drive tools (navigate, click, type, extract, screenshot) to any MCP client.

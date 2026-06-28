@@ -48,7 +48,10 @@ release-builds/
 vendor/multizen-private/
 
 !.gitkeep
+
+# AI agent / assistant config (local only)
 .claude/
+CLAUDE.md
 
 # Internal strategy / planning docs — never committed
 docs/
