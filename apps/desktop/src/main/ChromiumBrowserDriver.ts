@@ -636,8 +636,12 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // a planned close (no event emitted from there).
     this.running.delete(profileId);
     clearInterval(r.windowWatcher);
-    await stopBridgeForProfile(profileId).catch(() => {});
+    // Shut Chromium down BEFORE the socks5 bridge. The bridge's server.close()
+    // waits for its accepted sockets to end; a still-running Chromium holds
+    // those proxied connections open, so closing the bridge first can deadlock
+    // the shutdown (and, via before-quit, hang the whole app on exit).
     await gracefulShutdown(r);
+    await stopBridgeForProfile(profileId).catch(() => {});
     this.emit("running-changed", { kind: "closed", profileId, reason: "user-close" });
   }
 

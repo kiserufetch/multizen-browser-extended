@@ -15,8 +15,8 @@ import {
 import {
   HttpTransport,
   createMultizenMcpServer,
+  ActivityLog,
   type ActivityEvent,
-  type ActivityLog,
 } from "@multizen/mcp-server";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
 import type { ChromiumStatus, ProxyConfig, UpdateStatus } from "@multizen/types";
@@ -232,8 +232,9 @@ app.whenReady().then(async () => {
     },
   });
 
-  const mcp = createMultizenMcpServer({ profileManager, browserDriver });
-  activityLog = mcp.activityLog;
+  // One shared ActivityLog across all MCP sessions so the renderer sees every
+  // tool call regardless of which transport/session produced it.
+  activityLog = new ActivityLog();
 
   // Forward activity events to renderer
   activityLog.on("event", (e: ActivityEvent) => {
@@ -254,11 +255,17 @@ app.whenReady().then(async () => {
   // the user to click "Test proxy" or relaunch.
   void backfillProxyCountries();
 
-  // Optional embedded HTTP+SSE transport so external Cursor/Claude can connect
+  // Optional embedded HTTP transport (Streamable HTTP + legacy SSE) so external
+  // Cursor/Claude can connect. Each session gets its own MCP server via the
+  // factory, all sharing the deps + ActivityLog captured here.
   if (cachedSettings.mcpHttpEnabled) {
     try {
-      httpTransport = new HttpTransport({ port: cachedSettings.mcpHttpPort });
-      await httpTransport.start(mcp.server);
+      httpTransport = new HttpTransport({
+        port: cachedSettings.mcpHttpPort,
+        createServer: () =>
+          createMultizenMcpServer({ profileManager, browserDriver, activityLog }).server,
+      });
+      await httpTransport.start();
     } catch (e) {
       // Port collision is non-fatal — log and continue
       process.stderr.write(`MCP HTTP transport failed to start: ${String(e)}\n`);
@@ -501,13 +508,33 @@ async function backfillProxyCountries(): Promise<void> {
   }
 }
 
-app.on("before-quit", async (e) => {
+let quitting = false;
+app.on("before-quit", (e) => {
+  // Re-entrancy guard: once cleanup is underway, let the final app.exit(0)
+  // proceed instead of preventing the quit again.
+  if (quitting) return;
+  quitting = true;
   e.preventDefault();
-  try {
-    await browserDriver?.closeAll();
-    await httpTransport?.stop();
-    profileManager?.close();
-  } finally {
+
+  // Watchdog: cleanup must never block the quit. If a browser shutdown or the
+  // HTTP transport stall (e.g. a wedged keep-alive socket), force-exit anyway
+  // so the user never has to kill MultiZen via Task Manager.
+  const watchdog = setTimeout(() => {
+    process.stderr.write("[multizen] shutdown cleanup timed out — forcing exit\n");
     app.exit(0);
-  }
+  }, 3000);
+  watchdog.unref?.();
+
+  void (async () => {
+    try {
+      await browserDriver?.closeAll();
+      await httpTransport?.stop();
+      profileManager?.close();
+    } catch (err) {
+      process.stderr.write(`[multizen] shutdown error: ${String(err)}\n`);
+    } finally {
+      clearTimeout(watchdog);
+      app.exit(0);
+    }
+  })();
 });

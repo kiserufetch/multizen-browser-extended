@@ -1,36 +1,82 @@
-import { createServer, type IncomingMessage, type ServerResponse, type Server as HttpServer } from "node:http";
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type ServerResponse,
+  type Server as HttpServer,
+} from "node:http";
+import { randomUUID } from "node:crypto";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 export interface HttpTransportOptions {
   port: number;
   host?: string;
   /** Optional bearer token; if set, requests must send Authorization: Bearer <token> */
   authToken?: string;
+  /**
+   * Factory that builds a FRESH MCP server for each session. A single
+   * `Server` instance can only be bound to one transport at a time, so every
+   * connection gets its own — sharing the heavy deps (ProfileManager,
+   * BrowserDriver, ActivityLog) via the closure that creates them.
+   */
+  createServer: () => McpServer;
+  /**
+   * SSE keep-alive heartbeat interval in ms. A comment line is written to each
+   * open SSE stream so idle connections aren't silently dropped by the OS /
+   * intermediaries. Set to 0 to disable. Default 15000.
+   */
+  heartbeatMs?: number;
+}
+
+interface SseSession {
+  transport: SSEServerTransport;
+  server: McpServer;
+  heartbeat?: ReturnType<typeof setInterval>;
+}
+
+interface StreamableSession {
+  transport: StreamableHTTPServerTransport;
+  server: McpServer;
 }
 
 /**
- * HTTP+SSE transport so external MCP clients (Cursor, Claude Desktop)
- * can connect to the running desktop app, not just spawn a stdio child.
+ * HTTP transport so external MCP clients (Cursor, Claude Desktop) can connect
+ * to the running desktop app, not just spawn a stdio child.
  *
- * Endpoints:
- *   GET  /sse        — open SSE stream
- *   POST /messages   — send a message to the open SSE stream
- *   GET  /healthz    — liveness check
+ * Supports both transports:
+ *   - Streamable HTTP (primary): POST/GET/DELETE /mcp
+ *   - HTTP+SSE (legacy/back-compat): GET /sse + POST /messages?sessionId=…
+ *   - GET /healthz — liveness + per-transport session counts
+ *
+ * Every connection is bound to its own freshly-created `Server` and tracked by
+ * session id, so a reconnect can never clobber the active session's binding
+ * (the bug behind "MCP accepts the SSE connection but never initialises") and a
+ * second client cannot wedge the first. On shutdown all sockets are forcibly
+ * destroyed so `before-quit` can never hang waiting on a keep-alive SSE stream.
  */
 export class HttpTransport {
   private readonly server: HttpServer;
   private readonly opts: HttpTransportOptions;
-  private sseTransport: SSEServerTransport | null = null;
-  private mcp: McpServer | null = null;
+  private readonly heartbeatMs: number;
+  private readonly sseSessions = new Map<string, SseSession>();
+  private readonly streamableSessions = new Map<string, StreamableSession>();
+  private stopping = false;
 
   constructor(opts: HttpTransportOptions) {
     this.opts = opts;
-    this.server = createServer((req, res) => this.handle(req, res));
+    this.heartbeatMs = opts.heartbeatMs ?? 15000;
+    this.server = createHttpServer((req, res) => {
+      void this.handle(req, res).catch((e) => {
+        process.stderr.write(`[mcp-http] unhandled request error: ${String(e)}\n`);
+        if (!res.headersSent) res.writeHead(500).end("internal error");
+        else res.end();
+      });
+    });
   }
 
-  async start(mcp: McpServer): Promise<void> {
-    this.mcp = mcp;
+  async start(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error): void => {
         this.server.off("listening", onListening);
@@ -47,14 +93,41 @@ export class HttpTransport {
   }
 
   async stop(): Promise<void> {
-    if (this.sseTransport) {
-      await this.sseTransport.close();
-      this.sseTransport = null;
+    this.stopping = true;
+
+    // Close every tracked session. Closing the transport ends its HTTP
+    // response and fires its onclose, which tears down the bound server and
+    // clears the heartbeat. Snapshot first so the onclose-driven map deletes
+    // don't mutate what we're iterating.
+    for (const session of [...this.sseSessions.values()]) {
+      await session.transport.close().catch(() => {});
     }
+    this.sseSessions.clear();
+
+    for (const session of [...this.streamableSessions.values()]) {
+      await session.transport.close().catch(() => {});
+    }
+    this.streamableSessions.clear();
+
+    // Forcibly destroy any lingering keep-alive sockets so the close callback
+    // actually fires. Without this, an open SSE stream keeps `server.close()`
+    // pending forever and the app can only be killed via Task Manager.
+    this.server.closeAllConnections?.();
+
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
+  /** Snapshot of live sessions — surfaced via /healthz for diagnostics. */
+  status(): { sse: number; streamable: number } {
+    return { sse: this.sseSessions.size, streamable: this.streamableSessions.size };
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (this.stopping) {
+      res.writeHead(503).end("shutting down");
+      return;
+    }
+
     if (this.opts.authToken) {
       const auth = req.headers.authorization ?? "";
       if (auth !== `Bearer ${this.opts.authToken}`) {
@@ -63,40 +136,208 @@ export class HttpTransport {
       }
     }
 
-    const url = req.url ?? "/";
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const pathname = url.pathname;
 
-    if (url === "/healthz") {
+    if (pathname === "/healthz") {
+      const status = this.status();
       res.writeHead(200, { "content-type": "application/json" }).end(
-        JSON.stringify({ ok: true, name: "multizen-mcp", connected: this.sseTransport !== null }),
+        JSON.stringify({
+          ok: true,
+          name: "multizen-mcp",
+          sessions: status,
+          connected: status.sse + status.streamable > 0,
+        }),
       );
       return;
     }
 
-    if (req.method === "GET" && url.startsWith("/sse")) {
-      if (!this.mcp) {
-        res.writeHead(503).end("mcp not started");
-        return;
-      }
-      const transport = new SSEServerTransport("/messages", res);
-      this.sseTransport = transport;
-      await this.mcp.connect(transport);
-      // SSE keeps the response open
+    // Streamable HTTP (primary) — single endpoint for GET/POST/DELETE.
+    if (pathname === "/mcp") {
+      await this.handleStreamable(req, res);
       return;
     }
 
-    if (req.method === "POST" && url.startsWith("/messages")) {
-      if (!this.sseTransport) {
-        res.writeHead(409).end("no SSE stream open");
-        return;
-      }
-      try {
-        await this.sseTransport.handlePostMessage(req, res);
-      } catch (e) {
-        res.writeHead(500).end((e as Error).message);
-      }
+    // Legacy HTTP+SSE.
+    if (pathname === "/sse" && req.method === "GET") {
+      await this.handleSseConnect(req, res);
+      return;
+    }
+    if (pathname === "/messages" && req.method === "POST") {
+      await this.handleSsePost(req, res, url);
       return;
     }
 
     res.writeHead(404).end("not found");
   }
+
+  // ── Streamable HTTP ──────────────────────────────────────────────────────
+  private async handleStreamable(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const sessionId = headerValue(req.headers["mcp-session-id"]);
+
+    if (sessionId) {
+      const existing = this.streamableSessions.get(sessionId);
+      if (!existing) {
+        jsonRpcError(res, 404, -32001, "Session not found");
+        return;
+      }
+      await existing.transport.handleRequest(req, res);
+      return;
+    }
+
+    // No session id → only valid as an initialization POST that opens one.
+    if (req.method !== "POST") {
+      jsonRpcError(res, 400, -32000, "Bad Request: missing mcp-session-id");
+      return;
+    }
+
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (e) {
+      jsonRpcError(res, 400, -32700, `Parse error: ${(e as Error).message}`);
+      return;
+    }
+
+    if (!isInitializeRequest(body)) {
+      jsonRpcError(res, 400, -32000, "Bad Request: no valid session ID provided");
+      return;
+    }
+
+    const server = this.opts.createServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (sid) => {
+        this.streamableSessions.set(sid, { transport, server });
+      },
+    });
+    // Idempotent teardown. server.close() closes the transport, whose onclose
+    // re-enters here — the guard stops that from recursing into a stack
+    // overflow while still releasing the per-session server exactly once.
+    let torndown = false;
+    transport.onclose = () => {
+      if (torndown) return;
+      torndown = true;
+      const sid = transport.sessionId;
+      if (sid) this.streamableSessions.delete(sid);
+      void server.close().catch(() => {});
+    };
+
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, body);
+    } catch (e) {
+      await transport.close().catch(() => {});
+      if (!res.headersSent) jsonRpcError(res, 500, -32603, "Internal server error");
+      else res.end();
+      process.stderr.write(`[mcp-http] streamable init failed: ${String(e)}\n`);
+    }
+  }
+
+  // ── Legacy HTTP+SSE ──────────────────────────────────────────────────────
+  private async handleSseConnect(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const server = this.opts.createServer();
+    const transport = new SSEServerTransport("/messages", res);
+    const sessionId = transport.sessionId;
+    const session: SseSession = { transport, server };
+
+    // Single idempotent teardown shared by transport.onclose and res 'close'.
+    let torndown = false;
+    const cleanup = (): void => {
+      if (torndown) return;
+      torndown = true;
+      if (session.heartbeat) clearInterval(session.heartbeat);
+      this.sseSessions.delete(sessionId);
+      void server.close().catch(() => {});
+    };
+    transport.onclose = cleanup;
+    res.on("close", cleanup);
+
+    this.sseSessions.set(sessionId, session);
+
+    try {
+      // connect() calls transport.start(), which writes 200 + `event: endpoint`.
+      await server.connect(transport);
+    } catch (e) {
+      cleanup();
+      if (!res.headersSent) res.writeHead(500).end("failed to start SSE session");
+      else res.end();
+      process.stderr.write(`[mcp-http] SSE connect failed: ${String(e)}\n`);
+      return;
+    }
+
+    if (this.heartbeatMs > 0) {
+      session.heartbeat = setInterval(() => {
+        // A comment line is a no-op for the client but keeps the socket warm
+        // and surfaces a broken pipe so we can tear the session down.
+        try {
+          res.write(": ping\n\n");
+        } catch {
+          cleanup();
+        }
+      }, this.heartbeatMs);
+      // Don't let the heartbeat timer hold the process open on its own.
+      session.heartbeat.unref?.();
+    }
+  }
+
+  private async handleSsePost(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const sessionId = url.searchParams.get("sessionId");
+    const session = sessionId ? this.sseSessions.get(sessionId) : undefined;
+    if (!session) {
+      res.writeHead(404).end("no SSE session for sessionId");
+      return;
+    }
+    try {
+      await session.transport.handlePostMessage(req, res);
+    } catch (e) {
+      if (!res.headersSent) res.writeHead(500).end((e as Error).message);
+      else res.end();
+    }
+  }
+}
+
+function headerValue(v: string | string[] | undefined): string | undefined {
+  if (Array.isArray(v)) return v[0];
+  return v;
+}
+
+function jsonRpcError(res: ServerResponse, httpStatus: number, code: number, message: string): void {
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  res.writeHead(httpStatus, { "content-type": "application/json" }).end(
+    JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: null }),
+  );
+}
+
+function readJsonBody(req: IncomingMessage, limitBytes = 4 * 1024 * 1024): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk: string) => {
+      data += chunk;
+      if (data.length > limitBytes) {
+        reject(new Error("request body too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      if (!data) {
+        resolve(undefined);
+        return;
+      }
+      try {
+        resolve(JSON.parse(data));
+      } catch (e) {
+        reject(e as Error);
+      }
+    });
+    req.on("error", (e) => reject(e));
+  });
 }
