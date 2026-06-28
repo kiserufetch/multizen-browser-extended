@@ -80,17 +80,39 @@
     return btn;
   }
 
-  // Locate the VISIBLE native "Add to Chrome" button so we can sit in its place.
-  // Skip ones we've already hidden (left over from a previous SPA page).
-  function findNativeAdd() {
+  // A genuinely VISIBLE native "Add to Chrome" button. Some pages/locales still
+  // render it; when they do we replace it in place. On the current Web Store for
+  // non-Chrome browsers Google collapses this to 0×0 / display:none and shows a
+  // promo banner instead (see findInstallBanner), so require real size here.
+  function findVisibleNativeAdd() {
     const spans = document.querySelectorAll("span");
     for (let i = 0; i < spans.length; i++) {
       if ((spans[i].textContent || "").trim() !== "Add to Chrome") continue;
       const btn = spans[i].closest("button");
       if (!btn) continue;
       const container = btn.closest("div.OdjmDb") || btn.parentElement || btn;
-      if (container.style && container.style.display === "none") continue; // already hidden
+      if (container.style && container.style.display === "none") continue;
+      const r = container.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue; // collapsed for non-Chrome
       return container;
+    }
+    return null;
+  }
+
+  // The non-Chrome CTA banner Google shows in place of the install button:
+  // "Switch to Chrome to install extensions and themes  [Install Chrome]". This
+  // is the VISIBLE spot a non-Chrome user looks at, so when the native button is
+  // hidden we anchor our button here and hide the banner.
+  function findInstallBanner() {
+    const divs = document.querySelectorAll("div");
+    for (let i = 0; i < divs.length; i++) {
+      const t = (divs[i].textContent || "").trim();
+      if (t.length === 0 || t.length > 120) continue;
+      if (!/Switch to Chrome to install extensions/i.test(t)) continue;
+      const r = divs[i].getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue; // not the visible one
+      if (divs[i].querySelector("#mz-add-to-multizen")) continue;
+      return divs[i];
     }
     return null;
   }
@@ -105,24 +127,68 @@
       placedPath = "";
     }
     if (document.getElementById("mz-add-to-multizen")) return; // already placed here
-    const native = findNativeAdd();
-    if (!native || !native.parentElement) return; // wait for the native button
-    placedPath = location.pathname;
-    const btn = makeButton();
-    native.parentElement.insertBefore(btn, native);
-    native.style.setProperty("display", "none", "important");
+
+    // Primary: a visible native "Add to Chrome" → sit in its place.
+    const native = findVisibleNativeAdd();
+    if (native && native.parentElement) {
+      placedPath = location.pathname;
+      const btn = makeButton();
+      native.parentElement.insertBefore(btn, native);
+      native.style.setProperty("display", "none", "important");
+      // If a redundant install banner is also present, hide it too (normally
+      // mutually exclusive with a visible native button, but cheap to guard).
+      hideInstallBanner();
+      return;
+    }
+    // Fallback (current non-Chrome layout): native button is hidden and the
+    // "Switch to Chrome to install…" banner takes its place. Put our button at
+    // the banner's spot and hide the banner itself.
+    const banner = findInstallBanner();
+    if (banner && banner.parentElement) {
+      placedPath = location.pathname;
+      const btn = makeButton();
+      banner.parentElement.insertBefore(btn, banner);
+      banner.style.setProperty("display", "none", "important");
+      banner.setAttribute("data-mz-promo-hidden", "1");
+    }
   }
 
-  // Hide Google's "Switch to Chrome" / "Install Chrome" promos shown to
-  // non-Chrome browsers (they can appear after a delay, and there are several
-  // variants). Climb to the promo container but STOP before anything large
-  // enough to be the page itself. Marks hidden nodes so it doesn't loop.
+  // Hide the inline install banner if present (without anchoring to it). Used by
+  // the native-button branch so a stray banner never lingers alongside our
+  // button. findInstallBanner skips banners that already contain our button.
+  function hideInstallBanner() {
+    const banner = findInstallBanner();
+    if (banner) {
+      banner.style.setProperty("display", "none", "important");
+      banner.setAttribute("data-mz-promo-hidden", "1");
+    }
+  }
+
+  // True if `node` contains (or is) our button or the native install control.
+  // Used as a hard fence so the promo-hider never nukes the action area —
+  // these can share an ancestor with the "Switch to Chrome" promo, and hiding
+  // that ancestor was wiping our button + page content.
+  function containsActionUi(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (node.querySelector && node.querySelector("#mz-add-to-multizen")) return true;
+    const spans = node.querySelectorAll ? node.querySelectorAll("span") : [];
+    for (let i = 0; i < spans.length; i++) {
+      if ((spans[i].textContent || "").trim() === "Add to Chrome") return true;
+    }
+    return false;
+  }
+
+  // Hide Google's "Switch to Chrome?" MODAL dialog shown to non-Chrome browsers
+  // ("…Google recommends using Chrome…  No thanks / Yes"). The INLINE install
+  // banner ("Switch to Chrome to install extensions…") is intentionally NOT
+  // handled here — placeButton() owns it (anchors our button there, then hides
+  // it). Targeting it here too caused a race: this could hide the banner while
+  // it was still 0-width, before placeButton could anchor, leaving no button.
+  // Climb to the promo container but STOP before (a) anything large enough to be
+  // the page itself, or (b) any node that holds our button or the native install
+  // control. Hide only a promo-only node. Marks to avoid loops.
   function hideSwitchBanner() {
-    const needles = [
-      "Switch to Chrome",
-      "recommends using Chrome",
-      "to install extensions",
-    ];
+    const needles = ["Switch to Chrome?", "recommends using Chrome"];
     // Scan spans + divs — covers a promo whose text is split across child spans
     // (the parent div's textContent still matches), without walking the whole
     // DOM. getBoundingClientRect only runs for the few nodes that match a needle.
@@ -134,13 +200,19 @@
       let hit = false;
       for (let j = 0; j < needles.length; j++) if (text.indexOf(needles[j]) !== -1) hit = true;
       if (!hit) continue;
+      // The matched element itself must not wrap the action UI.
+      if (containsActionUi(el)) continue;
       let node = el;
       for (let up = 0; up < 5 && node.parentElement; up++) {
         const p = node.parentElement;
+        // Fence: never ascend into a node that contains our button / the native
+        // install control — that ancestor is the action area, not the promo.
+        if (containsActionUi(p)) break;
         const r = p.getBoundingClientRect();
         if (r.height > window.innerHeight * 0.5 || r.width > window.innerWidth * 0.9) break;
         node = p;
       }
+      if (containsActionUi(node)) continue; // final safety: don't hide the action area
       if (node.getAttribute("data-mz-promo-hidden")) continue; // already hidden
       node.setAttribute("data-mz-promo-hidden", "1");
       node.style.setProperty("display", "none", "important");
