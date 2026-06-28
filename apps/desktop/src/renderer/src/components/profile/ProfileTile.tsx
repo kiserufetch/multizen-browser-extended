@@ -315,7 +315,10 @@ function ActionMenu({
           <>
             <div
               className="fixed inset-0 z-[60]"
-              onMouseDown={() => setOpen(false)}
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                setOpen(false);
+              }}
             />
             <div
               className="fixed z-[61] w-44 py-1 rounded-md"
@@ -358,7 +361,10 @@ function MenuItem({
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
       className={cn(
         "w-full text-left px-3 py-1.5 text-[12px] cursor-pointer transition-colors hover:bg-white/[0.05]",
         tone === "danger" ? "text-red-400" : "text-slate-200",
