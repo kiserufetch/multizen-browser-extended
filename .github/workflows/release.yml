@@ -16,7 +16,43 @@ permissions:
   contents: write # needed to create GitHub Releases
 
 jobs:
+  # Gate the (expensive, 3-OS) build matrix behind a strict typecheck so a
+  # broken tag can never publish binaries.
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Enable Corepack (Yarn 4)
+        run: |
+          corepack enable
+          corepack prepare yarn@4.5.0 --activate
+
+      - name: Cache Yarn
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.yarn/berry/cache
+            .yarn/cache
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Typecheck (all workspaces)
+        run: yarn typecheck
+
   build:
+    needs: validate
     strategy:
       fail-fast: false
       matrix:

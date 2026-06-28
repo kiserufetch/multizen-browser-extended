@@ -153,7 +153,7 @@ After installing, the MCP server starts on `localhost:7777`. Add it to your clie
 }
 ```
 
-Restart your client. The agent now has tools: `list_profiles`, `launch_profile`, `close_profile`, `navigate`, `click`, `type`, `extract`, `screenshot`.
+Restart your client. The agent now has tools: `list_profiles`, `create_profile`, `update_profile`, `delete_profile`, `launch_profile`, `close_profile`, `navigate`, `click`, `type`, `extract`, `screenshot`, `list_fingerprint_options`. Profile management is full CRUD: `create_profile` / `update_profile` accept an optional `proxy` and high-level `fingerprint` (device, locale, timezone, screen), and `list_fingerprint_options` enumerates the valid device families and locale groups.
 
 ## Honest limits
 
