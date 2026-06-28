@@ -19,6 +19,7 @@ import type { ChromiumBootstrap } from "./ChromiumBootstrap";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { probeProxyGeo } from "./proxyGeo";
 import { companionDir } from "./extensions/companion";
+import { resolveLoadDir } from "./extensions/extensionStore.ts";
 
 interface RunningProcess {
   child: ChildProcess;
@@ -40,6 +41,9 @@ export interface ChromiumBrowserDriverOptions {
    * (the CDP session is profile-scoped). The host installs the extension.
    */
   onCompanionInstall?: (profileId: ProfileId, extensionId: string) => void;
+  /** Root of the shared extension store, e.g. `<userData>/data/extension-store`.
+   *  Used to resolve shared extension references to their on-disk load dir. */
+  extensionStoreRoot: string;
 }
 
 export type RunningStateChange =
@@ -66,12 +70,14 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private readonly profileManager: ProfileManager;
   private readonly bootstrap: ChromiumBootstrap;
   private readonly onCompanionInstall?: (profileId: ProfileId, extensionId: string) => void;
+  private readonly extensionStoreRoot: string;
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     super();
     this.profileManager = opts.profileManager;
     this.bootstrap = opts.chromiumBootstrap;
     this.onCompanionInstall = opts.onCompanionInstall;
+    this.extensionStoreRoot = opts.extensionStoreRoot;
   }
 
   override on<K extends keyof DriverEvents>(event: K, listener: DriverEvents[K]): this {
@@ -326,7 +332,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     if (companion) extensionDirs.push(companion);
     for (const ext of profile.extensions ?? []) {
       if (!ext.enabled) continue;
-      const dir = join(profile.dataDir, ext.dir);
+      // Resolve both shared store entries and legacy per-profile copies.
+      const dir = resolveLoadDir(ext, profile.dataDir, this.extensionStoreRoot);
       // Skip a missing dir: a single bad path makes Chromium drop the ENTIRE
       // --load-extension list (the companion too), silently disabling all
       // extensions for the launch.

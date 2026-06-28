@@ -104,13 +104,25 @@ export interface FingerprintConfig {
  * invisible to the user.
  */
 export interface ExtensionConfig {
-  /** Chromium extension ID (32 a–p chars), derived from the install dir. */
+  /** Chromium extension ID (32 a–p chars). For store/CRX installs with a
+   *  recovered developer key this is the genuine Chrome Web Store ID; for
+   *  keyless folder/zip installs it's a stable content-hash-derived ID. */
   id: string;
   /** Display name from the extension's manifest. */
   name: string;
+  /** Manifest version string (e.g. "1.50.0"). Shared store entries are keyed by
+   *  id + version. "" for legacy rows installed before dedup. */
+  version: string;
   /** Whether to load this extension on the next profile launch. */
   enabled: boolean;
-  /** Install directory, relative to the profile's dataDir (e.g. "extensions/<id>"). */
+  /** Where the unpacked files live:
+   *  - "shared": one copy in the global store at <storeRoot>/<id>/<version>/,
+   *    shared across profiles (`dir` is "").
+   *  - "profile": legacy per-profile copy under the profile's dataDir, located
+   *    via `dir`. */
+  scope: "shared" | "profile";
+  /** Install directory relative to the profile's dataDir (e.g. "extensions/<uuid>").
+   *  Used only for scope "profile" (legacy / local); "" for shared entries. */
   dir: string;
   /** How it was added. */
   source: "web-store" | "file" | "folder";

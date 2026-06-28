@@ -229,6 +229,24 @@ export class ProfileManager {
     this.db.close();
   }
 
+  /**
+   * Every extension reference across all profiles, used by the shared-store GC
+   * to decide whether a store entry is still referenced (derived refcount — no
+   * separate counter to drift out of sync).
+   */
+  allExtensionRefs(): Array<{ profileId: string; dataDir: string; ext: ExtensionConfig }> {
+    const rows = this.db
+      .prepare(`SELECT id, data_dir, extensions FROM profiles`)
+      .all() as Array<Pick<ProfileRow, "id" | "data_dir" | "extensions">>;
+    const out: Array<{ profileId: string; dataDir: string; ext: ExtensionConfig }> = [];
+    for (const r of rows) {
+      for (const ext of normalizeExtensions(r.extensions)) {
+        out.push({ profileId: r.id, dataDir: r.data_dir, ext });
+      }
+    }
+    return out;
+  }
+
   private rowToProfile(row: ProfileRow): Profile {
     return {
       id: row.id,
@@ -237,7 +255,7 @@ export class ProfileManager {
       tags: JSON.parse(row.tags) as string[],
       proxy: row.proxy ? (JSON.parse(row.proxy) as ProxyConfig) : undefined,
       fingerprint: JSON.parse(row.fingerprint) as FingerprintConfig,
-      extensions: row.extensions ? (JSON.parse(row.extensions) as ExtensionConfig[]) : [],
+      extensions: normalizeExtensions(row.extensions),
       dataDir: row.data_dir,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -245,4 +263,30 @@ export class ProfileManager {
       proxyCountry: row.proxy_country ?? undefined,
     };
   }
+}
+
+/**
+ * Parse + normalize the JSON `extensions` column. Back-compat: rows written
+ * before the dedup feature lack `scope`/`version`, so default them (legacy
+ * per-profile copies → scope "profile", unknown version → ""). This is why the
+ * new fields need no SQL migration — the column is additive JSON.
+ */
+function normalizeExtensions(raw: string | null): ExtensionConfig[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return (parsed as Array<Partial<ExtensionConfig>>).map((e) => ({
+    id: e.id ?? "",
+    name: e.name ?? "Extension",
+    version: e.version ?? "",
+    scope: e.scope ?? "profile",
+    enabled: e.enabled ?? true,
+    dir: e.dir ?? "",
+    source: e.source ?? "file",
+  }));
 }

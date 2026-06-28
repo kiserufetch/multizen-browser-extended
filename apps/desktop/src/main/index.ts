@@ -24,6 +24,7 @@ import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
 import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
 import { UpdaterService } from "./UpdaterService.ts";
 import { ExtensionsService } from "./extensions/ExtensionsService.ts";
+import { sweepOrphans } from "./extensions/extensionStore.ts";
 import { probeProxyGeo, type ProxyGeoResult } from "./proxyGeo.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -118,6 +119,8 @@ app.whenReady().then(async () => {
 
   const userData = app.getPath("userData");
   const dataRoot = join(userData, "data");
+  // Shared extension store (deduped extension files loaded into many profiles).
+  const extensionStoreRoot = join(dataRoot, "extension-store");
 
   settingsStore = new SettingsStore(defaultSettingsPath(userData));
   cachedSettings = await settingsStore.load();
@@ -126,6 +129,19 @@ app.whenReady().then(async () => {
     dbPath: join(dataRoot, "profiles.db"),
     profilesRoot: join(dataRoot, "profiles"),
   });
+
+  // Reclaim shared store entries no profile references any more (e.g. left by a
+  // crash mid-delete) plus stale staging dirs. Best-effort; never blocks startup.
+  void sweepOrphans(
+    extensionStoreRoot,
+    profileManager.allExtensionRefs().map((r) => r.ext),
+  )
+    .then((res) => {
+      if (res.removed > 0) {
+        process.stdout.write(`[multizen] extension-store sweep reclaimed ${res.removed} orphan(s)\n`);
+      }
+    })
+    .catch(() => {});
 
   // Chromium bootstrap — picks the engine from user settings (CFT default,
   // CloakBrowser opt-in for stronger anti-detect), downloads it on first
@@ -155,6 +171,7 @@ app.whenReady().then(async () => {
   // ready).
   extensionsService = new ExtensionsService({
     profileManager,
+    extensionStoreRoot,
     engineVersion: () => {
       const s = chromiumBootstrap.getStatus();
       return s.kind === "ready" ? s.version : "145.0.0.0";
@@ -164,6 +181,7 @@ app.whenReady().then(async () => {
   browserDriver = new ChromiumBrowserDriver({
     profileManager,
     chromiumBootstrap,
+    extensionStoreRoot,
     // The companion's "Add to MultiZen" button routes here (profile-scoped).
     // Confirm natively first: any script on the store page could trigger the
     // channel, so an explicit OS dialog makes a drive-by install impossible.
@@ -264,6 +282,12 @@ app.whenReady().then(async () => {
   ipcMain.handle("profiles:delete", (_e, id: string) => {
     void browserDriver.close(id).catch(() => {});
     profileManager.delete(id);
+    // Reclaim shared store entries this profile referenced that no other profile
+    // still uses (delete() only removed the profile's own dataDir). Best-effort.
+    void sweepOrphans(
+      extensionStoreRoot,
+      profileManager.allExtensionRefs().map((r) => r.ext),
+    ).catch(() => {});
   });
   ipcMain.handle("profiles:launch", (_e, id: string) => browserDriver.launch(id));
   ipcMain.handle("profiles:close", (_e, id: string) => browserDriver.close(id));
@@ -316,8 +340,8 @@ app.whenReady().then(async () => {
     }
     return extensionsService.list(profileId);
   });
-  ipcMain.handle("extensions:remove", (_e, profileId: string, extId: string) => {
-    extensionsService.remove(profileId, extId);
+  ipcMain.handle("extensions:remove", async (_e, profileId: string, extId: string) => {
+    await extensionsService.remove(profileId, extId);
     return extensionsService.list(profileId);
   });
   ipcMain.handle(
