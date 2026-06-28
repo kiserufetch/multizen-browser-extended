@@ -1,0 +1,53 @@
+name: CI
+
+# Validation gate for every pull request and every push to master.
+# Keeps the build green so release tags only ever fire on known-good commits.
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          # setup-node enables package-manager caching by default, which runs
+          # the global Yarn 1.x before Corepack is activated and chokes on the
+          # project's "packageManager": "yarn@4.5.0". We cache Yarn ourselves.
+          package-manager-cache: false
+
+      - name: Enable Corepack (Yarn 4)
+        run: |
+          corepack enable
+          corepack prepare yarn@4.5.0 --activate
+
+      - name: Cache Yarn
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.yarn/berry/cache
+            .yarn/cache
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Typecheck (all workspaces)
+        run: yarn typecheck

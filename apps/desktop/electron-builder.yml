@@ -109,8 +109,8 @@ nsis:
 
 publish:
   provider: github
-  owner: multizenteam
-  repo: multizen-browser
+  owner: kiserufetch
+  repo: multizen-browser-extended
   # Cut a published release (not draft) directly from CI. Default is
   # draft which means /releases/latest redirector misses it until a
   # human un-drafts manually — we don't want that friction.

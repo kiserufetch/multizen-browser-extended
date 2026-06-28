@@ -9,7 +9,11 @@ This document tracks what's done and what's coming. Last updated: 2026-04-30.
 - [x] TypeScript strict across every package — clean typecheck
 - [x] Profile manager with SQLite storage, fingerprint pool, full CRUD
 - [x] **Encrypted profile archive (export/import)** — AES-256-GCM with scrypt KDF
-- [x] MCP server with full tool surface (list/create/launch/close/navigate/click/type/extract/screenshot)
+- [x] MCP server with full tool surface (list/create/update/delete/launch/close/navigate/click/type/extract/screenshot/list_fingerprint_options)
+- [x] **Full profile CRUD over MCP** — create_profile/update_profile take optional proxy + coherent
+      fingerprint knobs (device/locale/timezone/screen), delete_profile closes + removes data dir,
+      list_fingerprint_options enumerates valid device families & locale groups. Proxy credentials
+      are redacted from the activity log.
 - [x] Mock browser driver for protocol testing without Chromium
 - [x] **Standalone stdio MCP runner** — spawn from Cursor / Claude Desktop without GUI
 - [x] **HTTP+SSE MCP transport** — external clients connect to running desktop app
