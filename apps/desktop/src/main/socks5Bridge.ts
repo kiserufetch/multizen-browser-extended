@@ -63,7 +63,14 @@ export async function stopAllBridges(): Promise<void> {
 }
 
 async function startBridge(upstream: ProxyConfig): Promise<BridgeHandle> {
+  // Track accepted client sockets so close() can forcibly destroy them.
+  // net.Server has no closeAllConnections(), and a still-open proxied socket
+  // keeps server.close()'s callback pending forever — which would hang the
+  // app's shutdown path.
+  const sockets = new Set<Socket>();
   const server = createServer((sock) => {
+    sockets.add(sock);
+    sock.once("close", () => sockets.delete(sock));
     sock.on("error", () => {
       /* swallow — pipes / close handlers will tear down */
     });
@@ -100,6 +107,11 @@ async function startBridge(upstream: ProxyConfig): Promise<BridgeHandle> {
     upstream,
     close: () =>
       new Promise<void>((resolve) => {
+        // Forcibly destroy any still-open proxied sockets so server.close()'s
+        // callback actually fires — otherwise a lingering connection keeps the
+        // bridge (and the app's shutdown path) pending indefinitely.
+        for (const s of sockets) s.destroy();
+        sockets.clear();
         server.close(() => resolve());
       }),
   };

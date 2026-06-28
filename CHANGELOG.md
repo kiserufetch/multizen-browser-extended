@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-29
+
+### Added
+
+- MCP HTTP server now supports the modern Streamable HTTP transport (`POST/GET/DELETE /mcp`) in addition to the legacy HTTP+SSE endpoints, so up-to-date Cursor/Claude clients connect over the current protocol.
+- `/healthz` now reports active MCP session counts per transport for easier diagnostics.
+
+### Fixed
+
+- MCP no longer becomes unresponsive after a client reconnects: each connection now gets its own session and dedicated server binding, so a dropped or zombie SSE connection can no longer wedge the active session (previously this required killing the app via Task Manager).
+- Closing MultiZen with the window close button now reliably quits the app even while an MCP client is connected — the shutdown path no longer hangs on an open keep-alive SSE socket. Added forced socket teardown in the HTTP transport and a quit watchdog in the main process.
+- Closing a profile no longer risks a shutdown deadlock between the SOCKS5 proxy bridge and a still-running Chromium: Chromium is shut down before the bridge, and bridge sockets are force-closed.
+
+### Changed
+
+- Multiple MCP clients can now connect concurrently without breaking each other's sessions.
+
 ## [0.2.11] - 2026-06-29
 
 ### Added
@@ -115,6 +132,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-profile SOCKS5 bridge with persona alignment, and the activity log.
 - GitHub Actions release workflow with stable, version-less download URLs.
 
+[0.3.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.2.11...v0.3.0
 [0.2.11]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.2.8...v0.2.9
