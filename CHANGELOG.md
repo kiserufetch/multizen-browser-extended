@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-29
+
+### Fixed
+
+- Launching a profile on Windows no longer flashes an extra Chromium window:
+  version detection now reads the cached bootstrap version or the EXE file
+  metadata instead of spawning `chrome.exe --version` (which opens a normal
+  browser window on Windows).
+- Profile row and tile action-menu clicks no longer bubble to the row and
+  open the edit modal on top of the chosen action (e.g. the delete-confirm
+  dialog).
+- The in-app updater now links to releases on this repository instead of the
+  upstream `multizenteam` repo.
+
+### Changed
+
+- Settings About now displays "MultiZen Extended".
+
 ## [0.3.0] - 2026-06-29
 
 ### Added
@@ -132,6 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-profile SOCKS5 bridge with persona alignment, and the activity log.
 - GitHub Actions release workflow with stable, version-less download URLs.
 
+[0.3.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.2.11...v0.3.0
 [0.2.11]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.2.9...v0.2.10

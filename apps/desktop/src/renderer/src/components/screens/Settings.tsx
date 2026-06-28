@@ -208,7 +208,7 @@ export function Settings({ onImport }: Props): JSX.Element {
 
         <Row icon={<Sparkles size={16} strokeWidth={1.5} />} title="About" desc="">
           <div className="mono text-[12px] text-slate-400 leading-relaxed">
-            MultiZen v{info?.appVersion ?? "0.0.0"} · {info?.platform ?? "—"} · Electron{" "}
+            MultiZen Extended v{info?.appVersion ?? "0.0.0"} · {info?.platform ?? "—"} · Electron{" "}
             {electronVersion()}
           </div>
         </Row>

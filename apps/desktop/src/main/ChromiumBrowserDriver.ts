@@ -12,7 +12,13 @@ const execFileP = promisify(execFile);
 import type { BrowserDriver } from "@multizen/mcp-server";
 import type { ProfileManager } from "@multizen/profile-manager";
 import { reconcileDeviceFamilyToHost } from "@multizen/profile-manager";
-import type { ClientHints, FingerprintConfig, LaunchedProfile, ProfileId } from "@multizen/types";
+import type {
+  ChromiumStatus,
+  ClientHints,
+  FingerprintConfig,
+  LaunchedProfile,
+  ProfileId,
+} from "@multizen/types";
 import type { BrowserEngine } from "@multizen/settings-store";
 import { CdpSession } from "@multizen/cdp-driver";
 import type { ChromiumBootstrap } from "./ChromiumBootstrap";
@@ -118,7 +124,15 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // profile's spoofed UA against it. Detection vendors fingerprint the
     // JS engine and compare against the claimed UA — claiming Chrome
     // 148 while running 147 is an instant flag.
-    const actualVersion = await detectChromiumVersion(chromiumPath);
+    //
+    // Prefer the version the bootstrap already resolved (from current.json
+    // at download time) — it's free and avoids spawning the binary. On
+    // Windows `chrome.exe --version` does NOT print the version; it just
+    // opens a normal browser window, which we then kill after 2s. That
+    // produced the "browser opens, closes, opens again" flicker on every
+    // launch on Windows. The EXE-metadata fallback never spawns the
+    // browser, so it closes that gap.
+    const actualVersion = await resolveChromiumVersion(this.bootstrap.getStatus(), chromiumPath);
     // Reconcile (1) device family to host OS (claiming Win on a Mac
     //   binary is detected via V8/CSS feature signatures), then
     //   (2) Chrome version to the actual binary version. Both run
@@ -1386,14 +1400,58 @@ const WEBRTC_BLOCK_SCRIPT = `
  * spawn — Chromium must NOT be running, otherwise we'll corrupt its
  * pref file (Chromium writes Preferences atomically with no flock).
  */
+/** Parse a `major.minor.build.patch` version triple out of arbitrary text. */
+function parseVersionTriple(s: string): { major: number; full: string } | null {
+  const m = s.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return null;
+  return { major: Number(m[1]), full: `${m[1]}.${m[2]}.${m[3]}.${m[4]}` };
+}
+
 /**
- * Run `chromium --version` and parse the version triple. Returns null
- * if the probe fails — the caller should then trust whatever version is
- * baked into the profile.
+ * Resolve the running Chromium version without ever opening a browser
+ * window. Order of preference:
+ *   1. The version the bootstrap already cached (current.json) — free.
+ *   2. Platform-specific probe that does NOT spawn the GUI:
+ *        • Windows: read the EXE's file VersionInfo via PowerShell.
+ *        • macOS / Linux: `chrome --version` prints and exits cleanly.
+ *
+ * Why not `chrome.exe --version` on Windows: it does not print the
+ * version — it just launches the browser normally. The old code spawned
+ * it on every launch and killed the window after 2s, so the user saw the
+ * browser open, close, and open again. We avoid spawning the binary
+ * entirely on the happy path, and use EXE metadata as the fallback.
  */
+async function resolveChromiumVersion(
+  status: ChromiumStatus,
+  binaryPath: string,
+): Promise<{ major: number; full: string } | null> {
+  if (status.kind === "ready" && status.version) {
+    const fromCache = parseVersionTriple(status.version);
+    if (fromCache) return fromCache;
+  }
+  return detectChromiumVersion(binaryPath);
+}
+
 async function detectChromiumVersion(
   binaryPath: string,
 ): Promise<{ major: number; full: string } | null> {
+  // Windows: chrome.exe --version opens a browser window instead of
+  // printing. Read the binary's file VersionInfo (ProductVersion) — no
+  // process window, no GUI.
+  if (process.platform === "win32") {
+    try {
+      const escaped = binaryPath.replace(/'/g, "''");
+      const { stdout } = await execFileP("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-Item -LiteralPath '${escaped}').VersionInfo.ProductVersion`,
+      ]);
+      return parseVersionTriple(stdout.trim());
+    } catch {
+      return null;
+    }
+  }
   return new Promise((resolve) => {
     let resolved = false;
     const done = (v: { major: number; full: string } | null): void => {
@@ -1410,9 +1468,7 @@ async function detectChromiumVersion(
         out += c.toString("utf8");
       });
       p.on("close", () => {
-        const m = out.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)/);
-        if (!m) return done(null);
-        done({ major: Number(m[1]), full: `${m[1]}.${m[2]}.${m[3]}.${m[4]}` });
+        done(parseVersionTriple(out));
       });
       p.on("error", () => done(null));
       setTimeout(() => {
