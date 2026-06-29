@@ -527,7 +527,11 @@ app.on("before-quit", (e) => {
 
   void (async () => {
     try {
-      await browserDriver?.closeAll();
+      // Quit path: shorten the graceful budget and skip the slower orphan
+      // post-check so the (unconditional) tree-kill in gracefulShutdown lands
+      // before the 3s watchdog forces app.exit(0) — otherwise a detached Unix
+      // process group could be orphaned.
+      await browserDriver?.closeAll({ gracefulMs: 1500, reap: false });
       await httpTransport?.stop();
       profileManager?.close();
     } catch (err) {
