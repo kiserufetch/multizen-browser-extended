@@ -26,6 +26,8 @@ import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { probeProxyGeo } from "./proxyGeo";
 import { companionDir } from "./extensions/companion";
 import { resolveLoadDir } from "./extensions/extensionStore.ts";
+import { killProcessTree, gracefulShutdown } from "./processTree";
+import { waitForCdpSessionReady } from "./cdpReadiness";
 
 interface RunningProcess {
   child: ChildProcess;
@@ -389,7 +391,11 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       DYLD_FALLBACK_FRAMEWORK_PATH: process.env.DYLD_FALLBACK_FRAMEWORK_PATH ?? "",
     };
     const child = spawn(chromiumPath, args, {
-      detached: false,
+      // Unix: make the child a process-group leader so we can group-kill the
+      // whole Chromium tree (renderers/GPU/utility) with process.kill(-pid),
+      // which survives the leader's death. Windows uses taskkill /T instead,
+      // so leave it attached there.
+      detached: process.platform !== "win32",
       stdio: ["ignore", "ignore", "pipe"],
       env: cleanEnv,
     });
@@ -411,9 +417,20 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     const startedAt = new Date().toISOString();
     const cdpEndpoint = `http://127.0.0.1:${port}`;
 
-    const session = new CdpSession({ port });
-    await waitForCdpReady(port, 10000);
-    await session.connect();
+    const session = new CdpSession({ port, engine });
+    // Readiness ladder within a fixed 15s budget, reusing this one session
+    // (connect() is idempotent): (1) /json/version answers, (2) /json/list has
+    // a page target, (3) connect()+attach succeeds. On failure, tear down the
+    // half-launched browser — this record isn't in `this.running` yet, so kill
+    // the spawned child directly, then stop its bridge (same order as close()).
+    try {
+      await waitForCdpSessionReady(port, session, 15000);
+    } catch (e) {
+      await session.close().catch(() => {});
+      await killProcessTree(child.pid);
+      await stopBridgeForProfile(profileId).catch(() => {});
+      throw e instanceof Error ? e : new Error(String(e));
+    }
 
     // Apply per-target emulation: timezone, locale, Sec-CH-UA via
     // userAgentMetadata (works on stock Chromium — no patches needed!),
@@ -644,19 +661,32 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   }
 
   async close(profileId: ProfileId): Promise<void> {
+    await this.shutdownProfile(profileId, "user-close");
+  }
+
+  /**
+   * Single close path used by `close()`, `closeAll()`, and (via the same
+   * `gracefulShutdown`) the window watcher. Removing from the map first makes
+   * the `child.on("exit")` handler treat this as a planned close. `opts`
+   * lets the quit path shorten the graceful budget and skip the (slower)
+   * orphan post-check so the tree-kill lands before `app.exit(0)`.
+   */
+  private async shutdownProfile(
+    profileId: ProfileId,
+    reason: "user-close",
+    opts: { gracefulMs?: number; reap?: boolean } = {},
+  ): Promise<void> {
     const r = this.running.get(profileId);
     if (!r) return;
-    // Remove from map first so the child.on('exit') handler treats this as
-    // a planned close (no event emitted from there).
     this.running.delete(profileId);
     clearInterval(r.windowWatcher);
     // Shut Chromium down BEFORE the socks5 bridge. The bridge's server.close()
     // waits for its accepted sockets to end; a still-running Chromium holds
     // those proxied connections open, so closing the bridge first can deadlock
     // the shutdown (and, via before-quit, hang the whole app on exit).
-    await gracefulShutdown(r);
+    await gracefulShutdown(r, opts);
     await stopBridgeForProfile(profileId).catch(() => {});
-    this.emit("running-changed", { kind: "closed", profileId, reason: "user-close" });
+    this.emit("running-changed", { kind: "closed", profileId, reason });
   }
 
   isRunning(profileId: ProfileId): boolean {
@@ -691,9 +721,20 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return session.screenshot();
   }
 
-  async closeAll(): Promise<void> {
+  async cdpSend(
+    profileId: ProfileId,
+    method: string,
+    params?: Record<string, unknown>,
+    sessionId?: string,
+    opts?: { safe?: boolean },
+  ): Promise<unknown> {
+    const session = this.requireSession(profileId);
+    return session.cdpSend(method, params, sessionId, opts);
+  }
+
+  async closeAll(opts: { gracefulMs?: number; reap?: boolean } = {}): Promise<void> {
     const ids = [...this.running.keys()];
-    await Promise.all(ids.map((id) => this.close(id)));
+    await Promise.all(ids.map((id) => this.shutdownProfile(id, "user-close", opts)));
   }
 
   private requireSession(profileId: ProfileId): CdpSession {
@@ -975,54 +1016,6 @@ function browserDataDirForEngine(profileDataDir: string, engine: BrowserEngine):
     return join(profileDataDir, "engines", "cloakbrowser");
   }
   return profileDataDir;
-}
-
-/**
- * Shut down a running Chromium child the canonical way: send `Browser.close`
- * over CDP (macOS ⌘Q equivalent — flushes session-restore data), then wait
- * up to 4s for the process to exit on its own. If CDP fails or the process
- * is hung, fall back to SIGTERM, then SIGKILL.
- *
- * Idempotent — safe to call once from `close()` and again from the window
- * watcher; the second call no-ops because the child is already exiting.
- */
-async function gracefulShutdown(r: RunningProcess): Promise<void> {
-  if (r.child.exitCode !== null || r.child.killed) {
-    await r.session.close().catch(() => {});
-    return;
-  }
-
-  const exited = new Promise<void>((resolve) => {
-    if (r.child.exitCode !== null) {
-      resolve();
-      return;
-    }
-    r.child.once("exit", () => resolve());
-  });
-
-  // Fire Browser.close — websocket disconnects mid-call, that's expected.
-  await r.session.closeBrowser().catch(() => {});
-
-  // Wait up to 4s for graceful exit. Chromium needs ~500ms-2s to flush
-  // session-restore on macOS; 4s gives a comfortable margin.
-  const exitedInTime = await Promise.race([
-    exited.then(() => true),
-    sleep(4000).then(() => false),
-  ]);
-
-  await r.session.close().catch(() => {});
-
-  if (!exitedInTime && r.child.exitCode === null && !r.child.killed) {
-    // CDP didn't deliver — fall through to signals.
-    r.child.kill("SIGTERM");
-    const termExited = await Promise.race([
-      exited.then(() => true),
-      sleep(2000).then(() => false),
-    ]);
-    if (!termExited && r.child.exitCode === null && !r.child.killed) {
-      r.child.kill("SIGKILL");
-    }
-  }
 }
 
 function createWindowWatcher(
@@ -1776,23 +1769,3 @@ async function ensureSessionRestore(dataDir: string): Promise<void> {
   await fsp.rename(tmpPath, prefsPath);
 }
 
-async function waitForCdpReady(port: number, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown = null;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (res.ok) return;
-    } catch (e) {
-      lastError = e;
-    }
-    await sleep(150);
-  }
-  throw new Error(
-    `CDP did not become ready on port ${port} within ${timeoutMs}ms: ${String(lastError)}`,
-  );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
