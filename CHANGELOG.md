@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-29
+
+### Added
+
+- **Direct CDP (Chrome DevTools Protocol) access over MCP.** New `cdp_send`
+  tool runs any CDP command safely — it auto-disables only the domains it had
+  to enable, never disturbs the page session, and refuses automation-revealing
+  enables on anti-detect (CloakBrowser) engines — plus `cdp_send_no_safety`
+  for an unrestricted raw passthrough when you knowingly need it.
+- **CDP convenience tools** built on top of `cdp_send`: `evaluate_js`,
+  `wait_for_selector`, `get_cookies` / `set_cookies`, tab control
+  (`list_tabs`, `new_tab`, `activate_tab`, `close_tab`), and
+  `wait_for_navigation` / `wait_for_load`.
+
+### Changed
+
+- `launch_profile` now waits until the browser is actually drivable (CDP
+  endpoint → page target → attach) before returning, so an immediate
+  `navigate` / `extract` right after launch no longer fails with
+  "not connected" or "no execution context". Cloaking is armed before the
+  wait so restored tabs are never exposed.
+
+### Fixed
+
+- Closing a profile now reliably terminates the **entire** Chromium process
+  tree (renderers, GPU, utility children) instead of just the root process, so
+  orphaned processes can no longer linger and lock a profile's data directory
+  on the next launch. The force tree-kill is a fallback after the graceful
+  shutdown, so session-restore is preserved (Windows `taskkill /T`, Unix
+  process-group kill).
+
 ## [0.3.1] - 2026-06-29
 
 ### Fixed
@@ -150,6 +181,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-profile SOCKS5 bridge with persona alignment, and the activity log.
 - GitHub Actions release workflow with stable, version-less download URLs.
 
+[0.4.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.2.11...v0.3.0
 [0.2.11]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.2.10...v0.2.11
