@@ -710,6 +710,23 @@ const LOCALES: ReadonlyArray<LocaleGroup> = [
     country: "ke",
     timezones: ["Africa/Nairobi"],
   },
+  // ── South Asia ─────────────────────────────────────────────────────
+  {
+    id: "en-PK",
+    label: "English (Pakistan)",
+    locale: "en-PK",
+    languages: ["en-PK", "en", "ur"],
+    country: "pk",
+    timezones: ["Asia/Karachi"],
+  },
+  {
+    id: "bn-BD",
+    label: "বাংলা (বাংলাদেশ)",
+    locale: "bn-BD",
+    languages: ["bn-BD", "bn", "en"],
+    country: "bd",
+    timezones: ["Asia/Dhaka"],
+  },
   // ── Asia / Pacific ─────────────────────────────────────────────────
   {
     id: "th-TH",
@@ -718,6 +735,14 @@ const LOCALES: ReadonlyArray<LocaleGroup> = [
     languages: ["th-TH", "th", "en"],
     country: "th",
     timezones: ["Asia/Bangkok"],
+  },
+  {
+    id: "km-KH",
+    label: "ភាសាខ្មែរ (កម្ពុជា)",
+    locale: "km-KH",
+    languages: ["km-KH", "km", "en"],
+    country: "kh",
+    timezones: ["Asia/Phnom_Penh"],
   },
   {
     id: "vi-VN",
@@ -807,6 +832,14 @@ const LOCALES: ReadonlyArray<LocaleGroup> = [
     languages: ["es-PE", "es", "en"],
     country: "pe",
     timezones: ["America/Lima"],
+  },
+  {
+    id: "es-BO",
+    label: "Español (Bolivia)",
+    locale: "es-BO",
+    languages: ["es-BO", "es", "en"],
+    country: "bo",
+    timezones: ["America/La_Paz"],
   },
 ];
 
