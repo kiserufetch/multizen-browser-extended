@@ -54,12 +54,12 @@ jobs:
 
       - name: Fingerprint unit scripts
         run: |
-          npx tsx packages/profile-manager/scripts/test-fingerprint.ts
-          npx tsx packages/profile-manager/scripts/test-fingerprint-entropy.ts
-          npx tsx packages/profile-manager/scripts/check-chrome-version.ts
+          yarn test:fingerprint
+          yarn test:fingerprint-entropy
+          yarn check:chrome-version
 
       - name: Launch timezone unit tests
-        run: npx tsx --test apps/desktop/src/main/launchTimezone.test.ts
+        run: yarn test:launch-timezone
 
       - name: Fingerprint seed smoke (offline; live MCP optional)
-        run: npx tsx packages/mcp-server/scripts/smoke-fingerprint-seed.ts
+        run: yarn smoke:fingerprint-seed
