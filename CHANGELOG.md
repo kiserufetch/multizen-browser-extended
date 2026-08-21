@@ -5,10 +5,9 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.0-canary.1] - 2026-08-21
+## [0.8.0] - 2026-08-21
 
-Canary preview of the upstream `v0.3.1` merge. Not a stable release — GitHub
-marks it as prerelease so `latest` auto-update stays on 0.7.1.
+Stable release of the upstream `v0.3.1` merge (promotes `0.8.0-canary.1`).
 
 ### Added
 
@@ -31,6 +30,10 @@ marks it as prerelease so `latest` auto-update stays on 0.7.1.
 - Engine GC keeps the in-use version; auto-check only re-runs on an off→on
   `engineAutoUpdate` flip. Debug post-bootstrap probe is gated by
   `MULTIZEN_DEBUG`.
+
+## [0.8.0-canary.1] - 2026-08-21
+
+Prerelease of 0.8.0. Superseded by the stable `0.8.0` release.
 
 ## [0.7.1] - 2026-07-24
 
@@ -339,6 +342,7 @@ feature set into the extended fork while keeping the fork's MCP/CDP tooling.
   per-profile SOCKS5 bridge with persona alignment, and the activity log.
 - GitHub Actions release workflow with stable, version-less download URLs.
 
+[0.8.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.8.0-canary.1...v0.8.0
 [0.8.0-canary.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.7.1...v0.8.0-canary.1
 [0.7.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.6.0...v0.7.0
