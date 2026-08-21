@@ -20,10 +20,17 @@ import {
   type ActivityEvent,
 } from "@multizen/mcp-server";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
-import type { ChromiumStatus, ExtensionConfig, ProxyConfig, UpdateStatus } from "@multizen/types";
+import type {
+  ChromiumStatus,
+  EngineUpdateStatus,
+  ExtensionConfig,
+  ProxyConfig,
+  UpdateStatus,
+} from "@multizen/types";
 import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
 import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
 import { UpdaterService } from "./UpdaterService.ts";
+import { EngineUpdateService } from "./EngineUpdateService.ts";
 import { UsageReporting } from "./UsageReporting.ts";
 import { loadOrCreateMcpToken } from "./mcpToken.ts";
 import { ExtensionsService } from "./extensions/ExtensionsService.ts";
@@ -61,10 +68,26 @@ function resolveAppIcon(): string | null {
 }
 
 let mainWindow: BrowserWindow | null = null;
+
+/**
+ * Send an IPC message to the renderer, but only if the window and its
+ * webContents are still alive. During app teardown a still-running profile's
+ * child-process exit fires `running-changed` AFTER the window is destroyed; a
+ * plain `mainWindow?.` guards only null, not a destroyed webContents, so calling
+ * `.send` on it throws "Object has been destroyed" as an uncaught exception on
+ * quit. This guard makes every renderer send teardown-safe.
+ */
+function sendToRenderer(channel: string, ...args: unknown[]): void {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(channel, ...args);
+  }
+}
+
 let profileManager: ProfileManager;
 let browserDriver: ChromiumBrowserDriver;
 let chromiumBootstrap: ChromiumBootstrap;
 let updater: UpdaterService;
+let engineUpdater: EngineUpdateService;
 let usageReporting: UsageReporting;
 let extensionsService: ExtensionsService;
 /** Recent companion installs, to de-dupe the marker's retry logs. */
@@ -160,7 +183,7 @@ app.whenReady().then(async () => {
     engine: cachedSettings.browserEngine,
   });
   chromiumBootstrap.on("status", (status: ChromiumStatus) => {
-    mainWindow?.webContents.send("chromium:status", status);
+    sendToRenderer("chromium:status", status);
   });
   // Kick off the ensure() in the background so the UI can render immediately
   // and show download progress. Profile launches will wait until ready.
@@ -168,11 +191,25 @@ app.whenReady().then(async () => {
     process.stderr.write(`Chromium bootstrap failed: ${String(e)}\n`);
   });
 
+  // Browser-ENGINE update manager. Keeps the downloaded Chromium runtime
+  // (CloakBrowser / CFT) fresh — background check + side-by-side stage that
+  // applies on the next profile launch, never interrupting a running browser.
+  // Reads settings live so the engineAutoUpdate toggle takes effect without
+  // restart. Best-effort: a failed check never blocks a launch.
+  engineUpdater = new EngineUpdateService({
+    bootstrap: chromiumBootstrap,
+    getSettings: () => cachedSettings as AppSettings,
+  });
+  engineUpdater.on("status", (status: EngineUpdateStatus) => {
+    sendToRenderer("engine-update:status", status);
+  });
+  engineUpdater.init();
+
   // App self-update (electron-updater). No-op in dev / non-packaged. Reads
   // settings live so the autoUpdate toggle takes effect without restart.
   updater = new UpdaterService({ getSettings: () => cachedSettings as AppSettings });
   updater.on("status", (status: UpdateStatus) => {
-    mainWindow?.webContents.send("update:status", status);
+    sendToRenderer("update:status", status);
   });
   updater.init();
 
@@ -224,7 +261,7 @@ app.whenReady().then(async () => {
         if (choice.response !== 0) return;
         try {
           const extension = await extensionsService.installFromWebStore(profileId, extensionId);
-          mainWindow?.webContents.send("extensions:installed", { ok: true, profileId, extension });
+          sendToRenderer("extensions:installed", { ok: true, profileId, extension });
           // Apply immediately: Chromium only reads --load-extension at startup,
           // so relaunch the profile (session restore brings tabs back) instead
           // of making the user close + reopen it by hand.
@@ -233,7 +270,7 @@ app.whenReady().then(async () => {
             await browserDriver.launch(profileId).catch((e: unknown) => {
               // The profile is now closed and didn't reopen — tell the user so
               // they're not left wondering where their browser went.
-              mainWindow?.webContents.send("extensions:installed", {
+              sendToRenderer("extensions:installed", {
                 ok: false,
                 profileId,
                 error: `Added it, but the profile didn't reopen — launch it again. (${(e as Error).message})`,
@@ -241,7 +278,7 @@ app.whenReady().then(async () => {
             });
           }
         } catch (e) {
-          mainWindow?.webContents.send("extensions:installed", {
+          sendToRenderer("extensions:installed", {
             ok: false,
             profileId,
             error: (e as Error).message,
@@ -257,14 +294,14 @@ app.whenReady().then(async () => {
 
   // Forward activity events to renderer
   activityLog.on("event", (e: ActivityEvent) => {
-    mainWindow?.webContents.send("activity:event", e);
+    sendToRenderer("activity:event", e);
   });
 
   // Forward profile running-state changes (manual launch, manual close,
   // and — most importantly — external Chromium close where the user quits
   // the browser window directly).
   browserDriver.on("running-changed", (change) => {
-    mainWindow?.webContents.send("profiles:running-changed", change);
+    sendToRenderer("profiles:running-changed", change);
   });
 
   // Background-probe proxies for profiles missing a cached country code
@@ -328,8 +365,9 @@ app.whenReady().then(async () => {
   ipcMain.handle("settings:get", () => settingsStore.load());
   ipcMain.handle("settings:update", async (_e, patch: Partial<AppSettings>) => {
     cachedSettings = await settingsStore.update(patch);
-    // Let the updater react to an autoUpdate toggle without an app restart.
+    // Let the updaters react to their auto-update toggles without a restart.
     updater?.onSettingsChanged();
+    engineUpdater?.onSettingsChanged();
     return cachedSettings;
   });
 
@@ -457,6 +495,11 @@ app.whenReady().then(async () => {
   ipcMain.handle("update:download", (_e, version: string) =>
     shell.openExternal(updater.downloadUrlFor(version)),
   );
+
+  // Browser-engine update IPC (distinct from the app self-update above).
+  ipcMain.handle("engine-update:status", () => engineUpdater.getStatus());
+  ipcMain.handle("engine-update:check", () => engineUpdater.checkOnly());
+  ipcMain.handle("engine-update:install", () => engineUpdater.updateNow());
 
   // Fingerprint generator IPC — called from create + edit forms when the
   // user hits Regen. Returns a fresh, internally-consistent preset.
@@ -632,7 +675,7 @@ async function backfillProxyCountries(): Promise<void> {
       if (geo.country) {
         profileManager.setProxyCountry(summary.id, geo.country.toLowerCase());
         // Nudge the renderer so it refetches the list and re-renders flags.
-        mainWindow?.webContents.send("profiles:proxy-country-updated", {
+        sendToRenderer("profiles:proxy-country-updated", {
           id: summary.id,
           country: geo.country.toLowerCase(),
         });
