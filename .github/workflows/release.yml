@@ -144,6 +144,8 @@ jobs:
         run: yarn install --immutable
 
       - name: Build & publish
+        # GitHub's default shell on windows-latest is pwsh; this snippet is bash.
+        shell: bash
         env:
           # electron-builder uploads assets to the pre-created Release.
           # Provided automatically by Actions.
@@ -153,12 +155,12 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: |
           VERSION="$(node -p "require('./apps/desktop/package.json').version")"
-          EXTRA=()
           if [[ "$VERSION" == *-* ]]; then
             # Keep canary/beta off the stable latest.yml channel.
-            EXTRA+=(-c.publish.releaseType=prerelease)
+            yarn workspace @multizen/desktop ${{ matrix.script }} -- -c.publish.releaseType=prerelease
+          else
+            yarn workspace @multizen/desktop ${{ matrix.script }}
           fi
-          yarn workspace @multizen/desktop ${{ matrix.script }} -- "${EXTRA[@]}"
 
   # The release starts with a placeholder body. Once the builds finish, generate
   # a grouped changelog from Conventional Commits since the previous tag and set
