@@ -13,6 +13,9 @@ binaries and publishes the GitHub Release via electron-builder.
 
 ## Repository facts
 
+- **Release target (mandatory):** `kiserufetch/multizen-browser-extended` only.
+  The upstream remote `multizenteam/multizen-browser` is for fetch/merge only —
+  **never** open release PRs, tags, or Releases there.
 - Monorepo. The version lives in **two** manifests that must stay in lockstep:
   `package.json` and `apps/desktop/package.json`. electron-builder reads the
   version from the desktop manifest.
@@ -23,18 +26,20 @@ binaries and publishes the GitHub Release via electron-builder.
   `kiserufetch/multizen-browser-extended`.
 - The release itself is created by the workflow, not by hand — your job ends at
   pushing the tag and confirming the workflow published the Release.
-- Use the `gh` CLI for all GitHub operations.
+- Use the `gh` CLI for all GitHub operations — **always** pass
+  `--repo kiserufetch/multizen-browser-extended` so a sticky `gh` default
+  (often left on upstream after inspecting that remote) cannot mis-route PRs.
 
 ## Workflow
 
 Copy this checklist into TodoWrite and track progress:
 
 ```
-- [ ] 1. Pre-flight: clean master, decide version
+- [ ] 1. Pre-flight: clean master, assert fork repo, decide version
 - [ ] 2. Create release branch
 - [ ] 3. Bump version in both manifests
 - [ ] 4. Write the CHANGELOG entry
-- [ ] 5. Commit, push, open PR
+- [ ] 5. Commit, push, open PR (fork only; verify URL)
 - [ ] 6. Wait for CI, merge PR into master
 - [ ] 7. Tag the merge commit and push the tag
 - [ ] 8. Verify the Release workflow published
@@ -46,8 +51,12 @@ Copy this checklist into TodoWrite and track progress:
 git switch master
 git pull --ff-only
 git status --porcelain          # must be empty; stop if there are local changes
+node .cursor/skills/publish-release/scripts/assert-release-repo.mjs
 node .cursor/skills/publish-release/scripts/bump-version.mjs --check   # current version
 ```
+
+`assert-release-repo.mjs` fails the release if `origin` is not the fork, pins
+`gh repo set-default` to the fork, and re-checks. **Do not continue on failure.**
 
 Decide the next version (SemVer):
 
@@ -110,11 +119,21 @@ Bottom-of-file compare link:
 
 ### Step 5 — Commit, push, open PR
 
+Re-assert the fork target immediately before creating the PR. **Always** pass
+`--repo kiserufetch/multizen-browser-extended`. After create, verify the PR URL;
+if it landed on upstream, close it and abort (do not merge, do not tag).
+
 ```bash
+node .cursor/skills/publish-release/scripts/assert-release-repo.mjs
 git add package.json apps/desktop/package.json CHANGELOG.md
 git commit -m "release: v<VERSION>"
 git push -u origin release/v<VERSION>
-gh pr create --base master --title "release: v<VERSION>" --body "$(cat <<'EOF'
+PR_URL=$(gh pr create \
+  --repo kiserufetch/multizen-browser-extended \
+  --base master \
+  --head "kiserufetch:release/v<VERSION>" \
+  --title "release: v<VERSION>" \
+  --body "$(cat <<'EOF'
 ## Summary
 - Bump version to v<VERSION>
 - Update CHANGELOG
@@ -123,14 +142,18 @@ gh pr create --base master --title "release: v<VERSION>" --body "$(cat <<'EOF'
 Merging this PR does not publish. The release is cut by tagging the merge
 commit (next step), which triggers the Release workflow.
 EOF
-)"
+)")
+echo "$PR_URL"
+node .cursor/skills/publish-release/scripts/assert-release-repo.mjs --pr-url "$PR_URL"
 ```
+
+If `--pr-url` fails: `gh pr close <N> --repo <wrong-repo> --comment "Opened on wrong repo; release belongs on kiserufetch/multizen-browser-extended."` then stop the skill.
 
 ### Step 6 — Wait for CI, then merge
 
 ```bash
-gh pr checks --watch        # wait until the typecheck check is green
-gh pr merge --squash --delete-branch
+gh pr checks --repo kiserufetch/multizen-browser-extended --watch
+gh pr merge --repo kiserufetch/multizen-browser-extended --squash --delete-branch
 ```
 
 Do not merge while checks are failing. If CI fails, fix on the release branch,
@@ -153,8 +176,9 @@ Pushing the tag starts the `Release` workflow. Watch it and confirm the Release
 exists:
 
 ```bash
-gh run watch $(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')
-gh release view v<VERSION> --web
+gh run watch --repo kiserufetch/multizen-browser-extended \
+  $(gh run list --repo kiserufetch/multizen-browser-extended --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')
+gh release view v<VERSION> --repo kiserufetch/multizen-browser-extended --web
 ```
 
 The 3-OS build matrix takes a while. The release succeeds when the workflow is
@@ -162,6 +186,10 @@ green and the Release page lists the platform installers.
 
 ## Safety
 
+- **Never** open a release PR against `multizenteam/multizen-browser`. Run
+  `assert-release-repo.mjs` in Step 1 and again in Step 5; pass `--repo
+  kiserufetch/multizen-browser-extended` on every `gh` call. After `pr create`,
+  verify with `--pr-url` and abort if wrong.
 - Never force-push to `master` and never skip CI.
 - If the two manifests disagree before bumping, the helper aborts — resolve the
   mismatch first instead of forcing a version.
