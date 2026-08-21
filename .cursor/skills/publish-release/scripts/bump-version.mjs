@@ -5,7 +5,7 @@
 //
 // Usage:
 //   node scripts/bump-version.mjs <patch|minor|major>
-//   node scripts/bump-version.mjs <explicit-version e.g. 0.3.0>
+//   node scripts/bump-version.mjs <explicit-version e.g. 0.3.0 or 0.8.0-canary.1>
 //   node scripts/bump-version.mjs --check        # print current version, no write
 //
 // Prints the resulting version to stdout (last line) so the caller can
@@ -21,6 +21,7 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..",
 const TARGETS = ["package.json", "apps/desktop/package.json"];
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
+const SEMVER_OR_PRERELEASE = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/;
 
 function readManifest(rel) {
   const path = join(repoRoot, rel);
@@ -43,8 +44,8 @@ function bump(version, kind) {
 
 function resolveNext(current, arg) {
   if (["patch", "minor", "major"].includes(arg)) return bump(current, arg);
-  if (SEMVER.test(arg)) return arg;
-  throw new Error(`Argument must be patch|minor|major or x.y.z, got "${arg}".`);
+  if (SEMVER_OR_PRERELEASE.test(arg)) return arg;
+  throw new Error(`Argument must be patch|minor|major, x.y.z, or x.y.z-prerelease, got "${arg}".`);
 }
 
 function main() {
