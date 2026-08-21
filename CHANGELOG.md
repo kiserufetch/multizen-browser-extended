@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0-canary.1] - 2026-08-21
+
+Canary preview of the upstream `v0.3.1` merge. Not a stable release — GitHub
+marks it as prerelease so `latest` auto-update stays on 0.7.1.
+
+### Added
+
+- **Browser engine updates in Settings** — check/stage a newer CloakBrowser /
+  Chrome-for-Testing build; it applies on the next profile launch. Optional
+  `engineAutoUpdate` keeps the engine fresh in the background.
+- **Proxy geo provider fallback** — if ipapi is down, the probe tries other
+  providers, with one overall deadline so launch cannot stall.
+
+### Fixed
+
+- Linux headful Chromium inherits the desktop session (`DISPLAY` / Wayland /
+  DBus) so the window can attach.
+- macOS release builds one arch per runner so the native module matches the
+  package (Intel Macs no longer get an arm64 `.node`).
+- Session restore no longer writes the protected `restore_on_startup` pref
+  (that reset the default search engine).
+- SOCKS5 bridge failure logs are throttled; renderer IPC sends are skipped
+  after the window is destroyed.
+- Engine GC keeps the in-use version; auto-check only re-runs on an off→on
+  `engineAutoUpdate` flip. Debug post-bootstrap probe is gated by
+  `MULTIZEN_DEBUG`.
+
 ## [0.7.1] - 2026-07-24
 
 Synced with upstream `multizenteam/multizen-browser` v0.3.0 while keeping this
@@ -312,6 +339,7 @@ feature set into the extended fork while keeping the fork's MCP/CDP tooling.
   per-profile SOCKS5 bridge with persona alignment, and the activity log.
 - GitHub Actions release workflow with stable, version-less download URLs.
 
+[0.8.0-canary.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.7.1...v0.8.0-canary.1
 [0.7.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.5.0...v0.6.0
