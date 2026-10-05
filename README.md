@@ -40,7 +40,7 @@
 This repository is a fork of [`multizenteam/multizen-browser`](https://github.com/multizenteam/multizen-browser).
 
 <!-- FORK-BASE: update this version whenever you pull changes from upstream -->
-**Based on upstream release:** `v0.3.1`
+**Based on upstream release:** `v0.3.1` (+ upstream `master` through `b0bc604`)
 
 **Fork app version:** `0.8.0` (independent semver from upstream).
 
@@ -51,7 +51,7 @@ Fork-specific work (see [`CHANGELOG.md`](CHANGELOG.md)) includes:
 - MCP extras: always-on `cdp_send` / `cdp_send_no_safety`, `probe_fingerprint`, session-stable multi-client HTTP transport
 - Release CI typecheck gate before the multi-OS build matrix
 
-Sync notes: [`docs/upstream-merge-v0.3.1.md`](docs/upstream-merge-v0.3.1.md) (latest), [`docs/upstream-merge-v0.3.0.md`](docs/upstream-merge-v0.3.0.md). Whenever you merge again from the original repository, update the **Based on upstream release** line above.
+Sync notes: [`docs/upstream-merge-2026-10-06.md`](docs/upstream-merge-2026-10-06.md) (latest), [`docs/upstream-merge-v0.3.1.md`](docs/upstream-merge-v0.3.1.md), [`docs/upstream-merge-v0.3.0.md`](docs/upstream-merge-v0.3.0.md). Whenever you merge again from the original repository, update the **Based on upstream release** line above.
 
 ## What it is
 
