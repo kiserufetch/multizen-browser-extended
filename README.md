@@ -42,7 +42,7 @@ This repository is a fork of [`multizenteam/multizen-browser`](https://github.co
 <!-- FORK-BASE: update this version whenever you pull changes from upstream -->
 **Based on upstream release:** `v0.3.1` (+ upstream `master` through `b0bc604`)
 
-**Fork app version:** `0.8.0` (independent semver from upstream).
+**Fork app version:** `0.8.1` (independent semver from upstream).
 
 Fork-specific work (see [`CHANGELOG.md`](CHANGELOG.md)) includes:
 

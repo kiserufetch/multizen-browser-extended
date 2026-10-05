@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-10-06
+
+Synced with upstream `multizenteam/multizen-browser` `master` through
+`b0bc604` (post-`v0.3.1`). Fork MCP/CDP surface and strict-pin timezone policy
+unchanged.
+
+### Added
+
+- **Proxy latency in the tester** — a successful proxy test shows the round-trip
+  time through the proxy, colored green / amber / red.
+- **More proxy paste formats** — `user:pass:host:port` (reversed order),
+  `host:port##user:pass`, and `host,port,user,pass` fill the proxy fields.
+
+### Changed
+
+- MCP `initialize` guidance tells agents to finish authorized tasks on their
+  own instead of handing work back to a human; they still stop on CAPTCHA / 2FA
+  and let you handle it.
+
+### Fixed
+
+- Proxy test errors are now plain-language (wrong credentials, wrong HTTP vs
+  SOCKS5 type, refused, dropped, DNS failure, unreachable, timeout) instead of
+  raw TLS / socket messages.
+
 ## [0.8.0] - 2026-08-21
 
 Stable release of the upstream `v0.3.1` merge (promotes `0.8.0-canary.1`).
@@ -342,6 +367,7 @@ feature set into the extended fork while keeping the fork's MCP/CDP tooling.
   per-profile SOCKS5 bridge with persona alignment, and the activity log.
 - GitHub Actions release workflow with stable, version-less download URLs.
 
+[0.8.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.8.0-canary.1...v0.8.0
 [0.8.0-canary.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.7.1...v0.8.0-canary.1
 [0.7.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.7.0...v0.7.1
