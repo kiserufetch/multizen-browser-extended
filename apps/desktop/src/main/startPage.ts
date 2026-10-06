@@ -8,8 +8,12 @@
  * patched-Chromium build; only the start page ships for now.
  */
 
-/** Opened on a profile's first launch when it has no explicit `startUrl`. */
-export const DEFAULT_START_URL = "https://duckduckgo.com/";
+/** Opened on a profile's first launch when it has no explicit `startUrl`.
+ *  `about:blank`, not a real site: a fixed first-navigation to a search engine
+ *  is a fleet-wide marker (every MultiZen profile hits the same URL on first
+ *  run, which stock Chrome never does) and sends that site an uncustomized
+ *  request before the profile is warmed up. Users can still set any start page. */
+export const DEFAULT_START_URL = "about:blank";
 
 /**
  * Sanitize a profile's start URL into a safe positional Chromium arg. Only

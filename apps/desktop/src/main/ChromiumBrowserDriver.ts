@@ -256,6 +256,16 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // Chromium parses it as ["en-US", "en;q=0.9"] and then re-adds q's,
     // producing the malformed "en-US,en;q=0.9;q=0.9" we saw on browserscan.
     const acceptLangPlain = fp.languages.join(",");
+    // Collect every Chromium feature we disable into ONE list, emitted as a
+    // single `--disable-features=` switch at the end. Chromium keeps only the
+    // LAST occurrence of a repeated switch, so passing the base set here and a
+    // proxy-only set later silently dropped the base set for proxied profiles —
+    // Translate/MediaRouter ended up disabled on direct profiles but enabled on
+    // proxied ones, splitting the fleet into two detectable populations.
+    // MediaRouter is intentionally NOT disabled (stock Chrome ships it; turning
+    // it off is itself a tell). The DNS/TLS entries are proxy-only and left
+    // as-is pending the network-fingerprint golden harness.
+    const disableFeatures = ["Translate"];
     const args = [
       `--user-data-dir=${browserDataDir}`,
       `--remote-debugging-port=${port}`,
@@ -267,7 +277,6 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       // a clean exit and our CDP graceful shutdown, tabs come back reliably
       // across stop/launch even after a crash.
       "--restore-last-session",
-      "--disable-features=Translate,MediaRouter",
       // Don't back Chromium's "Safe Storage" key with the OS keychain/keyring.
       // Two reasons: (1) our engine bundle is ad-hoc signed, so on macOS the
       // keychain ACL never matches and every launch pops a "Chromium wants to
@@ -375,17 +384,27 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       // detect products (Multilogin Mimic) solve the residual leak
       // with a custom DNS-resolver source patch — a Phase-1 item for
       // multizen-pro, not the open-source build.
-      args.push("--disable-features=DnsOverHttps,DnsOverHttpsUpgrade,EncryptedClientHello,AsyncDns,DnsHttpsSvcb,DnsHttpsSvcbAlpn,NetworkPrediction");
+      disableFeatures.push(
+        "DnsOverHttps",
+        "DnsOverHttpsUpgrade",
+        "EncryptedClientHello",
+        "AsyncDns",
+        "DnsHttpsSvcb",
+        "DnsHttpsSvcbAlpn",
+        "NetworkPrediction",
+      );
       args.push("--dns-over-https-mode=off");
       args.push("--dns-prefetch-disable");
       args.push("--disable-async-dns");
       args.push("--no-prerender");
-      args.push("--no-pings");
       args.push("--disable-background-networking");
       args.push("--disable-component-update");
       args.push("--disable-domain-reliability");
       args.push("--disable-client-side-phishing-detection");
     }
+
+    // Single `--disable-features=` for the whole launch (see disableFeatures).
+    args.push(`--disable-features=${disableFeatures.join(",")}`);
 
     // Browser extensions: load this profile's enabled extensions plus the
     // bundled companion (the "Add to MultiZen" injector). Same flag pair

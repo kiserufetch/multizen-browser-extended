@@ -13,8 +13,11 @@ import type { JSX } from "react";
  */
 
 /** Prefilled into the Start page input for new profiles (a real, editable
- *  value — the user can select/clear it, not just a placeholder). */
-export const DEFAULT_START_URL = "https://duckduckgo.com/";
+ *  value — the user can select/clear it, not just a placeholder). Defaults to
+ *  `about:blank` so a new profile's first navigation isn't a fleet-wide marker
+ *  (every MultiZen profile hitting the same search engine on first run); the
+ *  user can type any http(s) URL. Keep in sync with startPage.ts. */
+export const DEFAULT_START_URL = "about:blank";
 
 export function BrowserSection({
   startUrl,
