@@ -322,7 +322,17 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+main()
+  .then(() => {
+    // Exit explicitly on success. better-sqlite3's native Database destructor
+    // runs RemoveEnvironmentCleanupHook during Node's normal shutdown, which
+    // aborts (SIGABRT / exit 134) on Node 24 even though every check passed and
+    // we already called pm.close(). A clean process.exit(0) terminates before
+    // that teardown path, so the step's exit code reflects the checks, not the
+    // teardown bug.
+    process.exit(0);
+  })
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
