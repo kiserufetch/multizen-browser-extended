@@ -21,6 +21,7 @@ import type {
   ProxyConfig,
 } from "@multizen/types";
 import { ActivityLog } from "./ActivityLog.js";
+import { InMemoryHumanHandoff, type HumanHandoff } from "./handoff.js";
 
 /**
  * BrowserDriver is the surface that the MCP server delegates real
@@ -58,6 +59,9 @@ export interface MultizenMcpServerOptions {
   browserDriver: BrowserDriver;
   /** Optional activity log; if not provided, a fresh one is created */
   activityLog?: ActivityLog;
+  /** Human-handoff coordinator (CAPTCHA/2FA pause-resume). Defaults to an
+   *  in-memory one; the desktop app passes one wired to its UI. */
+  handoff?: HumanHandoff;
   /** App version reported to clients in the MCP `initialize` result. The
    *  desktop main passes `app.getVersion()`; falls back to a constant. */
   serverVersion?: string;
@@ -98,6 +102,10 @@ const ClickRefSchema = ProfileIdSchema.extend({ ref: z.string().min(1) });
 const TypeRefSchema = ProfileIdSchema.extend({
   ref: z.string().min(1),
   text: z.string(),
+});
+const RequestHumanSchema = ProfileIdSchema.extend({ reason: z.string().min(1) });
+const WaitForHumanSchema = ProfileIdSchema.extend({
+  timeout_ms: z.number().int().positive().optional(),
 });
 const ExtractSchema = ProfileIdSchema;
 
@@ -262,6 +270,7 @@ const MULTIZEN_MCP_INSTRUCTIONS = [
 export function createMultizenMcpServer(opts: MultizenMcpServerOptions): MultizenMcpServer {
   const { profileManager, browserDriver } = opts;
   const activityLog = opts.activityLog ?? new ActivityLog();
+  const handoff = opts.handoff ?? new InMemoryHumanHandoff();
 
   const server = new Server(
     { name: "multizen", version: opts.serverVersion ?? "0.0.0" },
@@ -286,7 +295,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
     const startedAt = Date.now();
 
     try {
-      const result = await dispatch(name, args, { profileManager, browserDriver });
+      const result = await dispatch(name, args, { profileManager, browserDriver, handoff });
       const image = asImageResult(result);
       if (image) {
         activityLog.finish(event, "ok", `[${image.mimeType}, ${imageBytes(image.data)} bytes]`, startedAt);
@@ -311,6 +320,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
 interface DispatchDeps {
   profileManager: ProfileManager;
   browserDriver: BrowserDriver;
+  handoff: HumanHandoff;
 }
 
 async function dispatch(
@@ -318,7 +328,7 @@ async function dispatch(
   args: Record<string, unknown>,
   deps: DispatchDeps,
 ): Promise<unknown> {
-  const { profileManager, browserDriver } = deps;
+  const { profileManager, browserDriver, handoff } = deps;
   switch (name) {
     case "list_profiles": {
       const profiles = profileManager.list().map((p) => ({
@@ -449,6 +459,31 @@ async function dispatch(
       const { profile_id, ref, text } = TypeRefSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
       return await browserDriver.typeRef(profile_id, ref, text);
+    }
+    case "request_human": {
+      const { profile_id, reason } = RequestHumanSchema.parse(args);
+      assertProfileRunning(browserDriver, profile_id);
+      handoff.request(profile_id, reason);
+      // Surface the window to the operator (best-effort; don't fail the call).
+      await browserDriver
+        .cdpSend(profile_id, "Page.bringToFront", {}, undefined, { safe: true })
+        .catch(() => {});
+      return {
+        status: "waiting_for_human",
+        reason,
+        note: "A human must complete this step (e.g. CAPTCHA/2FA) in the browser window. Call wait_for_human to block until they resume.",
+      };
+    }
+    case "wait_for_human": {
+      const { profile_id, timeout_ms } = WaitForHumanSchema.parse(args);
+      assertProfileRunning(browserDriver, profile_id);
+      const { resumed } = await handoff.waitFor(profile_id, timeout_ms ?? 300_000);
+      return { resumed, timedOut: !resumed };
+    }
+    case "resume_human": {
+      const { profile_id } = ProfileIdSchema.parse(args);
+      handoff.resume(profile_id);
+      return { ok: true };
     }
     case "extract": {
       const { profile_id } = ExtractSchema.parse(args);
@@ -915,6 +950,48 @@ const TOOL_DEFINITIONS = [
         ref: { type: "string", description: "Element ref from extract, e.g. 'e7'" },
         text: { type: "string" },
       },
+    },
+  },
+  {
+    name: "request_human",
+    description:
+      "Hand control to a human for a step the agent must NOT do itself — a CAPTCHA, a 2FA/OTP prompt, or any manual verification. Brings the browser window forward and marks the profile as awaiting a human in the app. Call wait_for_human next to block until the person is done. Never attempt to solve CAPTCHA or 2FA yourself.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id", "reason"],
+      properties: {
+        profile_id: { type: "string" },
+        reason: {
+          type: "string",
+          description: "What the human needs to do, e.g. 'solve CAPTCHA' or 'enter 2FA code'",
+        },
+      },
+    },
+  },
+  {
+    name: "wait_for_human",
+    description:
+      "Block until a human resumes the profile (after request_human) or the timeout elapses. Returns { resumed, timedOut }. If there is no pending handoff, returns immediately as resumed.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id"],
+      properties: {
+        profile_id: { type: "string" },
+        timeout_ms: {
+          type: "number",
+          description: "Max wait in ms (default 300000 = 5 min).",
+        },
+      },
+    },
+  },
+  {
+    name: "resume_human",
+    description:
+      "Clear a pending human handoff for the profile (unblocks wait_for_human). Normally the operator triggers this from the app UI; exposed as a tool for automated/testing flows.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id"],
+      properties: { profile_id: { type: "string" } },
     },
   },
   {

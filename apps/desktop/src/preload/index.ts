@@ -8,7 +8,7 @@ import type {
   LaunchedProfile,
   FingerprintConfig,
 } from "@multizen/types";
-import type { ActivityEvent } from "@multizen/mcp-server";
+import type { ActivityEvent, PendingHandoff } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
 import type {
   ChromiumStatus,
@@ -114,6 +114,16 @@ const api = {
       const listener = (_: unknown, e: ActivityEvent): void => cb(e);
       ipcRenderer.on("activity:event", listener);
       return () => ipcRenderer.off("activity:event", listener);
+    },
+  },
+  handoff: {
+    pending: (): Promise<PendingHandoff[]> => ipcRenderer.invoke("handoff:pending"),
+    resume: (profileId: ProfileId): Promise<void> =>
+      ipcRenderer.invoke("handoff:resume", profileId),
+    onChanged: (cb: (pending: PendingHandoff[]) => void): (() => void) => {
+      const listener = (_: unknown, p: PendingHandoff[]): void => cb(p);
+      ipcRenderer.on("handoff:changed", listener);
+      return () => ipcRenderer.off("handoff:changed", listener);
     },
   },
   system: {

@@ -17,7 +17,9 @@ import {
   HttpTransport,
   createMultizenMcpServer,
   ActivityLog,
+  InMemoryHumanHandoff,
   type ActivityEvent,
+  type PendingHandoff,
 } from "@multizen/mcp-server";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
 import type {
@@ -93,6 +95,9 @@ let extensionsService: ExtensionsService;
 /** Recent companion installs, to de-dupe the marker's retry logs. */
 const recentCompanionInstalls = new Set<string>();
 let activityLog: ActivityLog;
+/** Shared across every per-session MCP server so a human handoff requested on
+ *  one connection can be resumed from the app regardless of session. */
+const humanHandoff = new InMemoryHumanHandoff();
 let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
 let mcpAuthToken: string | null = null;
@@ -297,6 +302,13 @@ app.whenReady().then(async () => {
     sendToRenderer("activity:event", e);
   });
 
+  // Forward human-handoff changes (CAPTCHA/2FA) so the UI can show a prompt and
+  // offer a Resume control; the renderer calls handoff:resume to unblock the
+  // agent's wait_for_human.
+  humanHandoff.onChange((pending: PendingHandoff[]) => {
+    sendToRenderer("handoff:changed", pending);
+  });
+
   // Forward profile running-state changes (manual launch, manual close,
   // and — most importantly — external Chromium close where the user quits
   // the browser window directly).
@@ -329,6 +341,7 @@ app.whenReady().then(async () => {
             profileManager,
             browserDriver,
             activityLog,
+            handoff: humanHandoff,
             serverVersion: app.getVersion(),
           }).server,
       });
@@ -378,6 +391,13 @@ app.whenReady().then(async () => {
 
   // Activity IPC
   ipcMain.handle("activity:recent", () => activityLog.recent());
+
+  // Human-handoff (CAPTCHA/2FA): the renderer lists pending handoffs and the
+  // operator resumes one once they've completed the step in the browser.
+  ipcMain.handle("handoff:pending", () => humanHandoff.pending());
+  ipcMain.handle("handoff:resume", (_e, profileId: string) => {
+    humanHandoff.resume(profileId);
+  });
 
   // Chromium bootstrap IPC
   ipcMain.handle("chromium:status", () => chromiumBootstrap.getStatus());

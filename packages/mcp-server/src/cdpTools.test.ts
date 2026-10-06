@@ -581,3 +581,57 @@ test("click_ref / type_ref require profile_id + ref (schema validation)", async 
   assert.equal(bad.parsed.error.code, "INVALID_INPUT");
   await client.close();
 });
+
+// ── AGT-6: human handoff (CAPTCHA / 2FA) ─────────────────────────────────────
+import { InMemoryHumanHandoff } from "./handoff.js";
+
+test("handoff registry: waitFor resolves on resume and reports pending", async () => {
+  const h = new InMemoryHumanHandoff();
+  assert.equal(h.isPending("p1" as ProfileId), false);
+  h.request("p1" as ProfileId, "solve CAPTCHA");
+  assert.equal(h.isPending("p1" as ProfileId), true);
+  assert.deepEqual(
+    h.pending().map((x) => ({ id: x.profileId, reason: x.reason })),
+    [{ id: "p1", reason: "solve CAPTCHA" }],
+  );
+  const waiting = h.waitFor("p1" as ProfileId, 5000);
+  h.resume("p1" as ProfileId);
+  assert.deepEqual(await waiting, { resumed: true });
+  assert.equal(h.isPending("p1" as ProfileId), false);
+});
+
+test("handoff registry: waitFor times out, and no-pending resolves immediately", async () => {
+  const h = new InMemoryHumanHandoff();
+  h.request("p1" as ProfileId, "x");
+  assert.deepEqual(await h.waitFor("p1" as ProfileId, 20), { resumed: false });
+  // Nothing pending → resolve as resumed so a stray wait doesn't hang.
+  assert.deepEqual(await h.waitFor("p2" as ProfileId, 20), { resumed: true });
+});
+
+test("handoff registry: onChange fires on request and resume", () => {
+  const h = new InMemoryHumanHandoff();
+  const sizes: number[] = [];
+  const off = h.onChange((p) => sizes.push(p.length));
+  h.request("p1" as ProfileId, "a");
+  h.resume("p1" as ProfileId);
+  off();
+  h.request("p2" as ProfileId, "b"); // after unsubscribe — not recorded
+  assert.deepEqual(sizes, [1, 0]);
+});
+
+test("request_human then wait_for_human unblocks on resume_human", async () => {
+  const spy = new SpyDriver();
+  const client = await connect(spy);
+  await spy.launch("p1" as ProfileId);
+  const req = await call(client, "request_human", { profile_id: "p1", reason: "solve CAPTCHA" });
+  assert.equal(req.isError, false);
+  assert.equal(req.parsed.status, "waiting_for_human");
+  // request_human brings the window forward (best-effort).
+  assert.ok(spy.calls.some((c) => c.method === "Page.bringToFront"));
+  const waiting = call(client, "wait_for_human", { profile_id: "p1", timeout_ms: 5000 });
+  await call(client, "resume_human", { profile_id: "p1" });
+  const res = await waiting;
+  assert.equal(res.parsed.resumed, true);
+  assert.equal(res.parsed.timedOut, false);
+  await client.close();
+});
