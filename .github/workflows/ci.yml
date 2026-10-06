@@ -61,6 +61,11 @@ jobs:
       - name: Launch timezone unit tests
         run: yarn test:launch-timezone
 
+      # cdp-driver / mcp-server / desktop node:test suites (input events, MCP
+      # security gates, transport, process tree, CDP readiness, …).
+      - name: Workspace unit tests
+        run: yarn test:unit
+
       - name: Fingerprint seed smoke (offline; live MCP optional)
         # Assert on the success marker, not the exit code: better-sqlite3's
         # native Database destructor aborts with SIGABRT (exit 134) during

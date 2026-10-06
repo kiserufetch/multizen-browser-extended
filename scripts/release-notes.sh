@@ -10,7 +10,10 @@
 set -euo pipefail
 
 TAG="${1:?usage: release-notes.sh <tag>}"
-REPO="multizenteam/multizen-browser"
+# Compare link targets the repo the release is published to. In Actions,
+# GITHUB_REPOSITORY is the fork; locally it falls back to the fork as well
+# (tags like v0.8.x exist only here, not upstream).
+REPO="${GITHUB_REPOSITORY:-kiserufetch/multizen-browser-extended}"
 
 # Previous tag reachable from this one; empty for the very first release.
 PREV="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"

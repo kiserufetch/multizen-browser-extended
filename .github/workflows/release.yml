@@ -52,6 +52,10 @@ jobs:
       - name: Typecheck (all workspaces)
         run: yarn typecheck
 
+      # A tag must not publish binaries if the unit suites are red.
+      - name: Workspace unit tests
+        run: yarn test:unit
+
   # Create the GitHub Release ONCE, up front. Without this, the three parallel
   # build jobs each run electron-builder with `releaseType: release`, so they
   # all POST /releases at nearly the same moment — one wins and the others fail

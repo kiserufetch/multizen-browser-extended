@@ -25,6 +25,7 @@
     "check:chrome-version": "yarn workspace @multizen/mcp-server exec tsx ../profile-manager/scripts/check-chrome-version.ts",
     "smoke:fingerprint-seed": "yarn workspace @multizen/mcp-server exec tsx scripts/smoke-fingerprint-seed.ts",
     "test:launch-timezone": "yarn workspace @multizen/mcp-server exec tsx --test ../../apps/desktop/src/main/launchTimezone.test.ts",
+    "test:unit": "yarn workspace @multizen/cdp-driver test && yarn workspace @multizen/mcp-server test && yarn workspace @multizen/desktop test",
     "clean": "rm -rf apps/*/dist apps/*/out packages/*/dist node_modules/.cache"
   },
   "devDependencies": {
