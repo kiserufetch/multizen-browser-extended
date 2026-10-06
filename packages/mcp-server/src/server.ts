@@ -576,7 +576,10 @@ async function dispatch(
             ctx.fillStyle = "#f60";
             ctx.fillRect(125, 1, 62, 20);
             ctx.fillStyle = "#069";
-            ctx.fillText("MultiZen probe", 2, 15);
+            // Neutral probe text (no product branding): a detector that has
+            // hooked canvas APIs must not be able to read a MultiZen-specific
+            // string shared across every profile.
+            ctx.fillText("probe", 2, 15);
             const data = c.toDataURL();
             let h = 0;
             for (let i = 0; i < data.length; i++) h = ((h << 5) - h + data.charCodeAt(i)) | 0;
@@ -595,6 +598,9 @@ async function dispatch(
                 renderer: gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL),
               };
             }
+            // Release the context explicitly — browsers cap live WebGL
+            // contexts (~16) and probing must not consume one each call.
+            try { gl.getExtension("WEBGL_lose_context")?.loseContext(); } catch {}
           }
         } catch {}
         return {

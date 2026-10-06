@@ -666,35 +666,36 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
           }
         }
         // Diagnostic: capture what the page actually sees AFTER overrides.
-        // Logs once per session — if browserscan reports "Different browser
-        // name", these values tell us whether our override landed.
-        try {
-          const probe = await send<{
-            result?: { value?: string };
-          }>("Runtime.evaluate", {
-            expression: `JSON.stringify({
-              ua: navigator.userAgent,
-              brands: navigator.userAgentData ? navigator.userAgentData.brands : null,
-              platform: navigator.platform,
-              tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-              icuLocale: Intl.DateTimeFormat().resolvedOptions().locale,
-              calendar: Intl.DateTimeFormat().resolvedOptions().calendar,
-              lang: navigator.language,
-              langs: navigator.languages,
-              deviceMemory: navigator.deviceMemory,
-              hardwareConcurrency: navigator.hardwareConcurrency,
-              hasRTCPC: typeof window.RTCPeerConnection !== "undefined",
-            })`,
-            returnByValue: true,
-          });
-          const value = probe?.result?.value;
-          // Diagnostic only — gated behind MULTIZEN_DEBUG so it doesn't spam the
-          // console on every launch (it also fires a few times as the context settles).
-          if (value && process.env.MULTIZEN_DEBUG)
-            console.log("[multizen] post-bootstrap probe:", value);
-        } catch (e) {
-          // Non-fatal — diagnostic only.
-          void e;
+        // The ENTIRE probe is gated behind MULTIZEN_DEBUG, not just the log:
+        // it is a main-world read of navigator / Intl / RTCPeerConnection, and
+        // running it on every target attach is an observable burst of probing
+        // the page could notice. In production we inject nothing here.
+        if (process.env.MULTIZEN_DEBUG) {
+          try {
+            const probe = await send<{
+              result?: { value?: string };
+            }>("Runtime.evaluate", {
+              expression: `JSON.stringify({
+                ua: navigator.userAgent,
+                brands: navigator.userAgentData ? navigator.userAgentData.brands : null,
+                platform: navigator.platform,
+                tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                icuLocale: Intl.DateTimeFormat().resolvedOptions().locale,
+                calendar: Intl.DateTimeFormat().resolvedOptions().calendar,
+                lang: navigator.language,
+                langs: navigator.languages,
+                deviceMemory: navigator.deviceMemory,
+                hardwareConcurrency: navigator.hardwareConcurrency,
+                hasRTCPC: typeof window.RTCPeerConnection !== "undefined",
+              })`,
+              returnByValue: true,
+            });
+            const value = probe?.result?.value;
+            if (value) console.log("[multizen] post-bootstrap probe:", value);
+          } catch (e) {
+            // Non-fatal — diagnostic only.
+            void e;
+          }
         }
       })
       .catch((e: unknown) => {
