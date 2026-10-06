@@ -62,4 +62,12 @@ jobs:
         run: yarn test:launch-timezone
 
       - name: Fingerprint seed smoke (offline; live MCP optional)
-        run: yarn smoke:fingerprint-seed
+        # Assert on the success marker, not the exit code: better-sqlite3's
+        # native Database destructor aborts with SIGABRT (exit 134) during
+        # Node 24 process teardown AFTER every check has passed and printed.
+        # A real logic failure throws before the marker and exits 1, so the
+        # grep still catches it.
+        run: |
+          out="$(yarn smoke:fingerprint-seed 2>&1)" || true
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -qE "Offline (checks|\+ live checks) passed"
