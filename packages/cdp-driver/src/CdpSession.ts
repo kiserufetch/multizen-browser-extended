@@ -77,6 +77,15 @@ const SAFE_PAIRED_DISABLE_DOMAINS = new Set([
 const CLOAK_RISKY_ENABLE_DOMAINS = new Set(["Runtime", "Network"]);
 
 /**
+ * Default ceiling for a single CDP command. A wedged renderer or a stalled
+ * transport would otherwise leave a `cdpSend` (and the MCP call built on it)
+ * pending forever. Individual waits poll with their own short calls, so this
+ * never truncates a legitimate long wait — it only fails a genuinely hung one.
+ * Callers can override per call via `opts.timeoutMs` (0 disables).
+ */
+const DEFAULT_CDP_TIMEOUT_MS = 30_000;
+
+/**
  * Methods the safe `cdpSend` layer refuses outright. These have no legitimate
  * stealth-preserving use and would either break the session or expose
  * automation: disabling the connect-sacred `Page` domain (kills
@@ -415,10 +424,19 @@ export class CdpSession {
     method: string,
     params?: Record<string, unknown>,
     sessionId?: string,
-    opts: { safe?: boolean } = {},
+    opts: { safe?: boolean; timeoutMs?: number } = {},
   ): Promise<unknown> {
     const client = this.require();
-    const send = buildSender(client, sessionId);
+    const rawSend = buildSender(client, sessionId);
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_CDP_TIMEOUT_MS;
+    // Bound every command so a wedged renderer / stalled transport can't hang
+    // the call forever. timeoutMs <= 0 opts out.
+    const send: TargetSender = ((m: string, p?: Record<string, unknown>) => {
+      const promise = rawSend(m, p);
+      return timeoutMs > 0
+        ? withTimeout(promise, timeoutMs, `CDP ${m} timed out after ${timeoutMs}ms`)
+        : promise;
+    }) as TargetSender;
     const safe = opts.safe ?? true;
 
     if (!safe) {

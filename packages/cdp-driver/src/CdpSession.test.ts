@@ -279,3 +279,27 @@ test("cdp_send_no_safety still allows the denied methods (caller owns the risk)"
   await s.cdpSend("Page.disable", undefined, undefined, { safe: false });
   assert.deepEqual(fake.methods(), ["Page.disable"]);
 });
+
+// ── AGT-5: per-command timeout ───────────────────────────────────────────────
+test("cdpSend rejects when a command exceeds its timeout", async () => {
+  // A client whose send never resolves — simulates a wedged renderer.
+  const hung = {
+    client: { send: () => new Promise<unknown>(() => {}) },
+  };
+  const s = new CdpSession({ port: 0 });
+  (s as unknown as { client: unknown }).client = hung.client;
+  await assert.rejects(
+    () => s.cdpSend("Runtime.evaluate", { expression: "1" }, undefined, { safe: false, timeoutMs: 25 }),
+    /timed out/i,
+  );
+});
+
+test("cdpSend with timeoutMs=0 does not impose a timeout (resolves normally)", async () => {
+  const fake = makeFakeClient();
+  const s = sessionWith(fake);
+  const r = (await s.cdpSend("Runtime.evaluate", { expression: "1" }, undefined, {
+    safe: false,
+    timeoutMs: 0,
+  })) as { ok?: boolean };
+  assert.equal(r.ok, true);
+});
