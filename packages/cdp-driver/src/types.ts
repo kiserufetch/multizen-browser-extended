@@ -12,6 +12,9 @@ export interface AccessibilityNode {
   children?: AccessibilityNode[];
   /** Backend node id for CDP DOM operations */
   backendNodeId?: number;
+  /** Short stable handle (e.g. "e7") for this snapshot; use with click_ref /
+   *  type_ref. Present only for nodes backed by a real DOM node. */
+  ref?: string;
 }
 
 export interface ExtractContext {

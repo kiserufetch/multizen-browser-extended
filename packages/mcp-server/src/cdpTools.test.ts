@@ -72,6 +72,15 @@ class SpyDriver implements BrowserDriver {
   async type(): Promise<{ ok: true }> {
     return { ok: true };
   }
+  readonly refCalls: Array<{ kind: "click" | "type"; ref: string; text?: string }> = [];
+  async clickRef(_p: ProfileId, ref: string): Promise<{ ok: true }> {
+    this.refCalls.push({ kind: "click", ref });
+    return { ok: true };
+  }
+  async typeRef(_p: ProfileId, ref: string, text: string): Promise<{ ok: true }> {
+    this.refCalls.push({ kind: "type", ref, text });
+    return { ok: true };
+  }
   async extract(): Promise<{ result: unknown }> {
     return { result: {} };
   }
@@ -545,5 +554,30 @@ test("screenshot returns an MCP image content block, not base64 JSON text", asyn
   assert.equal(content[0]?.type, "image");
   assert.equal(content[0]?.mimeType, "image/png");
   assert.equal(content[0]?.data, png);
+  await client.close();
+});
+
+test("click_ref and type_ref route the ref (and text) to the driver", async () => {
+  const spy = new SpyDriver();
+  const client = await connect(spy);
+  await spy.launch("p1" as ProfileId);
+  const c = await call(client, "click_ref", { profile_id: "p1", ref: "e7" });
+  assert.equal(c.isError, false);
+  const t = await call(client, "type_ref", { profile_id: "p1", ref: "e3", text: "hello" });
+  assert.equal(t.isError, false);
+  assert.deepEqual(spy.refCalls, [
+    { kind: "click", ref: "e7" },
+    { kind: "type", ref: "e3", text: "hello" },
+  ]);
+  await client.close();
+});
+
+test("click_ref / type_ref require profile_id + ref (schema validation)", async () => {
+  const spy = new SpyDriver();
+  const client = await connect(spy);
+  await spy.launch("p1" as ProfileId);
+  const bad = await call(client, "click_ref", { profile_id: "p1" });
+  assert.equal(bad.isError, true);
+  assert.equal(bad.parsed.error.code, "INVALID_INPUT");
   await client.close();
 });

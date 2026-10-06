@@ -35,6 +35,8 @@ export interface BrowserDriver {
   navigate(profileId: ProfileId, url: string): Promise<{ url: string }>;
   click(profileId: ProfileId, selector: string): Promise<{ ok: true }>;
   type(profileId: ProfileId, selector: string, text: string): Promise<{ ok: true }>;
+  clickRef(profileId: ProfileId, ref: string): Promise<{ ok: true }>;
+  typeRef(profileId: ProfileId, ref: string, text: string): Promise<{ ok: true }>;
   extract(profileId: ProfileId): Promise<{ result: unknown }>;
   screenshot(profileId: ProfileId): Promise<{ pngBase64: string }>;
   /**
@@ -90,6 +92,11 @@ const NavigateSchema = ProfileIdSchema.extend({ url: SafeNavigationUrl });
 const ClickSchema = ProfileIdSchema.extend({ selector: z.string().min(1) });
 const TypeSchema = ProfileIdSchema.extend({
   selector: z.string().min(1),
+  text: z.string(),
+});
+const ClickRefSchema = ProfileIdSchema.extend({ ref: z.string().min(1) });
+const TypeRefSchema = ProfileIdSchema.extend({
+  ref: z.string().min(1),
   text: z.string(),
 });
 const ExtractSchema = ProfileIdSchema;
@@ -432,6 +439,16 @@ async function dispatch(
       const { profile_id, selector, text } = TypeSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
       return await browserDriver.type(profile_id, selector, text);
+    }
+    case "click_ref": {
+      const { profile_id, ref } = ClickRefSchema.parse(args);
+      assertProfileRunning(browserDriver, profile_id);
+      return await browserDriver.clickRef(profile_id, ref);
+    }
+    case "type_ref": {
+      const { profile_id, ref, text } = TypeRefSchema.parse(args);
+      assertProfileRunning(browserDriver, profile_id);
+      return await browserDriver.typeRef(profile_id, ref, text);
     }
     case "extract": {
       const { profile_id } = ExtractSchema.parse(args);
@@ -874,9 +891,36 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "click_ref",
+    description:
+      "Click an element by its snapshot `ref` (e.g. 'e7') from the most recent extract. Prefer this over click: no CSS selector needed, and it scrolls the element into view. Refs are invalidated when the page changes — re-run extract and use the new refs.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id", "ref"],
+      properties: {
+        profile_id: { type: "string" },
+        ref: { type: "string", description: "Element ref from extract, e.g. 'e7'" },
+      },
+    },
+  },
+  {
+    name: "type_ref",
+    description:
+      "Focus an element by its snapshot `ref` (via a real click) and type text into it. Prefer this over type. Refs come from extract and are invalidated when the page changes.",
+    inputSchema: {
+      type: "object",
+      required: ["profile_id", "ref", "text"],
+      properties: {
+        profile_id: { type: "string" },
+        ref: { type: "string", description: "Element ref from extract, e.g. 'e7'" },
+        text: { type: "string" },
+      },
+    },
+  },
+  {
     name: "extract",
     description:
-      "Snapshot the current page: returns the URL, title, and a trimmed accessibility tree. The calling LLM is responsible for parsing this into whatever structured data it needs. MultiZen does not call any external API.",
+      "Snapshot the current page: returns the URL, title, and a trimmed accessibility tree. Interactive/meaningful nodes carry a short `ref` (e.g. 'e7') — pass it to click_ref / type_ref to act on that element without a CSS selector. The calling LLM parses the tree into whatever it needs. MultiZen does not call any external API.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],

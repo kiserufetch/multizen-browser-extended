@@ -58,6 +58,14 @@ export class MockBrowserDriver implements BrowserDriver {
     return { ok: true };
   }
 
+  async clickRef(_profileId: ProfileId, _ref: string): Promise<{ ok: true }> {
+    return { ok: true };
+  }
+
+  async typeRef(_profileId: ProfileId, _ref: string, _text: string): Promise<{ ok: true }> {
+    return { ok: true };
+  }
+
   async extract(_profileId: ProfileId): Promise<{ result: unknown }> {
     return {
       result: {

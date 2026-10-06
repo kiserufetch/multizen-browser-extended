@@ -820,6 +820,18 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return { ok: true };
   }
 
+  async clickRef(profileId: ProfileId, ref: string): Promise<{ ok: true }> {
+    const session = this.requireSession(profileId);
+    await session.clickRef(ref);
+    return { ok: true };
+  }
+
+  async typeRef(profileId: ProfileId, ref: string, text: string): Promise<{ ok: true }> {
+    const session = this.requireSession(profileId);
+    await session.typeRef(ref, text);
+    return { ok: true };
+  }
+
   async extract(profileId: ProfileId): Promise<{ result: unknown }> {
     const session = this.requireSession(profileId);
     return session.extract();

@@ -134,6 +134,14 @@ export class CdpSession {
    */
   private readonly safeEnableRefcount = new Map<string, number>();
 
+  /**
+   * ref (e.g. "e7") → backendDOMNodeId for the most recent {@link snapshot}.
+   * Lets agents act on elements by a short, stable handle instead of
+   * synthesizing a CSS selector. Rebuilt on every snapshot; stale refs
+   * (page changed since) resolve to a clear error.
+   */
+  private snapshotRefs = new Map<string, number>();
+
   constructor(opts: CdpSessionOptions) {
     this.opts = opts;
   }
@@ -591,6 +599,14 @@ export class CdpSession {
       throw new Error(`Element not found for selector: ${selector}`);
     }
 
+    await this.typeText(text);
+    return { ok: true };
+  }
+
+  /** Emit a humanized key sequence into whatever element currently has focus.
+   *  Shared by selector-based `type` and ref-based `typeRef`. */
+  private async typeText(text: string): Promise<void> {
+    const client = this.require();
     for (const ch of text) {
       const d = describeKey(ch);
       const modifiers = d.shift ? CDP_MOD_SHIFT : 0;
@@ -637,6 +653,68 @@ export class CdpSession {
       }
       await delay(randIn(8, 30));
     }
+  }
+
+  /**
+   * Resolve a snapshot `ref` (assigned by {@link snapshot}) to the viewport
+   * center of its element, scrolling it into view first. Uses DOM.resolveNode
+   * + getBoundingClientRect — the same viewport-coordinate basis as the
+   * selector click path — rather than DOM.getBoxModel (whose quads don't
+   * account for scroll). Throws a clear error if the ref is unknown or the
+   * element is gone / not rendered (e.g. the page navigated since the snapshot).
+   */
+  private async resolveRefCenter(ref: string): Promise<{ x: number; y: number }> {
+    const client = this.require();
+    const backendNodeId = this.snapshotRefs.get(ref);
+    if (backendNodeId === undefined) {
+      throw new Error(
+        `Unknown element ref "${ref}". Call extract/snapshot to get current refs ` +
+          `(they are invalidated when the page changes).`,
+      );
+    }
+    let objectId: string | undefined;
+    try {
+      const resolved = (await client.DOM.resolveNode({ backendNodeId })) as {
+        object?: { objectId?: string };
+      };
+      objectId = resolved.object?.objectId;
+    } catch {
+      objectId = undefined;
+    }
+    if (!objectId) {
+      throw new Error(`Element ref "${ref}" could not be resolved (page may have changed).`);
+    }
+    try {
+      const res = (await client.Runtime.callFunctionOn({
+        objectId,
+        functionDeclaration: `function () {
+          if (this.scrollIntoView) this.scrollIntoView({ block: "center", inline: "center" });
+          const r = this.getBoundingClientRect ? this.getBoundingClientRect() : null;
+          if (!r || (r.width === 0 && r.height === 0)) return null;
+          return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+        }`,
+        returnByValue: true,
+      })) as { result?: { value?: string | null } };
+      const v = res.result?.value;
+      if (!v) throw new Error(`Element ref "${ref}" is not visible / has no box.`);
+      return JSON.parse(v) as { x: number; y: number };
+    } finally {
+      await client.Runtime.releaseObject({ objectId }).catch(() => {});
+    }
+  }
+
+  /** Click the element addressed by a snapshot `ref`. */
+  async clickRef(ref: string): Promise<{ ok: true }> {
+    const { x, y } = await this.resolveRefCenter(ref);
+    await this.dispatchMouseClick(x, y);
+    return { ok: true };
+  }
+
+  /** Focus the element addressed by a snapshot `ref` (via a real click) and type into it. */
+  async typeRef(ref: string, text: string): Promise<{ ok: true }> {
+    const { x, y } = await this.resolveRefCenter(ref);
+    await this.dispatchMouseClick(x, y);
+    await this.typeText(text);
     return { ok: true };
   }
 
@@ -682,6 +760,22 @@ export class CdpSession {
       await Accessibility.disable().catch(() => {});
     }
     const accessibilityTree = trimAccessibilityTree(fullTree.nodes as unknown as RawAxNode[]);
+
+    // Assign a short, stable ref (e1, e2, …) to every node backed by a real
+    // DOM node, and remember ref → backendNodeId so clickRef/typeRef can act on
+    // it. Rebuilt each snapshot so refs always describe the current tree.
+    this.snapshotRefs = new Map<string, number>();
+    const assignRefs = (nodes: AccessibilityNode[]): void => {
+      for (const node of nodes) {
+        if (typeof node.backendNodeId === "number") {
+          const ref = `e${this.snapshotRefs.size + 1}`;
+          node.ref = ref;
+          this.snapshotRefs.set(ref, node.backendNodeId);
+        }
+        if (node.children) assignRefs(node.children);
+      }
+    };
+    assignRefs(accessibilityTree);
 
     let textContent: string | undefined;
     if (accessibilityTree.length === 0) {
