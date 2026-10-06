@@ -130,6 +130,26 @@ export class CdpSession {
     // our CDP presence via Runtime.enable, (b) CloakBrowser doesn't
     // SIGTRAP on connect.
     await Page.enable();
+
+    // Auto-handle JavaScript dialogs. A page `alert()` / `confirm()` /
+    // `beforeunload` blocks the renderer until the dialog is answered; with no
+    // handler, the CDP command that triggered it (and every later one) hangs
+    // forever — the MCP call never returns. Default policy: accept alert
+    // (its only outcome) and beforeunload (so navigations proceed), dismiss
+    // confirm/prompt (never take an affirmative action the agent didn't ask
+    // for). Explicit per-dialog control (a handle_dialog tool) is a later
+    // addition; this just stops the hang. Root target only for now;
+    // per-OOPIF dialogs follow the browser-wide target model.
+    try {
+      Page.javascriptDialogOpening((ev: { type?: string }) => {
+        const accept = ev?.type === "alert" || ev?.type === "beforeunload";
+        void this.client?.Page.handleJavaScriptDialog({ accept }).catch(() => {
+          // The dialog may already be gone (navigated away / page closed).
+        });
+      });
+    } catch {
+      // Older transports may not expose the typed event helper; non-fatal.
+    }
   }
 
   async close(): Promise<void> {
