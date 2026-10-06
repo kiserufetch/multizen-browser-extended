@@ -209,3 +209,51 @@ test("cdp_send before connect() throws a clear 'not connected' error", async () 
   const s = new CdpSession({ port: 0 });
   await assert.rejects(s.cdpSend("Runtime.evaluate"), /not connected/i);
 });
+
+// ── keyboard descriptor (BEH-1 input correctness) ────────────────────────────
+import { describeKey, CDP_MOD_SHIFT } from "./keyboard.js";
+
+test("describeKey maps lowercase letters to code/keyCode/text without Shift", () => {
+  const a = describeKey("a");
+  assert.equal(a.key, "a");
+  assert.equal(a.code, "KeyA");
+  assert.equal(a.keyCode, 65);
+  assert.equal(a.text, "a");
+  assert.equal(a.shift, false);
+});
+
+test("describeKey marks uppercase letters as Shift with the uppercase glyph", () => {
+  const A = describeKey("A");
+  assert.equal(A.key, "A");
+  assert.equal(A.code, "KeyA");
+  assert.equal(A.keyCode, 65);
+  assert.equal(A.text, "A");
+  assert.equal(A.shift, true);
+});
+
+test("describeKey handles digits, shifted symbols, Enter, Tab and space", () => {
+  assert.deepEqual(describeKey("1"), { key: "1", code: "Digit1", keyCode: 49, text: "1", shift: false });
+  // '!' is Shift+1 on US layout → same physical key as '1'.
+  const bang = describeKey("!");
+  assert.equal(bang.code, "Digit1");
+  assert.equal(bang.keyCode, 49);
+  assert.equal(bang.shift, true);
+  assert.equal(bang.text, "!");
+  const enter = describeKey("\n");
+  assert.equal(enter.key, "Enter");
+  assert.equal(enter.code, "Enter");
+  assert.equal(enter.keyCode, 13);
+  const tab = describeKey("\t");
+  assert.equal(tab.key, "Tab");
+  assert.equal(tab.text, undefined); // control key, no inserted text
+  assert.equal(describeKey(" ").code, "Space");
+  assert.equal(CDP_MOD_SHIFT, 8);
+});
+
+test("describeKey still types unknown characters (emoji) with key+text, blank code", () => {
+  const e = describeKey("😀");
+  assert.equal(e.key, "😀");
+  assert.equal(e.text, "😀");
+  assert.equal(e.code, "");
+  assert.equal(e.keyCode, 0);
+});

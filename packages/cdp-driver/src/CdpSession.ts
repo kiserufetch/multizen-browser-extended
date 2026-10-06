@@ -1,5 +1,6 @@
 import CDP from "chrome-remote-interface";
 import type { AccessibilityNode, ExtractContext } from "./types.js";
+import { describeKey, CDP_MOD_SHIFT } from "./keyboard.js";
 
 /**
  * Send a CDP command to a specific target/session. Returned by
@@ -475,9 +476,40 @@ export class CdpSession {
 
   private async dispatchMouseClick(x: number, y: number): Promise<void> {
     const client = this.require();
-    await client.Input.dispatchMouseEvent({ type: "mouseMoved", x, y });
-    await client.Input.dispatchMouseEvent({ type: "mousePressed", x, y, button: "left", clickCount: 1 });
-    await client.Input.dispatchMouseEvent({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+    // Emit a real pointer sequence: move (no buttons), press (left button bit
+    // set, pointer pressure 0.5 like a physical mouse), a short hold, then
+    // release (buttons cleared, pressure 0). The old version omitted the
+    // `buttons` mask and `force`, so PointerEvent.pressure was 0 and
+    // PointerEvent.buttons was 0 during the click — a synthetic-input tell.
+    await client.Input.dispatchMouseEvent({
+      type: "mouseMoved",
+      x,
+      y,
+      button: "none",
+      buttons: 0,
+      pointerType: "mouse",
+    });
+    await client.Input.dispatchMouseEvent({
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+      force: 0.5,
+      pointerType: "mouse",
+    });
+    await delay(randIn(40, 110));
+    await client.Input.dispatchMouseEvent({
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+      force: 0,
+      pointerType: "mouse",
+    });
   }
 
   /**
@@ -500,8 +532,50 @@ export class CdpSession {
     }
 
     for (const ch of text) {
-      await client.Input.dispatchKeyEvent({ type: "keyDown", text: ch });
-      await client.Input.dispatchKeyEvent({ type: "keyUp" });
+      const d = describeKey(ch);
+      const modifiers = d.shift ? CDP_MOD_SHIFT : 0;
+      if (d.shift) {
+        await client.Input.dispatchKeyEvent({
+          type: "keyDown",
+          key: "Shift",
+          code: "ShiftLeft",
+          windowsVirtualKeyCode: 16,
+          nativeVirtualKeyCode: 16,
+          modifiers: 0,
+        });
+      }
+      // keyDown carries the full descriptor; `text` makes Chromium also emit
+      // keypress + input (and insert the character). A pure control key (Tab)
+      // has no text.
+      await client.Input.dispatchKeyEvent({
+        type: d.text ? "keyDown" : "rawKeyDown",
+        key: d.key,
+        code: d.code,
+        windowsVirtualKeyCode: d.keyCode,
+        nativeVirtualKeyCode: d.keyCode,
+        ...(d.text ? { text: d.text, unmodifiedText: d.text } : {}),
+        modifiers,
+      });
+      await delay(randIn(12, 45));
+      await client.Input.dispatchKeyEvent({
+        type: "keyUp",
+        key: d.key,
+        code: d.code,
+        windowsVirtualKeyCode: d.keyCode,
+        nativeVirtualKeyCode: d.keyCode,
+        modifiers,
+      });
+      if (d.shift) {
+        await client.Input.dispatchKeyEvent({
+          type: "keyUp",
+          key: "Shift",
+          code: "ShiftLeft",
+          windowsVirtualKeyCode: 16,
+          nativeVirtualKeyCode: 16,
+          modifiers: 0,
+        });
+      }
+      await delay(randIn(8, 30));
     }
     return { ok: true };
   }
@@ -643,6 +717,17 @@ function trimAccessibilityTree(rawNodes: RawAxNode[]): AccessibilityNode[] {
   }
 
   return roots.flatMap((r) => walk(r, 0));
+}
+
+/** Resolve after `ms` milliseconds. */
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** A random integer in [min, max]. Used to vary key-hold / inter-key timing so
+ *  synthetic input does not land on a single constant interval. */
+function randIn(min: number, max: number): number {
+  return min + Math.floor(Math.random() * (max - min + 1));
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
