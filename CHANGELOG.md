@@ -5,6 +5,61 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Anti-detect and automation hardening from the October 2026 research review
+(`docs/antidetect-automation-research-2026-10.md`). All verified against the
+code and unit tests; items needing live cross-OS / engine validation are called
+out below.
+
+### Fixed
+
+- **WebRTC IP leak on proxied profiles.** Dropped `--fingerprint-webrtc-ip`
+  (the shipped CloakBrowser binary leaves the `auto` sentinel as a literal in
+  ICE candidates and bypasses the UDP policy) and the inert
+  `--force-webrtc-ip-handling-policy` / `--enforce-webrtc-ip-permission-check`
+  switches. WebRTC leak protection is now the Chrome-level
+  `--webrtc-ip-handling-policy=disable_non_proxied_udp` for both engines, and
+  the per-profile constant fake-LAN CFT spoof was removed.
+  *Live STUN validation on macOS / Linux / CFT + a direct-profile check is a
+  prerequisite before releasing this.*
+- **Engine bootstrap no longer breaks as `-pro` releases accumulate.** The
+  CloakBrowser release scan is paginated and falls back to a pinned direct
+  download URL when the GitHub API is unavailable.
+- **MCP security guardrails lost in the upstream v0.3.0 merge restored.** Proxy
+  passwords are redacted from `list_profiles` / `create_profile` /
+  `update_profile` responses (the 0.7.1 note claiming this was premature — it
+  only takes effect now); `navigate` / `new_tab` reject non-http(s) URL schemes;
+  the HTTP transport rejects cross-origin requests (403); the activity log no
+  longer records typed text; `.mzar` import sanitizes the extension list against
+  path traversal. `cdp_send_no_safety` stays intentionally unrestricted.
+- **Launch flags.** `--disable-features` is emitted once (it was passed twice,
+  so proxied profiles silently re-enabled Translate/MediaRouter — two
+  populations). MediaRouter is no longer disabled; `--no-pings` removed.
+- **First-run start page** defaults to `about:blank` instead of a fixed search
+  engine (a fleet-wide first-navigation marker).
+- **Input events.** `type` now emits correct `key` / `code` / `keyCode` / Shift
+  with a non-zero key hold; `click` sets the button mask and pointer pressure
+  with a press hold — previously `KeyboardEvent.key`/`.code` were empty and
+  `PointerEvent.pressure` was 0.
+- **Stealth hygiene.** The per-attach diagnostic probe runs only under
+  `MULTIZEN_DEBUG`; `probe_fingerprint` uses a neutral canvas string and frees
+  its WebGL context.
+- **JS dialogs** (`alert` / `confirm` / `beforeunload`) are auto-handled so they
+  no longer hang the MCP call.
+- Safe `cdp_send` refuses `Page.disable`, `Runtime.addBinding` and
+  `*.exposeDevToolsProtocol`.
+
+### Changed
+
+- `screenshot` returns an MCP image content block instead of base64 inside JSON
+  text; the MCP server reports the real app version in `initialize`.
+
+### Docs
+
+- README no longer claims fonts are spoofed or that there is no telemetry, and
+  describes WebRTC as leak-prevented rather than C++-spoofed.
+
 ## [0.8.1] - 2026-10-06
 
 Synced with upstream `multizenteam/multizen-browser` `master` through

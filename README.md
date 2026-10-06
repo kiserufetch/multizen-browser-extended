@@ -117,9 +117,9 @@ curl -sSL https://getmultizen.com/install.sh | bash
                                             |
                                             v
                                   patched Chromium binary
-                                  (canvas, WebGL, audio,
-                                   font, WebRTC fingerprints
-                                   spoofed at C++ level)
+                                  (canvas, WebGL, audio
+                                   spoofed at C++ level;
+                                   WebRTC IP leak-prevented)
 ```
 
 Each profile is a real Chromium window with persistent state on disk. The MCP server speaks the standard Anthropic Model Context Protocol over Streamable HTTP (plus legacy SSE) so it works with any client. Browser-drive tools call into Chrome DevTools Protocol under the hood.
@@ -129,12 +129,12 @@ Each profile is a real Chromium window with persistent state on disk. The MCP se
 |  | What it does |
 | --- | --- |
 | **MCP server** | Native localhost endpoint. Works with Cursor, Claude Desktop, Cline, Continue, anything else that speaks MCP. |
-| **Anti-detect Chromium** | Source-patched browser engine (CloakBrowser). Canvas, WebGL, audio, fonts, WebRTC IP all spoofed at C++ level instead of JS injection. |
+| **Anti-detect Chromium** | Source-patched browser engine (CloakBrowser). Canvas, WebGL, and audio spoofed at C++ level instead of JS injection; WebRTC IP leak-prevented via Chromium's proxied-UDP policy. |
 | **Persistent state** | Cookies, login, IndexedDB, localStorage stay per-profile across launches and across AI sessions. |
 | **Human handoff** | AI gets stuck on 2FA or CAPTCHA, you take over in the same Chromium window, the agent continues when you are done. |
 | **Cross-platform persona** | Run a Windows persona on a Mac host (or vice versa). C++ patches keep the fingerprint coherent across V8, Blink, and CSS feature signatures. |
 | **Proxy + persona alignment** | Per-profile HTTP or SOCKS5 proxy with a local SOCKS5 bridge so DNS resolution stays remote. Auto-aligns timezone, locale, and `navigator.geolocation` to the proxy egress IP. |
-| **Self-hosted** | Profiles live on your disk in plain SQLite plus Chromium user-data-dir format. No account, no license server, no telemetry. |
+| **Self-hosted** | Profiles live on your disk in plain SQLite plus Chromium user-data-dir format. No account, no license server; anonymous telemetry is opt-in and off by default. |
 | **Open source** | MIT for the entire app, MCP server, and CDP driver. Patched Chromium engine is also open source. |
 
 ## Onboarding
