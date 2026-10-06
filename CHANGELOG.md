@@ -5,6 +5,65 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-10-07
+
+Agent-automation improvements (the "Stage B" set from the October 2026 research
+review). New MCP tools and driver robustness; the anti-detect surface is
+unchanged from 0.8.2. The browser-level target model is landed only in part
+(see below) and still needs live validation for the routing layer.
+
+### Added
+
+- **Ref-addressed page model.** `extract` now tags each interactive/meaningful
+  accessibility node with a short stable `ref` (e1, e2, …). Two new tools act on
+  those refs without a CSS selector: **`click_ref`** and **`type_ref`** (resolve
+  via DOM.resolveNode + getBoundingClientRect, scroll into view, humanized
+  input). Refs are invalidated when the page changes.
+- **Human-handoff protocol for CAPTCHA / 2FA.** New tools **`request_human`**,
+  **`wait_for_human`** and **`resume_human`**: the agent hands control to a
+  person (it never solves the challenge), the window comes forward, and
+  `wait_for_human` blocks until the operator resumes or a timeout elapses.
+  Pending handoffs are exposed to the desktop UI over IPC
+  (`window.api.handoff`).
+- `screenshot` returns a proper MCP image content block instead of base64 in
+  JSON text; the MCP server reports the real app version in `initialize`.
+
+### Changed
+
+- **Correct synthetic input.** `type` emits full key descriptors
+  (`key`/`code`/`keyCode`, Shift for uppercase/symbols) with a non-zero hold;
+  `click` sets the pointer button mask and pressure with a press hold — the old
+  events had empty `KeyboardEvent.key`/`.code` and zero `PointerEvent.pressure`.
+
+### Fixed
+
+- Every `cdpSend` command is bounded by a timeout (default 30s) so a wedged
+  renderer / stalled transport can't hang an MCP call forever.
+- JavaScript dialogs (`alert` / `confirm` / `beforeunload`) are auto-handled so
+  they no longer hang the driver.
+- Safe `cdp_send` refuses `Page.disable`, `Runtime.addBinding` and
+  `*.exposeDevToolsProtocol`.
+- The driver now fails loud with a clear message when its tab closes / the
+  browser exits, instead of hanging on a dead socket (partial defect #18).
+
+### CI
+
+- CI and the release gate now run the cdp-driver / mcp-server / desktop unit
+  suites (94 tests), not just typecheck + fingerprint/timezone scripts.
+- The fingerprint-seed smoke step asserts its success marker, tolerating a
+  better-sqlite3 teardown abort (exit 134) on Node 24.
+
+### Partially landed / follow-ups
+
+- **STE-8 browser-wide target model.** A pure, unit-tested `TargetRegistry`
+  (active tab + re-selection) and fail-loud-on-disconnect shipped; the layer
+  that connects at the browser level and routes actions to the active target —
+  lifting the "root tab only" limit on `click_ref`/`type_ref`/handoff and
+  covering new tabs/popups — is deferred because it changes the connection
+  topology and needs live-browser validation.
+- Not yet shipped: the desktop "Resume" button for handoffs (backend/IPC are in
+  place) and an explicit `handle_dialog` tool.
+
 ## [0.8.2] - 2026-10-06
 
 Anti-detect and automation hardening from the October 2026 research review
