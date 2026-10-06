@@ -81,9 +81,32 @@ const CFT_LATEST =
 
 // /releases (not /releases/latest) — CloakBrowser ships per-platform
 // builds at different cadences (Linux/Win on 146.x, macOS still on 145.x).
-// We walk newest → oldest looking for the first release that has an
-// asset for the current platform.
-const CLOAKBROWSER_API = "https://api.github.com/repos/CloakHQ/CloakBrowser/releases?per_page=30";
+// We walk newest → oldest looking for the first release that has an asset
+// for the current platform. This MUST be paginated: CloakHQ publishes
+// `-pro` releases that carry no free per-platform asset, and a run of them
+// at the top of the list can push the newest release that DOES have our
+// asset past a single 30-entry page — at which point `ensure()` fails with
+// "No CloakBrowser release has asset" on a clean install even though a
+// usable build exists. We scan up to MAX_PAGES of PER_PAGE entries.
+const CLOAKBROWSER_API = "https://api.github.com/repos/CloakHQ/CloakBrowser/releases";
+const CLOAKBROWSER_PER_PAGE = 100;
+const CLOAKBROWSER_MAX_PAGES = 5; // up to 500 releases scanned, 5 API calls
+const CLOAKBROWSER_DOWNLOAD_BASE =
+  "https://github.com/CloakHQ/CloakBrowser/releases/download";
+
+// Known-good pinned release tags per platform asset. Used only as a fallback
+// when the GitHub API is unreachable / rate-limited, or when the asset is not
+// found within the page-scan window. Tag format is `chromium-v<version>`.
+// A stale or wrong pin is no worse than having none (the direct URL simply
+// 404s and we surface the original enumeration error); a correct pin keeps
+// clean installs working through an API outage. Bump when raising the floor.
+const CLOAKBROWSER_PINS: Record<string, string> = {
+  "cloakbrowser-windows-x64.zip": "chromium-v146.0.7680.177.5",
+  "cloakbrowser-linux-x64.tar.gz": "chromium-v146.0.7680.177.5",
+  "cloakbrowser-linux-arm64.tar.gz": "chromium-v146.0.7680.177.5",
+  "cloakbrowser-darwin-arm64.tar.gz": "chromium-v145.0.7632.109.2",
+  "cloakbrowser-darwin-x64.tar.gz": "chromium-v145.0.7632.109.2",
+};
 
 interface CloakBrowserAsset {
   name: string;
@@ -741,36 +764,84 @@ export class ChromiumBootstrap extends EventEmitter {
   // ─── CloakBrowser-specific resolvers ────────────────────────────────
 
   private async fetchCloakBrowserManifest(): Promise<BrowserDownloadManifest> {
-    const res = await fetch(CLOAKBROWSER_API, {
-      headers: { accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} fetching CloakBrowser releases`);
-    }
-    const releases = (await res.json()) as CloakBrowserRelease[];
-    if (!Array.isArray(releases) || releases.length === 0) {
-      throw new Error("CloakBrowser releases list is empty");
-    }
     const assetName = cloakBrowserAssetName();
-    // Walk newest → oldest, return first release that has our platform's
-    // asset. Releases are listed sorted by created_at desc by GitHub.
-    for (const release of releases) {
-      const asset = release.assets.find((a) => a.name === assetName);
-      if (asset) {
-        const sums = release.assets.find((a) => a.name === "SHA256SUMS");
-        return {
-          // Tags look like "chromium-v146.0.7680.177.4" — strip prefix.
-          version: release.tag_name.replace(/^chromium-v?|^v/, ""),
-          url: asset.browser_download_url,
-          sha256: sums
-            ? await fetchCloakBrowserSha256(sums.browser_download_url, assetName)
-            : undefined,
-        };
+    let latestTagSeen: string | null = null;
+    let apiError: Error | null = null;
+
+    // Walk newest → oldest across pages, return the first release that has
+    // our platform's asset. Releases come back sorted by created_at desc.
+    try {
+      for (let page = 1; page <= CLOAKBROWSER_MAX_PAGES; page++) {
+        const url = `${CLOAKBROWSER_API}?per_page=${CLOAKBROWSER_PER_PAGE}&page=${page}`;
+        const res = await fetch(url, {
+          headers: { accept: "application/vnd.github+json" },
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status} fetching CloakBrowser releases`);
+        }
+        const releases = (await res.json()) as CloakBrowserRelease[];
+        if (!Array.isArray(releases) || releases.length === 0) {
+          break; // ran past the last page
+        }
+        if (!latestTagSeen) latestTagSeen = releases[0]?.tag_name ?? null;
+        for (const release of releases) {
+          const asset = release.assets.find((a) => a.name === assetName);
+          if (!asset) continue;
+          const sums = release.assets.find((a) => a.name === "SHA256SUMS");
+          return {
+            // Tags look like "chromium-v146.0.7680.177.4" — strip prefix.
+            version: release.tag_name.replace(/^chromium-v?|^v/, ""),
+            url: asset.browser_download_url,
+            sha256: sums
+              ? await fetchCloakBrowserSha256(sums.browser_download_url, assetName)
+              : undefined,
+          };
+        }
+        if (releases.length < CLOAKBROWSER_PER_PAGE) break; // last page reached
       }
+    } catch (e) {
+      // API down / rate-limited / network — remember it and try the pin.
+      apiError = e as Error;
     }
+
+    // Fallback: a known-good pinned release, so a clean install survives a
+    // GitHub API outage or an asset that sits beyond the scan window.
+    const pinned = await this.resolveCloakBrowserPin(assetName).catch(() => null);
+    if (pinned) return pinned;
+
+    if (apiError) throw apiError;
     throw new Error(
-      `No CloakBrowser release has asset ${assetName}. Latest tag: ${releases[0]?.tag_name ?? "?"}`,
+      `No CloakBrowser release has asset ${assetName} within ${CLOAKBROWSER_MAX_PAGES} pages. Latest tag: ${latestTagSeen ?? "?"}`,
     );
+  }
+
+  /**
+   * Resolve the pinned fallback for the current platform's asset by
+   * constructing the direct release-download URL from CLOAKBROWSER_PINS and
+   * confirming it actually exists (HEAD). Returns null when there is no pin
+   * or the pinned asset is not reachable, so the caller can surface the real
+   * enumeration error instead of a misleading one.
+   */
+  private async resolveCloakBrowserPin(
+    assetName: string,
+  ): Promise<BrowserDownloadManifest | null> {
+    const tag = CLOAKBROWSER_PINS[assetName];
+    if (!tag) return null;
+    const assetUrl = `${CLOAKBROWSER_DOWNLOAD_BASE}/${tag}/${assetName}`;
+    const head = await fetch(assetUrl, { method: "HEAD", redirect: "follow" }).catch(
+      () => null,
+    );
+    if (!head || !head.ok) return null;
+    const sumsUrl = `${CLOAKBROWSER_DOWNLOAD_BASE}/${tag}/SHA256SUMS`;
+    const sha256 = await fetchCloakBrowserSha256(sumsUrl, assetName).catch(() => undefined);
+    console.warn(
+      `[multizen] CloakBrowser release enumeration failed; using pinned fallback ${tag} for ${assetName}.`,
+    );
+    return {
+      version: tag.replace(/^chromium-v?|^v/, ""),
+      url: assetUrl,
+      sha256,
+    };
   }
 
   private async locateCloakBrowserBinary(rootDir: string): Promise<string | null> {
