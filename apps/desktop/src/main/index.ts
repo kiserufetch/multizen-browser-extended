@@ -325,7 +325,12 @@ app.whenReady().then(async () => {
         authToken: mcpAuthToken,
         // Each session gets its own MCP server; deps + ActivityLog are shared.
         createServer: () =>
-          createMultizenMcpServer({ profileManager, browserDriver, activityLog }).server,
+          createMultizenMcpServer({
+            profileManager,
+            browserDriver,
+            activityLog,
+            serverVersion: app.getVersion(),
+          }).server,
       });
       await httpTransport.start();
     } catch (e) {

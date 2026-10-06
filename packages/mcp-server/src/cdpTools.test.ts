@@ -529,3 +529,21 @@ test("navigate and new_tab reject non-http(s) URL schemes (prompt-injection pivo
   assert.equal(okNav.isError, false);
   await client.close();
 });
+
+test("screenshot returns an MCP image content block, not base64 JSON text", async () => {
+  const spy = new SpyDriver();
+  // 1x1 transparent PNG.
+  const png =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  (spy as unknown as { screenshot: () => Promise<{ pngBase64: string }> }).screenshot = async () => ({
+    pngBase64: png,
+  });
+  const client = await connect(spy);
+  await spy.launch("p1" as ProfileId);
+  const res = await client.callTool({ name: "screenshot", arguments: { profile_id: "p1" } });
+  const content = res.content as Array<{ type: string; data?: string; mimeType?: string }>;
+  assert.equal(content[0]?.type, "image");
+  assert.equal(content[0]?.mimeType, "image/png");
+  assert.equal(content[0]?.data, png);
+  await client.close();
+});

@@ -56,6 +56,9 @@ export interface MultizenMcpServerOptions {
   browserDriver: BrowserDriver;
   /** Optional activity log; if not provided, a fresh one is created */
   activityLog?: ActivityLog;
+  /** App version reported to clients in the MCP `initialize` result. The
+   *  desktop main passes `app.getVersion()`; falls back to a constant. */
+  serverVersion?: string;
 }
 
 export interface MultizenMcpServer {
@@ -254,7 +257,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
   const activityLog = opts.activityLog ?? new ActivityLog();
 
   const server = new Server(
-    { name: "multizen", version: "0.2.11" },
+    { name: "multizen", version: opts.serverVersion ?? "0.0.0" },
     {
       capabilities: {
         tools: {},
@@ -277,6 +280,11 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
 
     try {
       const result = await dispatch(name, args, { profileManager, browserDriver });
+      const image = asImageResult(result);
+      if (image) {
+        activityLog.finish(event, "ok", `[${image.mimeType}, ${imageBytes(image.data)} bytes]`, startedAt);
+        return { content: [{ type: "image" as const, data: image.data, mimeType: image.mimeType }] };
+      }
       activityLog.finish(event, "ok", summarize(result), startedAt);
       return ok(result);
     } catch (e) {
@@ -433,7 +441,11 @@ async function dispatch(
     case "screenshot": {
       const { profile_id } = ProfileIdSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.screenshot(profile_id);
+      const shot = await browserDriver.screenshot(profile_id);
+      // Return an MCP image content block, not base64 inside pretty-printed
+      // JSON text — a full-page PNG as text blows past client token limits and
+      // is unusable. The CallTool wrapper renders _mcpImage as image content.
+      return { _mcpImage: { data: shot.pngBase64, mimeType: "image/png" } };
     }
     case "cdp_send": {
       const { profile_id, method, params, sessionId } = CdpSendSchema.parse(args);
@@ -875,7 +887,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "screenshot",
-    description: "Capture a PNG screenshot of the current viewport. Returns base64.",
+    description:
+      "Capture a PNG screenshot of the current viewport. Returns an MCP image content block (not base64 text), so the client can render it directly.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1160,6 +1173,25 @@ function ok(data: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
   };
+}
+
+/** Recognize the screenshot dispatch marker so the CallTool wrapper can emit an
+ *  MCP image content block instead of serializing base64 into JSON text. */
+function asImageResult(result: unknown): { data: string; mimeType: string } | null {
+  if (result && typeof result === "object" && "_mcpImage" in result) {
+    const img = (result as { _mcpImage: { data?: unknown; mimeType?: unknown } })._mcpImage;
+    if (img && typeof img.data === "string" && typeof img.mimeType === "string") {
+      return { data: img.data, mimeType: img.mimeType };
+    }
+  }
+  return null;
+}
+
+/** Approximate decoded byte length of a base64 string (for logging only). */
+function imageBytes(b64: string): number {
+  const len = b64.length;
+  const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((len * 3) / 4) - padding);
 }
 
 function err(code: string, message: string) {
