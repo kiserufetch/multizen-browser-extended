@@ -77,6 +77,21 @@ const SAFE_PAIRED_DISABLE_DOMAINS = new Set([
 const CLOAK_RISKY_ENABLE_DOMAINS = new Set(["Runtime", "Network"]);
 
 /**
+ * Methods the safe `cdpSend` layer refuses outright. These have no legitimate
+ * stealth-preserving use and would either break the session or expose
+ * automation: disabling the connect-sacred `Page` domain (kills
+ * navigate/lifecycle), installing a `Runtime.addBinding` channel, or
+ * re-exposing the DevTools protocol to the page. An agent that genuinely needs
+ * them must opt into `cdp_send_no_safety`.
+ */
+const SAFE_DENIED_METHODS = new Set([
+  "Page.disable",
+  "Runtime.addBinding",
+  "Target.exposeDevToolsProtocol",
+  "Page.exposeDevToolsProtocol",
+]);
+
+/**
  * Thin wrapper around chrome-remote-interface that exposes the
  * primitives our MCP tools call: navigate, click, type, extract,
  * screenshot. Stays connected per profile so cookies / DOM state
@@ -408,6 +423,13 @@ export class CdpSession {
 
     if (!safe) {
       return send(method, params);
+    }
+
+    if (SAFE_DENIED_METHODS.has(method)) {
+      throw new Error(
+        `Refusing ${method} in safe mode: it would break the session or expose ` +
+          `automation. Use cdp_send_no_safety if you accept the consequences.`,
+      );
     }
 
     const dot = method.indexOf(".");

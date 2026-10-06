@@ -257,3 +257,25 @@ test("describeKey still types unknown characters (emoji) with key+text, blank co
   assert.equal(e.code, "");
   assert.equal(e.keyCode, 0);
 });
+
+// ── STE-4: safe-mode method denylist ─────────────────────────────────────────
+test("safe cdp_send refuses Page.disable, addBinding and exposeDevToolsProtocol", async () => {
+  for (const method of [
+    "Page.disable",
+    "Runtime.addBinding",
+    "Target.exposeDevToolsProtocol",
+    "Page.exposeDevToolsProtocol",
+  ]) {
+    const fake = makeFakeClient();
+    const s = sessionWith(fake, "cloakbrowser");
+    await assert.rejects(() => s.cdpSend(method), /safe mode/i, `${method} must be refused`);
+    assert.deepEqual(fake.methods(), [], `${method} must not reach the transport`);
+  }
+});
+
+test("cdp_send_no_safety still allows the denied methods (caller owns the risk)", async () => {
+  const fake = makeFakeClient();
+  const s = sessionWith(fake, "cloakbrowser");
+  await s.cdpSend("Page.disable", undefined, undefined, { safe: false });
+  assert.deepEqual(fake.methods(), ["Page.disable"]);
+});

@@ -954,7 +954,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "cdp_send",
     description:
-      "Send a raw Chrome DevTools Protocol command (stealth-safe). Any domain this call had to enable is auto-disabled afterwards so the anti-detect baseline is preserved; domains enabled at connect (Page) are never touched. On anti-detect engines, enabling a DCHECK-sensitive domain (Runtime/Network) is refused — use the convenience wrappers (evaluate_js, get_cookies, …) which need no enable, or cdp_send_no_safety if you accept the risk.",
+      "Send a raw Chrome DevTools Protocol command (stealth-safe). Any domain this call had to enable is auto-disabled afterwards so the anti-detect baseline is preserved; domains enabled at connect (Page) are never touched. On anti-detect engines, enabling a DCHECK-sensitive domain (Runtime/Network) is refused. Session-breaking or automation-exposing methods (Page.disable, Runtime.addBinding, *.exposeDevToolsProtocol) are also refused. Use the convenience wrappers (evaluate_js, get_cookies, …) which need no enable, or cdp_send_no_safety if you accept the risk.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "method"],
