@@ -142,6 +142,11 @@ export class CdpSession {
    */
   private snapshotRefs = new Map<string, number>();
 
+  /** Flipped true when the underlying websocket drops (tab closed / browser
+   *  exited). Actions then fail loud with a clear message instead of hanging
+   *  on a dead socket or returning stale state. */
+  private disconnected = false;
+
   constructor(opts: CdpSessionOptions) {
     this.opts = opts;
   }
@@ -150,6 +155,13 @@ export class CdpSession {
     if (this.client) return;
     const host = this.opts.host ?? "localhost";
     this.client = await CDP({ host, port: this.opts.port });
+    this.disconnected = false;
+    // The websocket drops when the attached tab closes or the browser exits.
+    // Mark the session dead so subsequent actions fail loud (see require())
+    // rather than hanging on a dead socket.
+    this.client.on("disconnect", () => {
+      this.disconnected = true;
+    });
     const { Page } = this.client;
     // Stealth-minimal connect. Anti-detect Chromium forks (CloakBrowser,
     // BotBrowser, Camoufox) DCHECK on most CDP enable commands because
@@ -407,6 +419,12 @@ export class CdpSession {
   }
 
   private require(): CDP.Client {
+    if (this.disconnected) {
+      throw new Error(
+        "CDP connection lost — the attached browser tab was closed or the browser exited. " +
+          "Relaunch the profile (or open a tab) and retry.",
+      );
+    }
     if (!this.client) throw new Error("CDP session not connected. Call connect() first.");
     return this.client;
   }

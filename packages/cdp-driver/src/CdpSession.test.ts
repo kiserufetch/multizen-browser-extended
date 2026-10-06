@@ -303,3 +303,60 @@ test("cdpSend with timeoutMs=0 does not impose a timeout (resolves normally)", a
   })) as { ok?: boolean };
   assert.equal(r.ok, true);
 });
+
+// ── STE-8: target registry (active tab + re-selection) ───────────────────────
+import { TargetRegistry } from "./targetRegistry.js";
+
+test("registry tracks pages only and makes the first one active", () => {
+  const r = new TargetRegistry();
+  assert.equal(r.upsert({ targetId: "t1", type: "page", url: "a" }), true);
+  assert.equal(r.upsert({ targetId: "i1", type: "iframe" }), false, "iframes are not tabs");
+  assert.equal(r.upsert({ targetId: "t2", type: "page", url: "b" }), true);
+  assert.equal(r.active(), "t1");
+  assert.equal(r.size, 2);
+  assert.deepEqual(r.list().map((t) => t.targetId), ["t1", "t2"]);
+});
+
+test("removing the active page re-selects the most recent remaining page", () => {
+  const r = new TargetRegistry();
+  r.upsert({ targetId: "t1", type: "page" });
+  r.upsert({ targetId: "t2", type: "page" });
+  r.upsert({ targetId: "t3", type: "page" });
+  assert.equal(r.active(), "t1");
+  r.remove("t1");
+  assert.equal(r.active(), "t3", "falls back to the most recently seen page");
+  r.remove("t3");
+  assert.equal(r.active(), "t2");
+  r.remove("t2");
+  assert.equal(r.active(), null, "no page left → no active target");
+});
+
+test("removing a non-active page leaves the active one untouched", () => {
+  const r = new TargetRegistry();
+  r.upsert({ targetId: "t1", type: "page" });
+  r.upsert({ targetId: "t2", type: "page" });
+  r.setActive("t2");
+  r.remove("t1");
+  assert.equal(r.active(), "t2");
+});
+
+test("setActive validates the target and upsert refreshes recency", () => {
+  const r = new TargetRegistry();
+  r.upsert({ targetId: "t1", type: "page" });
+  r.upsert({ targetId: "t2", type: "page" });
+  assert.equal(r.setActive("nope"), false);
+  assert.equal(r.setActive("t2"), true);
+  // Touching t1 moves it to most-recent, so after removing active t2 it wins.
+  r.upsert({ targetId: "t1", type: "page", url: "updated" });
+  r.remove("t2");
+  assert.equal(r.active(), "t1");
+  assert.equal(r.activeRecord()?.url, "updated");
+});
+
+test("after disconnect, actions fail loud with a clear message (not a hang)", async () => {
+  const fake = makeFakeClient();
+  const s = sessionWith(fake);
+  (s as unknown as { disconnected: boolean }).disconnected = true;
+  await assert.rejects(() => s.click("#x"), /connection lost/i);
+  await assert.rejects(() => s.cdpSend("Runtime.evaluate", { expression: "1" }), /connection lost/i);
+});
