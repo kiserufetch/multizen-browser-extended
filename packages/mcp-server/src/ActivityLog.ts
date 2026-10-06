@@ -75,8 +75,12 @@ export class ActivityLog extends EventEmitter {
 function sanitize(args: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(args)) {
-    if (k === "text" && typeof v === "string" && v.length > 80) {
-      out[k] = `${v.slice(0, 60)}…[${v.length} chars]`;
+    if (k === "text" && typeof v === "string") {
+      // The `type` tool's text is keystrokes into page fields — it may be a
+      // password or an OTP, and short ones (< 80 chars) used to be logged in
+      // full. The activity feed renders in the desktop UI and can be piped to
+      // an audit file, so never record the content. Keep only a length hint.
+      out[k] = `[${v.length} chars]`;
     } else if (k === "proxy" && v && typeof v === "object") {
       // create_profile / update_profile args carry proxy username/password in
       // cleartext. NEVER log them — the activity feed is rendered in the desktop

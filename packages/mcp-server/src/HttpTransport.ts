@@ -61,6 +61,7 @@ export class HttpTransport {
   private readonly opts: HttpTransportOptions;
   private readonly heartbeatMs: number;
   private readonly allowedHosts: string[];
+  private readonly allowedOrigins: Set<string>;
   private readonly sseSessions = new Map<string, SseSession>();
   private readonly streamableSessions = new Map<string, StreamableSession>();
   private stopping = false;
@@ -74,6 +75,14 @@ export class HttpTransport {
     // allowlist alone no longer protects it.
     this.allowedHosts = Array.from(
       new Set([`${host}:${opts.port}`, `127.0.0.1:${opts.port}`, `localhost:${opts.port}`]),
+    );
+    // A browser page can send cross-origin requests to our loopback port
+    // (DNS-rebinding / CSRF against the local MCP server). Native MCP clients
+    // (Cursor, Claude Desktop, Codex) are not browsers and send no Origin, so
+    // a present Origin must name one of our own loopback endpoints or we
+    // reject it (MCP transport security, 2025-06-18+).
+    this.allowedOrigins = new Set(
+      this.allowedHosts.flatMap((h) => [`http://${h}`, `https://${h}`]),
     );
     this.server = createHttpServer((req, res) => {
       void this.handle(req, res).catch((e) => {
@@ -154,6 +163,23 @@ export class HttpTransport {
     return this.allowedHosts.includes((req.headers.host ?? "").toLowerCase());
   }
 
+  /**
+   * Origin, when present, must name our own loopback endpoint. Native MCP
+   * clients send no Origin header (allowed); only a browser attaches one, and
+   * a cross-origin browser request is exactly the DNS-rebinding / CSRF vector
+   * the MCP transport-security guidance tells us to reject.
+   */
+  private originAllowed(req: IncomingMessage): boolean {
+    const origin = req.headers.origin;
+    if (!origin) return true;
+    return this.allowedOrigins.has(origin.toLowerCase());
+  }
+
+  /** Combined loopback-client gate: correct Host and (if present) Origin. */
+  private localClientAllowed(req: IncomingMessage): boolean {
+    return this.hostAllowed(req) && this.originAllowed(req);
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (this.stopping) {
       res.writeHead(503).end("shutting down");
@@ -191,8 +217,8 @@ export class HttpTransport {
     // Streamable HTTP (primary) — single endpoint for GET/POST/DELETE.
     // DNS-rebinding defence: Host must name our loopback endpoint.
     if (pathname === "/mcp") {
-      if (!this.hostAllowed(req)) {
-        res.writeHead(403).end("forbidden host");
+      if (!this.localClientAllowed(req)) {
+        res.writeHead(403).end("forbidden host or origin");
         return;
       }
       await this.handleStreamable(req, res);
@@ -201,16 +227,16 @@ export class HttpTransport {
 
     // Legacy HTTP+SSE.
     if (pathname === "/sse" && req.method === "GET") {
-      if (!this.hostAllowed(req)) {
-        res.writeHead(403).end("forbidden host");
+      if (!this.localClientAllowed(req)) {
+        res.writeHead(403).end("forbidden host or origin");
         return;
       }
       await this.handleSseConnect(req, res);
       return;
     }
     if (pathname === "/messages" && req.method === "POST") {
-      if (!this.hostAllowed(req)) {
-        res.writeHead(403).end("forbidden host");
+      if (!this.localClientAllowed(req)) {
+        res.writeHead(403).end("forbidden host or origin");
         return;
       }
       await this.handleSsePost(req, res, url);

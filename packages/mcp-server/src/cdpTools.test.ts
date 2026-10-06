@@ -503,3 +503,29 @@ test("MockBrowserDriver rejects CDP tools for a profile that was never launched"
   assert.match(parsed.error.message, /not running/i);
   await client.close();
 });
+
+test("navigate and new_tab reject non-http(s) URL schemes (prompt-injection pivot guard)", async () => {
+  const spy = new SpyDriver();
+  const client = await connect(spy);
+  await spy.launch("p1" as ProfileId);
+  const dangerous = [
+    "file:///etc/passwd",
+    "file://C:/Windows/win.ini",
+    "javascript:alert(document.cookie)",
+    "data:text/html,<script>1</script>",
+    "chrome://settings",
+    "chrome-extension://abc/x.html",
+    "view-source:http://example.com",
+  ];
+  for (const url of dangerous) {
+    const nav = await call(client, "navigate", { profile_id: "p1", url });
+    assert.equal(nav.isError, true, `navigate should reject ${url}`);
+    assert.equal(nav.parsed.error.code, "INVALID_INPUT");
+    const tab = await call(client, "new_tab", { profile_id: "p1", url });
+    assert.equal(tab.isError, true, `new_tab should reject ${url}`);
+  }
+  // Sanity: a normal http(s) URL is still accepted (reaches the driver).
+  const okNav = await call(client, "navigate", { profile_id: "p1", url: "https://example.com/" });
+  assert.equal(okNav.isError, false);
+  await client.close();
+});

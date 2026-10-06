@@ -18,6 +18,7 @@ import type {
   FingerprintConfig,
   UpdateProfileInput,
   CreateProfileInput,
+  ProxyConfig,
 } from "@multizen/types";
 import { ActivityLog } from "./ActivityLog.js";
 
@@ -63,7 +64,26 @@ export interface MultizenMcpServer {
 }
 
 const ProfileIdSchema = z.object({ profile_id: z.string().min(1) });
-const NavigateSchema = ProfileIdSchema.extend({ url: z.string().url() });
+
+// Only http(s) may be opened through the agent-facing navigation tools.
+// Page content reaching the model is untrusted, so a prompt-injected agent
+// must not be able to pivot the browser to local/privileged schemes —
+// `file:` (read local files via extract), `chrome:`/`chrome-extension:`,
+// `javascript:`/`data:`/`view-source:` (script/content injection). The
+// unrestricted `cdp_send_no_safety` tool is intentionally NOT gated by this.
+function isSafeNavigationUrl(value: string): boolean {
+  try {
+    return /^https?:$/.test(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+const SafeNavigationUrl = z
+  .string()
+  .url()
+  .refine(isSafeNavigationUrl, { message: "Only http:// and https:// URLs are allowed" });
+
+const NavigateSchema = ProfileIdSchema.extend({ url: SafeNavigationUrl });
 const ClickSchema = ProfileIdSchema.extend({ selector: z.string().min(1) });
 const TypeSchema = ProfileIdSchema.extend({
   selector: z.string().min(1),
@@ -98,7 +118,7 @@ const SetCookiesSchema = ProfileIdSchema.extend({
 });
 const ListTabsSchema = ProfileIdSchema.extend({ sessionId: z.string().optional() });
 const NewTabSchema = ProfileIdSchema.extend({
-  url: z.string().optional(),
+  url: SafeNavigationUrl.optional(),
   sessionId: z.string().optional(),
 });
 const TabIdSchema = ProfileIdSchema.extend({
@@ -288,6 +308,7 @@ async function dispatch(
     case "list_profiles": {
       const profiles = profileManager.list().map((p) => ({
         ...p,
+        proxy: redactProxy(p.proxy),
         isRunning: browserDriver.isRunning(p.id),
       }));
       return { profiles };
@@ -318,7 +339,7 @@ async function dispatch(
       return {
         id: created.id,
         name: created.name,
-        proxy: created.proxy,
+        proxy: redactProxy(created.proxy),
         fingerprint: fingerprintSummary(created.fingerprint),
       };
     }
@@ -353,7 +374,7 @@ async function dispatch(
         id: updated.id,
         name: updated.name,
         tags: updated.tags,
-        proxy: updated.proxy,
+        proxy: redactProxy(updated.proxy),
         fingerprint: fingerprintSummary(updated.fingerprint),
         // Surface the caveat: a live browser keeps the old proxy/fingerprint.
         appliesOnNextLaunch: browserDriver.isRunning(input.profile_id),
@@ -1105,6 +1126,19 @@ function fingerprintSummary(fp: FingerprintConfig): {
     screen: fp.screen,
     userAgent: fp.userAgent,
   };
+}
+
+/**
+ * Strip the proxy password before a profile crosses the MCP boundary into an
+ * agent's context (and from there into transcripts / logs). Username and
+ * endpoint are kept so the agent can still reason about which proxy is set;
+ * the password is replaced with a sentinel when present. Returns the value
+ * unchanged when there is no proxy or no password.
+ */
+function redactProxy<T extends ProxyConfig | null | undefined>(proxy: T): T {
+  if (!proxy || typeof proxy !== "object") return proxy;
+  if (proxy.password == null || proxy.password === "") return proxy;
+  return { ...proxy, password: "***" } as T;
 }
 
 function summarize(result: unknown): string {

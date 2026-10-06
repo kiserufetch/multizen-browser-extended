@@ -207,6 +207,10 @@ export async function importProfile(
     id: targetId,
     dataDir: join(destProfilesRoot, targetId),
   };
+  // The imported extension list is untrusted: drop any entry whose id/version/
+  // dir could escape the store or profile dir (used later by GC `rm -rf` and
+  // `--load-extension`).
+  restored.extensions = sanitizeRestoredExtensions(restored.extensions, restored.dataDir);
 
   await mkdir(restored.dataDir, { recursive: true });
 
@@ -289,6 +293,36 @@ function sanitizeSegment(seg: string): string {
  */
 function isSafeIdSegment(id: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) && id !== "." && id !== "..";
+}
+
+/**
+ * Drop any extension config from an imported archive that could escape its
+ * storage root. `id` and `version` are used verbatim as path segments by the
+ * shared-store (`<storeRoot>/<id>/<version>`) that GC later `rm -rf`s, and a
+ * "profile"-scoped `dir` is joined onto the profile dataDir for GC and for
+ * `--load-extension`. An attacker-crafted archive could otherwise set
+ * id/version/dir to `..`-laden values and delete or load arbitrary paths on
+ * first launch. Invalid entries are dropped (the profile still restores); the
+ * rest are kept. Returns undefined when nothing valid remains.
+ */
+function sanitizeRestoredExtensions(
+  exts: Profile["extensions"],
+  dataDir: string,
+): Profile["extensions"] {
+  if (!exts) return exts;
+  const base = resolve(dataDir);
+  const safe = exts.filter((e) => {
+    if (!e || typeof e !== "object") return false;
+    if (!isSafeIdSegment(e.id)) return false;
+    if (e.version !== "" && !isSafeIdSegment(e.version)) return false;
+    if (e.scope === "profile") {
+      if (typeof e.dir !== "string" || e.dir === "") return false;
+      const abs = resolve(base, e.dir);
+      if (abs !== base && !abs.startsWith(base + sep)) return false;
+    }
+    return true;
+  });
+  return safe.length ? safe : undefined;
 }
 
 interface CollectedFile {
