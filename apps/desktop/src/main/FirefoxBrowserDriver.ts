@@ -4,6 +4,7 @@ import { launchOptions } from "camoufox-js";
 import type { BrowserDriver } from "@multizen/mcp-server";
 import type { LaunchedProfile, Profile, ProfileId } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
+import { resolveProxyLaunchGeo } from "./launchGeo";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { sanitizeStartUrl } from "./startPage";
 import type { RunningStateChange } from "./ChromiumBrowserDriver.ts";
@@ -141,6 +142,13 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
 
     const userDataDir = this.browserDataDir(profile);
 
+    // Same launch geo policy as the Chromium engine (strict-pin timezone, opt-in
+    // alignTimezoneToProxy / strictGeoCoherence). Before the bridge starts, so a
+    // strict rejection leaves nothing to clean up.
+    const { fingerprint } = await resolveProxyLaunchGeo(profile, profile.fingerprint, {
+      setProxyCountry: (id, country) => this.profileManager.setProxyCountry(id, country),
+    });
+
     // Route a configured proxy through the local SOCKS5 bridge (handles upstream
     // auth + keeps DNS remote), exactly like the Chromium engine. The browser
     // then talks to a credential-free localhost endpoint.
@@ -181,7 +189,9 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       exclude_addons: ["UBO"],
       env: minimalChildEnv(),
       ...(proxy ? { block_webrtc: true } : {}),
-      ...(this.buildFingerprintConfig ? this.buildFingerprintConfig(profile) : {}),
+      ...(this.buildFingerprintConfig
+        ? this.buildFingerprintConfig({ ...profile, fingerprint })
+        : {}),
     };
 
     let context: BrowserContext;

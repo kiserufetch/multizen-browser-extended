@@ -9,7 +9,6 @@ import { promisify } from "node:util";
 const execFileP = promisify(execFile);
 import type { BrowserDriver } from "@multizen/mcp-server";
 import type { ProfileManager } from "@multizen/profile-manager";
-import { localeCatalog } from "@multizen/profile-manager";
 import type {
   ChromiumStatus,
   ClientHints,
@@ -21,8 +20,7 @@ import { resolveEngine, type BrowserEngine } from "@multizen/types";
 import { CdpSession } from "@multizen/cdp-driver";
 import { EngineRegistry } from "./engineRegistry.ts";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
-import { probeProxyGeo } from "./proxyGeo";
-import { resolveLaunchTimezone, StrictGeoCoherenceError } from "./launchTimezone";
+import { resolveProxyLaunchGeo } from "./launchGeo";
 import { companionDir } from "./extensions/companion";
 import { resolveLoadDir } from "./extensions/extensionStore.ts";
 import { killProcessTree, gracefulShutdown } from "./processTree";
@@ -235,54 +233,13 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     let fp = profile.fingerprint;
     if (actualVersion) fp = reconcileVersionInFingerprint(fp, actualVersion);
 
-    // Strict-pin TZ: pinned fingerprint.timezone wins by default. Proxy geo
-    // still feeds geolocation coords. Opt-in alignTimezoneToProxy may
-    // overwrite TZ only when geo TZ ∈ locale timezones[]. Never overwrite
-    // with host system timezone (that broke locale-pinned profiles).
-    let geoCoords: { latitude: number; longitude: number } | null = null;
-    const localeEntry = localeCatalog().find(
-      (l) => l.locale === fp.locale || l.id === fp.locale,
-    );
-    const localeTimezones = localeEntry?.timezones ?? [fp.timezone];
-    if (profile.proxy) {
-      try {
-        const geo = await probeProxyGeo(profile.proxy, { timeoutMs: 4000 });
-        if (typeof geo.latitude === "number" && typeof geo.longitude === "number") {
-          geoCoords = { latitude: geo.latitude, longitude: geo.longitude };
-        }
-        // Cache the resolved country on the profile so the GUI flag chip
-        // matches the proxy's egress (Luxembourg proxy → LU flag, not the
-        // fingerprint's timezone-derived country).
-        if (geo.country) {
-          this.profileManager.setProxyCountry(profileId, geo.country.toLowerCase());
-        }
-        const resolved = resolveLaunchTimezone(
-          fp,
-          geo,
-          localeTimezones,
-          {
-            alignTimezoneToProxy: profile.alignTimezoneToProxy,
-            strictGeoCoherence: profile.strictGeoCoherence,
-          },
-        );
-        for (const w of resolved.warnings) {
-          console.warn(`[multizen] ${w}`);
-        }
-        if (resolved.appliedGeoTimezone && resolved.timezone !== fp.timezone) {
-          console.log(
-            `[multizen] aligning fingerprint timezone ${fp.timezone} → ${resolved.timezone} (alignTimezoneToProxy)`,
-          );
-          fp = { ...fp, timezone: resolved.timezone };
-        }
-      } catch (e) {
-        if (e instanceof StrictGeoCoherenceError) throw e;
-        console.warn(
-          "[multizen] proxy geo probe failed; geolocation/timezone alignment skipped:",
-          (e as Error).message,
-        );
-      }
-    }
-    // No-proxy: fp.timezone is left as the profile configured it (issue #13).
+    // Resolved BEFORE we build CLI args: CloakBrowser's --fingerprint-timezone=
+    // is set at spawn time and reads fp.timezone at that moment.
+    const launchGeo = await resolveProxyLaunchGeo(profile, fp, {
+      setProxyCountry: (id, country) => this.profileManager.setProxyCountry(id, country),
+    });
+    fp = launchGeo.fingerprint;
+    const geoCoords = launchGeo.coords;
 
     // Clean up stale SingletonLock left behind by a Chromium that
     // crashed without unlinking its own lock. Without this, the next
