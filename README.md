@@ -54,13 +54,13 @@ This repository is a fork of [`multizenteam/multizen-browser`](https://github.co
 <!-- FORK-BASE: update this version whenever you pull changes from upstream -->
 **Based on upstream release:** `v0.4.2` (upstream `master` through `794bbf4`)
 
-**Fork app version:** `0.9.0` (independent semver from upstream).
+**Fork app version:** `0.10.0` (independent semver from upstream).
 
 Fork-specific work (see [`CHANGELOG.md`](CHANGELOG.md)) includes:
 
 - Expanded fingerprint device catalogs (extra Mac M2–M4 SKUs, Linux laptops) and higher entropy thresholds
 - Strict-pin launch timezone policy with opt-in `alignTimezoneToProxy` / `strictGeoCoherence`
-- MCP extras: always-on `cdp_send` / `cdp_send_no_safety`, `probe_fingerprint`, session-stable multi-client HTTP transport
+- MCP extras: always-on `cdp_send` / `cdp_send_no_safety`, `probe_fingerprint`, `click_ref` / `type_ref`, human handoff (`request_human` / `wait_for_human` / `resume_human`), session-stable multi-client HTTP transport
 - Release CI typecheck gate before the multi-OS build matrix
 
 Sync notes: [`docs/upstream-merge-v0.4.2.md`](docs/upstream-merge-v0.4.2.md) (latest), [`docs/upstream-merge-2026-10-06.md`](docs/upstream-merge-2026-10-06.md), [`docs/upstream-merge-v0.3.1.md`](docs/upstream-merge-v0.3.1.md), [`docs/upstream-merge-v0.3.0.md`](docs/upstream-merge-v0.3.0.md). Whenever you merge again from the original repository, update the **Based on upstream release** line above.

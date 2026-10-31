@@ -5,6 +5,67 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-10-31
+
+Syncs upstream `v0.4.2`: a browser engine per profile, with Camoufox (Firefox)
+next to CloakBrowser, and the end of the CFT engine. Notes on every conflict and
+decision are in `docs/upstream-merge-v0.4.2.md`.
+
+### Added
+
+- **Per-profile browser engine.** Each profile runs on CloakBrowser (Chromium)
+  or Camoufox (Firefox-based, for a genuinely non-Chrome TLS/JS fingerprint),
+  picked when creating or editing the profile. Camoufox is downloaded on first
+  use and verified against a pinned SHA-256. Cards and rows show the engine.
+  Profiles from before this release are pinned to CloakBrowser, so changing the
+  default engine cannot move them onto an empty data directory.
+- **Linux: keep the browser sandbox on.** Kernels that restrict unprivileged user
+  namespaces (Ubuntu 24.04+) get a one-time AppArmor setup offered in Settings.
+  If the sandbox still fails to start, the profile relaunches once with
+  `--no-sandbox` instead of failing, and a `--no-sandbox` on the host AppImage is
+  no longer forwarded to the engine.
+- A Thordata proxy referral link in the profile proxy section, plus a sponsor logo
+  in the README (from upstream).
+
+### Changed
+
+- The proxy geo launch policy (strict-pin timezone, opt-in `alignTimezoneToProxy`
+  / `strictGeoCoherence`) now applies to both engines.
+- `probe_fingerprint` works on both engines. On Camoufox it compares only screen
+  and timezone, because Camoufox generates its own Firefox UA, hardware and WebGL.
+- The `browserEngine` setting now means the default engine for new profiles.
+
+### Removed
+
+- **The CFT (Chrome for Testing) engine.** A stored `browserEngine: "cft"` falls
+  back to CloakBrowser. Browser state CFT kept in a profile's root directory stays
+  on disk but is no longer read, so such profiles start clean on CloakBrowser.
+
+### Fixed
+
+- A wedged browser can no longer block shutdown. `Browser.close` and the CDP
+  socket close are no longer awaited before the tree-kill, so Stop always
+  finishes, and quitting the app no longer risks leaving the browser running.
+
+### Kept from this fork over upstream
+
+- No `--fingerprint-webrtc-ip` flag (the 0.8.2 leak fix). Upstream still passes
+  it; here `--webrtc-ip-handling-policy` remains the WebRTC control on Chromium.
+- Strict-pin launch timezone instead of always aligning to proxy geo.
+- Always-on `cdp_send` / `cdp_send_no_safety`, optional `get_cookies` urls, human
+  handoff, and process-tree shutdown.
+
+### Known limitations
+
+- Camoufox has no CDP, so `click_ref`, `type_ref`, `cdp_send` and
+  `cdp_send_no_safety` return a clear error there, and `request_human` cannot
+  bring the window forward. Use `click` / `type` with CSS selectors.
+- MCP `create_profile` / `update_profile` cannot set the engine yet; use the app.
+  Profiles created through MCP follow the default engine until one is picked.
+- The New Profile sheet always preselects CloakBrowser, whatever the default
+  engine setting says (from upstream).
+- Camoufox was not run live for this release (see the merge notes).
+
 ## [0.9.0] - 2026-10-07
 
 Agent-automation improvements (the "Stage B" set from the October 2026 research
