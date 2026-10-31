@@ -366,3 +366,32 @@ test("gracefulShutdown quit path (reap:false) tree-kills but skips the orphan po
   assert.deepEqual(kt, [77]);
   assert.deepEqual(ro, [], "reap:false must not run reapOrphans (stays under the quit watchdog)");
 });
+
+test("gracefulShutdown reaches the kill when Browser.close and the socket close both hang", async () => {
+  const child = new FakeChild(); // a wedged browser: never exits, never answers
+  const hang = (): Promise<void> => new Promise<void>(() => {});
+  const session = { closeBrowser: hang, close: hang };
+  const { deps, kt, ro } = makeGsDeps("linux");
+  const target = { child, session, pid: 808 } as unknown as ShutdownTarget;
+
+  await gracefulShutdown(target, { gracefulMs: 10 }, deps);
+
+  assert.deepEqual(child.killCalls, ["SIGTERM", "SIGKILL"]);
+  assert.deepEqual(kt, [808]);
+  assert.deepEqual(ro, [808]);
+});
+
+test("gracefulShutdown waits less than the 3s quit watchdog for a wedged browser", async () => {
+  const child = new FakeChild();
+  const slept: number[] = [];
+  const { deps, kt } = makeGsDeps("linux", async (ms) => {
+    slept.push(ms);
+  });
+  const target = { child, session: makeSession(), pid: 809 } as unknown as ShutdownTarget;
+
+  await gracefulShutdown(target, { gracefulMs: 1500, reap: false }, deps);
+
+  const total = slept.reduce((a, b) => a + b, 0);
+  assert.ok(total < 3000, `waited ${total}ms before the group-kill`);
+  assert.deepEqual(kt, [809]);
+});

@@ -206,8 +206,10 @@ export async function gracefulShutdown(
       r.child.once("exit", () => resolve());
     });
 
-    // Fire Browser.close — websocket disconnects mid-call, that's expected.
-    await r.session.closeBrowser().catch(() => {});
+    // Fire Browser.close — websocket disconnects mid-call, that's expected. Not
+    // awaited: a wedged browser never answers and keeps the socket open, and that
+    // must not hold up the kill below.
+    void r.session.closeBrowser().catch(() => {});
 
     // Wait for graceful exit. Chromium needs ~500ms-2s to flush session-restore;
     // the default 4s gives margin, the quit path passes a shorter budget.
@@ -216,7 +218,8 @@ export async function gracefulShutdown(
       deps.sleep(gracefulMs).then(() => false),
     ]);
 
-    await r.session.close().catch(() => {});
+    // Not awaited either: ws allows up to 30s for its close handshake.
+    void r.session.close().catch(() => {});
 
     if (!exitedInTime && r.child.exitCode === null && !r.child.killed) {
       if (isWin) {
@@ -226,9 +229,11 @@ export async function gracefulShutdown(
         await deps.killProcessTree(r.pid);
       } else {
         r.child.kill("SIGTERM");
+        // Half the budget, so the quit path's 1.5s + this stays well under its
+        // 3s watchdog and the group-kill in the finally still lands.
         const termExited = await Promise.race([
           exited.then(() => true),
-          deps.sleep(Math.min(2000, gracefulMs)).then(() => false),
+          deps.sleep(Math.min(2000, gracefulMs / 2)).then(() => false),
         ]);
         if (!termExited && r.child.exitCode === null && !r.child.killed) {
           r.child.kill("SIGKILL");
