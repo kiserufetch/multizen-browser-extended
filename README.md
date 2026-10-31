@@ -209,7 +209,14 @@ http_headers = { Authorization = "Bearer <token>" }
 }
 ```
 
-Restart your client. The agent now has the full tool set — profile management (`list_profiles`, `create_profile`, `update_profile`, `delete_profile`, `launch_profile`, `close_profile`, `list_fingerprint_options`), page driving (`navigate`, `click`, `type`, `click_ref`, `type_ref`, `extract`, `screenshot`, `evaluate_js`), tabs (`list_tabs`, `new_tab`, `activate_tab`, `close_tab`), cookies (`get_cookies`, `set_cookies`), waits (`wait_for_load`, `wait_for_navigation`, `wait_for_selector`), human handoff (`request_human`, `wait_for_human`, `resume_human`), and diagnostics / raw access (`probe_fingerprint`, `cdp_send`, `cdp_send_no_safety`). Profile management is full CRUD: `create_profile` / `update_profile` accept an optional `proxy` and high-level `fingerprint` (device, locale, timezone, screen), and `list_fingerprint_options` enumerates the valid device families and locale groups. `click_ref`, `type_ref`, `cdp_send` and `cdp_send_no_safety` are CloakBrowser-only, because Camoufox has no CDP.
+Restart your client. The agent now has the full tool set — profile management (`list_profiles`, `create_profile`, `update_profile`, `delete_profile`, `launch_profile`, `close_profile`, `list_fingerprint_options`), page driving (`navigate`, `click`, `type`, `click_ref`, `type_ref`, `extract`, `screenshot`, `evaluate_js`), tabs (`list_tabs`, `new_tab`, `activate_tab`, `close_tab`), cookies (`get_cookies`, `set_cookies`), waits (`wait_for_load`, `wait_for_navigation`, `wait_for_selector`), human handoff (`request_human`, `wait_for_human`, `resume_human`), and diagnostics / raw access (`probe_fingerprint`, `cdp_send`, `cdp_send_no_safety`). Profile management is full CRUD: `create_profile` / `update_profile` accept an optional `engine` (`cloakbrowser` or `camoufox`), `proxy` and high-level `fingerprint` (device, locale, timezone, screen), and `list_fingerprint_options` enumerates the valid device families and locale groups.
+
+Engine notes for MCP clients:
+
+- `create_profile` without `engine` uses the app's default engine (Settings → Default engine for new profiles) and stores it on the profile, so changing the default later doesn't move the profile.
+- `update_profile` refuses an engine change while the profile is running. Call `close_profile` first. Each engine keeps its own browser state, so after a switch the profile has that engine's cookies and logins, which may be none.
+- `list_profiles` reports each profile's engine.
+- On Camoufox, `click_ref`, `type_ref`, `cdp_send` and `cdp_send_no_safety` always return an error, because Camoufox has no CDP. This is intended. `extract` returns no refs there, so use `click` / `type` with CSS selectors. Of the `fingerprint` knobs, Camoufox uses the device's OS, the locale, the screen and the timezone. It generates its own Firefox UA, hardware and WebGL.
 
 ## Stack
 
