@@ -617,6 +617,24 @@ test("click_ref and type_ref route the ref (and text) to the driver", async () =
   await client.close();
 });
 
+test("lost input surfaces as INPUT_NOT_DELIVERED with the driver's message", async () => {
+  const spy = new SpyDriver();
+  const lost = new Error(
+    'Click on ref "e7" was not delivered: the page received no pointer events.',
+  );
+  lost.name = "InputNotDeliveredError";
+  spy.clickRef = async () => {
+    throw lost;
+  };
+  const client = await connect(spy);
+  await spy.launch("p1" as ProfileId);
+  const res = await call(client, "click_ref", { profile_id: "p1", ref: "e7" });
+  assert.equal(res.isError, true);
+  assert.equal(res.parsed.error.code, "INPUT_NOT_DELIVERED");
+  assert.equal(res.parsed.error.message, lost.message);
+  await client.close();
+});
+
 test("click_ref / type_ref require profile_id + ref (schema validation)", async () => {
   const spy = new SpyDriver();
   const client = await connect(spy);

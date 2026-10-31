@@ -94,7 +94,7 @@ A separate read-only review of the resolution found no blockers. The two should-
 
 ## Defects found, not caused by this merge
 
-- **Input can be silently dropped while the page is hidden.** `click_ref` / `type_ref` can return `ok` although no event reaches the page. In a 12-run sample the page reported `document.visibilityState === "hidden"` in 6 runs and 3 of those lost all input; no run with a visible page lost any. The likely cause is the window opening behind others, which was not measured directly. `CdpSession`'s input path and the launch flags that could affect it match 0.9.0, so this does not look like a regression, though 0.9.0 itself was not re-run.
+- **Input can be silently dropped while the page is hidden.** `click_ref` / `type_ref` can return `ok` although no event reaches the page. In a 12-run sample the page reported `document.visibilityState === "hidden"` in 6 runs and 3 of those lost all input; no run with a visible page lost any. The likely cause is the window opening behind others, which was not measured directly. `CdpSession`'s input path and the launch flags that could affect it match 0.9.0, so this does not look like a regression, though 0.9.0 itself was not re-run. **Fixed after the merge:** the input tools now verify delivery and fail with `INPUT_NOT_DELIVERED`. Measurements and the choice between the options are in `docs/input-delivery-hidden-page.md`.
 - **`probe_fingerprint` reports false drift on CloakBrowser.** The browser reduces the UA to `Chrome/146.0.0.0` while the stored one has the full version, and `deviceMemory` compares the physical GB (16) against the capped API value (8).
 
 ## Local test note

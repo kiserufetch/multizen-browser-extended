@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { CdpSession } from "./CdpSession.js";
+import { CdpSession, InputNotDeliveredError } from "./CdpSession.js";
 
 /**
  * Unit/integration coverage for the stealth-preserving `cdpSend` primitive.
@@ -359,4 +359,195 @@ test("after disconnect, actions fail loud with a clear message (not a hang)", as
   (s as unknown as { disconnected: boolean }).disconnected = true;
   await assert.rejects(() => s.click("#x"), /connection lost/i);
   await assert.rejects(() => s.cdpSend("Runtime.evaluate", { expression: "1" }), /connection lost/i);
+});
+
+// ── input delivery check ─────────────────────────────────────────────────────
+
+/**
+ * A fake page for the input methods, which call `client.Domain.method()` rather
+ * than `send`. Chromium acks Input.dispatch* whether or not the page receives
+ * the event, so `delivers` decides what the isolated-world probe gets to see.
+ */
+interface FakePage {
+  delivers: (kind: "press" | "release" | "key", nth: number) => boolean;
+  hidden?: boolean;
+  painted?: boolean;
+  /** Replace the document on mouse release, as a link click would. */
+  navigatesOnClick?: boolean;
+}
+
+function makeInputClient(page: FakePage): FakeClient & { client: unknown } {
+  const calls: SendCall[] = [];
+  let probe: { pressed: boolean; released: boolean; keys: number } | null = null;
+  let navigated = false;
+  let keySeq = 0;
+  const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
+    "Page.getFrameTree": () => ({ frameTree: { frame: { id: "F1" } } }),
+    "Page.createIsolatedWorld": () => ({ executionContextId: 77 }),
+    "DOM.resolveNode": () => ({ object: { objectId: "O1" } }),
+    "Runtime.callFunctionOn": () => ({ result: { value: JSON.stringify({ x: 5, y: 6 }) } }),
+    "Runtime.evaluate": (p) => {
+      const expr = String(p.expression);
+      if (p.contextId === undefined) {
+        // Main world: the selector lookup (click) or focus (type).
+        return {
+          result: {
+            value: expr.includes("getBoundingClientRect") ? { ok: true, x: 10, y: 20 } : true,
+          },
+        };
+      }
+      if (navigated) throw new Error("Cannot find context with specified id");
+      if (expr.includes("delete globalThis.__mzInputProbe")) probe = null;
+      else if (expr.includes("visibilityState")) {
+        return {
+          result: {
+            value: JSON.stringify({
+              pressed: probe?.pressed ?? false,
+              released: probe?.released ?? false,
+              keys: probe?.keys ?? 0,
+              hidden: page.hidden ?? false,
+              painted: page.painted ?? true,
+            }),
+          },
+        };
+      } else probe = { pressed: false, released: false, keys: 0 };
+      return { result: {} };
+    },
+    "Input.dispatchMouseEvent": (p) => {
+      if (p.type === "mousePressed" && probe && page.delivers("press", 1)) probe.pressed = true;
+      if (p.type === "mouseReleased") {
+        if (probe && page.delivers("release", 1)) probe.released = true;
+        if (page.navigatesOnClick) navigated = true;
+      }
+      return {};
+    },
+    "Input.dispatchKeyEvent": (p) => {
+      if ((p.type === "keyDown" || p.type === "rawKeyDown") && p.key !== "Shift") {
+        keySeq++;
+        if (probe && page.delivers("key", keySeq)) probe.keys++;
+      }
+      return {};
+    },
+  };
+  const send = async (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+    calls.push({ method, params });
+    return handlers[method]?.(params ?? {}) ?? {};
+  };
+  const client = new Proxy(
+    { send },
+    {
+      get(target, domain) {
+        if (domain === "send") return target.send;
+        return new Proxy(
+          {},
+          {
+            get: (_, m) => (params?: Record<string, unknown>) =>
+              send(`${String(domain)}.${String(m)}`, params),
+          },
+        );
+      },
+    },
+  );
+  return {
+    client: client as FakeClient["client"],
+    calls,
+    methods: () => calls.map((c) => c.method),
+  };
+}
+
+function inputSession(page: FakePage): { s: CdpSession; fake: FakeClient } {
+  const fake = makeInputClient(page);
+  const s = sessionWith(fake);
+  (s as unknown as { snapshotRefs: Map<string, number> }).snapshotRefs = new Map([["e1", 42]]);
+  return { s, fake };
+}
+
+const deliversAll = () => true;
+const dropsAll = () => false;
+
+test("click / clickRef / type / typeRef return ok when the page received the input", async () => {
+  const { s } = inputSession({ delivers: deliversAll });
+  assert.deepEqual(await s.click("#b"), { ok: true });
+  assert.deepEqual(await s.clickRef("e1"), { ok: true });
+  assert.deepEqual(await s.type("#i", "Hi!"), { ok: true });
+  assert.deepEqual(await s.typeRef("e1", "abc"), { ok: true });
+});
+
+for (const [name, run] of [
+  ["click", (s: CdpSession) => s.click("#b")],
+  ["clickRef", (s: CdpSession) => s.clickRef("e1")],
+  ["type", (s: CdpSession) => s.type("#i", "abc")],
+  ["typeRef", (s: CdpSession) => s.typeRef("e1", "abc")],
+] as const) {
+  test(`${name} throws InputNotDeliveredError when Chromium drops the input on a hidden, unpainted page`, async () => {
+    const { s } = inputSession({ delivers: dropsAll, hidden: true, painted: false });
+    await assert.rejects(run(s), (e: unknown) => {
+      assert.ok(e instanceof InputNotDeliveredError);
+      assert.match(e.message, /not delivered/);
+      assert.match(e.message, /visibilityState is "hidden"/);
+      assert.match(e.message, /has not painted/);
+      assert.match(e.message, /Page\.bringToFront/);
+      return true;
+    });
+  });
+}
+
+test("typeRef sends no keys when its focusing click was lost", async () => {
+  const { s, fake } = inputSession({ delivers: dropsAll, hidden: true, painted: false });
+  await assert.rejects(s.typeRef("e1", "secret"), /Focusing click on ref "e1" was not delivered/);
+  assert.ok(
+    !fake.methods().includes("Input.dispatchKeyEvent"),
+    "no key may reach whatever has focus",
+  );
+});
+
+test("a partly delivered type reports how many keys arrived", async () => {
+  const { s } = inputSession({ delivers: (kind, nth) => kind !== "key" || nth <= 2 });
+  await assert.rejects(s.type("#i", "hello"), (e: unknown) => {
+    assert.ok(e instanceof InputNotDeliveredError);
+    assert.match(e.message, /received 2 of 5 keys/);
+    return true;
+  });
+});
+
+test("a press without a release is not a delivered click", async () => {
+  const { s } = inputSession({ delivers: (kind) => kind === "press" });
+  await assert.rejects(s.click("#b"), /received the press and no release/);
+});
+
+test("a lost click on a visible page does not blame visibility", async () => {
+  const { s } = inputSession({ delivers: dropsAll, hidden: false });
+  await assert.rejects(s.click("#b"), (e: unknown) => {
+    assert.match((e as Error).message, /page is visible/);
+    assert.doesNotMatch((e as Error).message, /bringToFront/);
+    return true;
+  });
+});
+
+test("a click that replaces the document (link navigation) counts as delivered", async () => {
+  const { s } = inputSession({ delivers: dropsAll, navigatesOnClick: true });
+  assert.deepEqual(await s.clickRef("e1"), { ok: true });
+});
+
+test("the probe runs only in its isolated world and is removed afterwards", async () => {
+  const { s, fake } = inputSession({ delivers: deliversAll });
+  await s.typeRef("e1", "ab");
+  const worlds = fake.calls.filter((c) => c.method === "Page.createIsolatedWorld");
+  assert.ok(worlds.length > 0);
+  for (const w of worlds)
+    assert.deepEqual(w.params, { frameId: "F1", worldName: "mz_input_probe" });
+  const probeEvals = fake.calls.filter(
+    (c) =>
+      c.method === "Runtime.evaluate" && String(c.params?.expression).includes("__mzInputProbe"),
+  );
+  assert.ok(probeEvals.length > 0);
+  for (const c of probeEvals)
+    assert.equal(c.params?.contextId, 77, "probe code must never run in the page's main world");
+  const installs = probeEvals.filter((c) =>
+    String(c.params?.expression).includes("addEventListener"),
+  ).length;
+  const stops = probeEvals.filter((c) =>
+    String(c.params?.expression).includes("delete globalThis"),
+  ).length;
+  assert.equal(stops, installs, "every armed probe is stopped");
 });

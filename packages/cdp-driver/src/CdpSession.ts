@@ -101,6 +101,89 @@ const SAFE_DENIED_METHODS = new Set([
 ]);
 
 /**
+ * Isolated world the input probe lives in. Page script cannot see globals or
+ * listeners registered there, but they receive the same DOM events.
+ */
+const INPUT_PROBE_WORLD = "mz_input_probe";
+
+/** How long to keep re-reading the probe before calling input lost. */
+const INPUT_PROBE_GRACE_MS = 300;
+
+/**
+ * Installs the probe in the isolated world. Counts trusted presses, releases
+ * and keydowns on `window` in the capture phase. Moves are not counted, so a
+ * page that gets the moves but loses the presses still reads as lost. Shift
+ * keydowns are not counted either: one character is one counted keydown.
+ */
+const INPUT_PROBE_INSTALL = `(() => {
+  const s = { pressed: false, released: false, keys: 0 };
+  const types = ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "keydown"];
+  const on = (e) => {
+    if (!e.isTrusted) return;
+    if (e.type === "pointerdown" || e.type === "mousedown") s.pressed = true;
+    else if (e.type === "keydown") { if (e.key !== "Shift") s.keys++; }
+    else s.released = true;
+  };
+  for (const t of types) addEventListener(t, on, true);
+  s.stop = () => { for (const t of types) removeEventListener(t, on, true); };
+  if (globalThis.__mzInputProbe) globalThis.__mzInputProbe.stop();
+  globalThis.__mzInputProbe = s;
+})()`;
+
+const INPUT_PROBE_READ = `(() => {
+  const s = globalThis.__mzInputProbe;
+  return JSON.stringify({
+    pressed: !!(s && s.pressed),
+    released: !!(s && s.released),
+    keys: s ? s.keys : 0,
+    hidden: document.visibilityState === "hidden",
+    painted: performance.getEntriesByType("paint").length > 0,
+  });
+})()`;
+
+const INPUT_PROBE_STOP = `(() => {
+  const s = globalThis.__mzInputProbe;
+  if (s) { s.stop(); delete globalThis.__mzInputProbe; }
+})()`;
+
+/** The probe's context is gone: the document was replaced mid-input. */
+const PROBE_CONTEXT_GONE =
+  /Cannot find context|execution context was destroyed|No execution context/i;
+
+interface InputProbeState {
+  pressed: boolean;
+  released: boolean;
+  keys: number;
+  hidden: boolean;
+  painted: boolean;
+}
+
+/**
+ * Thrown when Chromium accepted an Input.dispatch* command but the page
+ * received no matching event. The MCP layer surfaces the message as a tool
+ * error, so it names the likely cause and what to do next.
+ */
+export class InputNotDeliveredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InputNotDeliveredError";
+  }
+}
+
+function inputLostHint(st: InputProbeState): string {
+  if (st.hidden) {
+    return (
+      ' The page is hidden (document.visibilityState is "hidden")' +
+      (st.painted
+        ? ""
+        : " and has not painted since it loaded, and Chromium drops input to such a page") +
+      ". Bring its window to the front (cdp_send Page.bringToFront), then retry."
+    );
+  }
+  return " The page is visible. Take a screenshot to check whether something covers the target, then retry.";
+}
+
+/**
  * Thin wrapper around chrome-remote-interface that exposes the
  * primitives our MCP tools call: navigate, click, type, extract,
  * screenshot. Stays connected per profile so cookies / DOM state
@@ -556,8 +639,110 @@ export class CdpSession {
     });
     const v = result.result.value as { ok: boolean; x?: number; y?: number };
     if (!v.ok) throw new Error(`Element not found for selector: ${selector}`);
-    await this.dispatchMouseClick(v.x ?? 0, v.y ?? 0);
+    await this.clickVerified(v.x ?? 0, v.y ?? 0, `Click on ${selector}`);
     return { ok: true };
+  }
+
+  /**
+   * Arm the input probe in the main frame and return its context id.
+   *
+   * Chromium answers Input.dispatch* with success even when the renderer drops
+   * the event. A page that has been hidden since it loaded (a background tab
+   * that was never shown, for one) has not painted, and Chromium drops every
+   * press and key sent to it. The CDP result alone cannot tell, so the input
+   * methods read the probe after dispatching. See
+   * docs/input-delivery-hidden-page.md.
+   */
+  private async armInputProbe(): Promise<number> {
+    const client = this.require();
+    const { frameTree } = await client.Page.getFrameTree();
+    const { executionContextId } = await client.Page.createIsolatedWorld({
+      frameId: frameTree.frame.id,
+      worldName: INPUT_PROBE_WORLD,
+    });
+    await client.Runtime.evaluate({
+      expression: INPUT_PROBE_INSTALL,
+      contextId: executionContextId,
+    });
+    return executionContextId;
+  }
+
+  /**
+   * Read the probe until `done` holds or the grace period ends. Returns null
+   * when the document was replaced since the probe was armed: the input
+   * caused a navigation, so it was delivered.
+   */
+  private async readInputProbe(
+    contextId: number,
+    done: (s: InputProbeState) => boolean,
+  ): Promise<InputProbeState | null> {
+    const client = this.require();
+    const deadline = Date.now() + INPUT_PROBE_GRACE_MS;
+    for (;;) {
+      let st: InputProbeState;
+      try {
+        const r = await client.Runtime.evaluate({
+          expression: INPUT_PROBE_READ,
+          contextId,
+          returnByValue: true,
+        });
+        st = JSON.parse(r.result.value as string) as InputProbeState;
+      } catch (e) {
+        if (PROBE_CONTEXT_GONE.test((e as Error).message)) return null;
+        throw e;
+      }
+      if (done(st) || Date.now() >= deadline) return st;
+      await delay(50);
+    }
+  }
+
+  private async stopInputProbe(contextId: number): Promise<void> {
+    try {
+      await this.require().Runtime.evaluate({ expression: INPUT_PROBE_STOP, contextId });
+    } catch {
+      // Context gone with the old document, or the session dropped. Runs in a
+      // finally, so it must not replace the error that got us here.
+    }
+  }
+
+  /** Click at (x, y) and throw unless the page saw both the press and the release. */
+  private async clickVerified(x: number, y: number, what: string): Promise<void> {
+    const probe = await this.armInputProbe();
+    try {
+      await this.dispatchMouseClick(x, y);
+      const st = await this.readInputProbe(probe, (s) => s.pressed && s.released);
+      if (st && !(st.pressed && st.released)) {
+        throw new InputNotDeliveredError(
+          `${what} was not delivered: Chromium accepted the click but the page received ` +
+            (st.pressed ? "the press and no release." : "no pointer events.") +
+            inputLostHint(st),
+        );
+      }
+    } finally {
+      await this.stopInputProbe(probe);
+    }
+  }
+
+  /** Type into the focused element and throw unless the page saw a keydown
+   *  for every character. */
+  private async typeVerified(text: string, what: string): Promise<void> {
+    const expected = [...text].length;
+    if (expected === 0) return;
+    const probe = await this.armInputProbe();
+    try {
+      await this.typeText(text);
+      const st = await this.readInputProbe(probe, (s) => s.keys >= expected);
+      if (st && st.keys < expected) {
+        throw new InputNotDeliveredError(
+          (st.keys === 0
+            ? `Typing into ${what} was not delivered: Chromium accepted the keys but the page received none of them.`
+            : `Typing into ${what} was only partly delivered: the page received ${st.keys} of ${expected} keys, ` +
+              `so the field may hold part of the text.`) + inputLostHint(st),
+        );
+      }
+    } finally {
+      await this.stopInputProbe(probe);
+    }
   }
 
   private async dispatchMouseClick(x: number, y: number): Promise<void> {
@@ -617,7 +802,7 @@ export class CdpSession {
       throw new Error(`Element not found for selector: ${selector}`);
     }
 
-    await this.typeText(text);
+    await this.typeVerified(text, selector);
     return { ok: true };
   }
 
@@ -724,15 +909,17 @@ export class CdpSession {
   /** Click the element addressed by a snapshot `ref`. */
   async clickRef(ref: string): Promise<{ ok: true }> {
     const { x, y } = await this.resolveRefCenter(ref);
-    await this.dispatchMouseClick(x, y);
+    await this.clickVerified(x, y, `Click on ref "${ref}"`);
     return { ok: true };
   }
 
-  /** Focus the element addressed by a snapshot `ref` (via a real click) and type into it. */
+  /** Focus the element addressed by a snapshot `ref` (via a real click) and type into it.
+   *  A lost focusing click throws before any key is sent, so the text never
+   *  lands in whatever element had focus. */
   async typeRef(ref: string, text: string): Promise<{ ok: true }> {
     const { x, y } = await this.resolveRefCenter(ref);
-    await this.dispatchMouseClick(x, y);
-    await this.typeText(text);
+    await this.clickVerified(x, y, `Focusing click on ref "${ref}"`);
+    await this.typeVerified(text, `ref "${ref}"`);
     return { ok: true };
   }
 

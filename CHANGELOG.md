@@ -25,6 +25,14 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   store the default engine when they are created. They used to be stored without
   one and followed the default. Changing the default then moved them onto an empty
   data directory, against the Settings text "Existing profiles keep their own".
+- **`click`, `type`, `click_ref` and `type_ref` no longer report success for
+  input the page never received** (CloakBrowser profiles). Chromium drops presses
+  and keys sent to a page that is hidden and has not painted since it loaded, yet
+  acknowledges them as sent. Each tool now checks that the page saw the input. If
+  it did not, the call fails with `INPUT_NOT_DELIVERED` and says to bring the
+  window to the front and retry. `type_ref` checks its focusing click before
+  typing, so the text never lands in whatever element had focus. See
+  `docs/input-delivery-hidden-page.md`.
 
 ### Known limitations
 
