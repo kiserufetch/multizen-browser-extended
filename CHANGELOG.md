@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Closes the per-profile engine gaps listed as known limitations in 0.10.0.
+
+### Added
+
+- **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
+  `camoufox`), so agents can create Camoufox profiles. Like the app,
+  `update_profile` refuses an engine change while the profile is running.
+  `list_profiles` now reports each profile's engine.
+
+### Fixed
+
+- The New Profile sheet preselects the default engine from Settings instead of
+  always CloakBrowser. Unless you pick another engine, the profile gets the
+  current default.
+- Profiles created through MCP, and imported profiles with no usable engine, now
+  store the default engine when they are created. They used to be stored without
+  one and followed the default. Changing the default then moved them onto an empty
+  data directory, against the Settings text "Existing profiles keep their own".
+
+### Known limitations
+
+- Camoufox has no CDP. This is intended: `click_ref`, `type_ref`, `cdp_send` and
+  `cdp_send_no_safety` always return an error there, and `request_human` cannot
+  bring the window forward. Use `click` / `type` with CSS selectors.
+- Profiles created through MCP or imported on 0.10.0 still have no stored engine
+  and follow the default. Picking an engine for such a profile in its edit sheet
+  stores it.
+- Camoufox has still not been run live. The new MCP engine paths are covered by
+  unit tests only.
+
 ## [0.10.0] - 2026-10-31
 
 Syncs upstream `v0.4.2`: a browser engine per profile, with Camoufox (Firefox)

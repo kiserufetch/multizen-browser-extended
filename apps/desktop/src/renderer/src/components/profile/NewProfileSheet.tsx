@@ -56,9 +56,13 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
   const [tagsRaw, setTagsRaw] = useState("");
   const [icon, setIcon] = useState<string | undefined>(undefined);
   const [startUrl, setStartUrl] = useState(DEFAULT_START_URL);
-  // New profiles default to CloakBrowser (the app's default engine this phase);
-  // the create IPC also falls back to the default when this is unset.
-  const [engine, setEngine] = useState<BrowserEngine>("cloakbrowser");
+  // The picker preselects the app's default engine (Settings → "Default engine
+  // for new profiles"). Only an explicit pick is sent to create; otherwise the
+  // create IPC applies the current default itself, so a submit that beats the
+  // settings load still gets the right engine.
+  const [defaultEngine, setDefaultEngine] = useState<BrowserEngine>("cloakbrowser");
+  const [pickedEngine, setPickedEngine] = useState<BrowserEngine | undefined>(undefined);
+  const engine: BrowserEngine = pickedEngine ?? defaultEngine;
   const [proxy, setProxy] = useState<DraftProxy>(EMPTY_PROXY);
   const [notes, setNotes] = useState("");
   const [extensions, setExtensions] = useState<ExtensionConfig[]>([]);
@@ -74,6 +78,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
   useEffect(() => {
     if (!window.multizen) return;
     void window.multizen.fingerprint.generate().then(setFingerprint);
+    void window.multizen.settings.get().then((s) => setDefaultEngine(s.browserEngine));
   }, []);
 
   // Track "dirty" — anything the user typed that's not the default. The
@@ -155,7 +160,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
         icon,
         notes: notes.trim() || undefined,
         startUrl: startUrl.trim() || undefined,
-        engine,
+        engine: pickedEngine,
         proxy: built,
         fingerprint: fingerprint ?? undefined,
         extensions: !extensionsHidden && extensions.length > 0 ? extensions : undefined,
@@ -236,7 +241,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
               startUrl={startUrl}
               onStartUrl={setStartUrl}
               engine={engine}
-              onEngine={setEngine}
+              onEngine={setPickedEngine}
             />
           )}
 

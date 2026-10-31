@@ -415,6 +415,7 @@ app.whenReady().then(async () => {
             activityLog,
             handoff: humanHandoff,
             serverVersion: app.getVersion(),
+            getDefaultEngine: () => cachedSettings?.browserEngine ?? "cloakbrowser",
           }).server,
       });
       await httpTransport.start();
@@ -769,6 +770,10 @@ app.whenReady().then(async () => {
             detail: `This profile was exported with an engine this version of MultiZen doesn't have (${String(recordedEngine)}). It will run on your default engine instead.`,
           });
         }
+        // Pin an unset engine (cleared above, or an archive that never recorded
+        // one) to the current default, like profiles:create, so a later change of
+        // the default can't move it onto another engine's empty data dir.
+        restored.engine ??= cachedSettings?.browserEngine ?? "cloakbrowser";
         // Insert the row verbatim so the DB entry points at the restored files
         // (the old create()-based path minted a new id/dataDir and orphaned the
         // cookies/logins that were just restored).

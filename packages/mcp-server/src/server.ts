@@ -15,6 +15,7 @@ import {
   deviceMemoryApiValue,
 } from "@multizen/profile-manager";
 import type {
+  BrowserEngine,
   LaunchedProfile,
   ProfileId,
   FingerprintConfig,
@@ -22,6 +23,7 @@ import type {
   CreateProfileInput,
   ProxyConfig,
 } from "@multizen/types";
+import { BROWSER_ENGINES, resolveEngine } from "@multizen/types";
 import { ActivityLog } from "./ActivityLog.js";
 import { InMemoryHumanHandoff, type HumanHandoff } from "./handoff.js";
 
@@ -78,6 +80,10 @@ export interface MultizenMcpServerOptions {
   /** App version reported to clients in the MCP `initialize` result. The
    *  desktop main passes `app.getVersion()`; falls back to a constant. */
   serverVersion?: string;
+  /** The app's default engine for new profiles (settings.browserEngine), read
+   *  on each call so a Settings change applies without a restart. create_profile
+   *  pins it when no engine is given. Defaults to CloakBrowser. */
+  getDefaultEngine?: () => BrowserEngine;
 }
 
 export interface MultizenMcpServer {
@@ -231,10 +237,14 @@ const FingerprintInputSchema = z
   })
   .strict();
 
+const EngineSchema = z.enum(BROWSER_ENGINES);
+
 const CreateProfileSchema = z.object({
   name: z.string().min(1),
   notes: z.string().optional(),
   tags: z.array(z.string()).optional(),
+  /** Omitted → the app's default engine, pinned at creation. */
+  engine: EngineSchema.optional(),
   proxy: ProxySchema.optional(),
   fingerprint: FingerprintInputSchema.optional(),
   /** Top-level seed wins over fingerprint.seed when both are set. */
@@ -251,6 +261,9 @@ const UpdateProfileSchema = ProfileIdSchema.extend({
   name: z.string().min(1).optional(),
   notes: z.string().optional(),
   tags: z.array(z.string()).optional(),
+  // No `null` (unpin): an unpinned profile follows the app default and would
+  // move onto another engine's data dir when the default changes.
+  engine: EngineSchema.optional(),
   // `null` clears the proxy; omitted leaves it untouched.
   proxy: ProxySchema.nullable().optional(),
   fingerprint: FingerprintInputSchema.optional(),
@@ -265,7 +278,7 @@ const UpdateProfileSchema = ProfileIdSchema.extend({
  * headful only) that an agent can't infer from tool signatures alone.
  */
 const MULTIZEN_MCP_INSTRUCTIONS = [
-  "MultiZen drives real, persistent Chromium profiles — each has its own cookies, login state, fingerprint, and proxy, kept on disk between sessions.",
+  "MultiZen drives real, persistent browser profiles — each has its own cookies, login state, fingerprint, and proxy, kept on disk between sessions. Each profile runs on one engine: CloakBrowser (Chromium, the usual default) or Camoufox (Firefox); list_profiles shows which.",
   "",
   "Workflow:",
   "1. Call list_profiles to see available profiles and which are already running.",
@@ -276,6 +289,7 @@ const MULTIZEN_MCP_INSTRUCTIONS = [
   "",
   "Constraints:",
   "- Profiles always open as visible desktop windows. There is no headless mode; do not expect one.",
+  "- Camoufox has no CDP: click_ref, type_ref, cdp_send and cdp_send_no_safety refuse on it by design (extract returns no refs there). Use click / type with CSS selectors.",
   "- On a CAPTCHA, 2FA prompt, or other human-verification wall, do not attempt to solve or bypass it yourself — pause and let the user handle it, then continue. The session carries over.",
   "- Do not create or launch profiles in bulk to farm accounts; this tool supports autonomous execution of authorized workflows.",
 ].join("\n");
@@ -284,6 +298,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
   const { profileManager, browserDriver } = opts;
   const activityLog = opts.activityLog ?? new ActivityLog();
   const handoff = opts.handoff ?? new InMemoryHumanHandoff();
+  const getDefaultEngine = opts.getDefaultEngine ?? (() => resolveEngine(undefined, undefined));
 
   const server = new Server(
     { name: "multizen", version: opts.serverVersion ?? "0.0.0" },
@@ -308,7 +323,12 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
     const startedAt = Date.now();
 
     try {
-      const result = await dispatch(name, args, { profileManager, browserDriver, handoff });
+      const result = await dispatch(name, args, {
+        profileManager,
+        browserDriver,
+        handoff,
+        getDefaultEngine,
+      });
       const image = asImageResult(result);
       if (image) {
         activityLog.finish(event, "ok", `[${image.mimeType}, ${imageBytes(image.data)} bytes]`, startedAt);
@@ -334,6 +354,7 @@ interface DispatchDeps {
   profileManager: ProfileManager;
   browserDriver: BrowserDriver;
   handoff: HumanHandoff;
+  getDefaultEngine: () => BrowserEngine;
 }
 
 async function dispatch(
@@ -341,13 +362,16 @@ async function dispatch(
   args: Record<string, unknown>,
   deps: DispatchDeps,
 ): Promise<unknown> {
-  const { profileManager, browserDriver, handoff } = deps;
+  const { profileManager, browserDriver, handoff, getDefaultEngine } = deps;
   switch (name) {
     case "list_profiles": {
+      const defaultEngine = getDefaultEngine();
       const profiles = profileManager.list().map((p) => ({
         ...p,
         proxy: redactProxy(p.proxy),
         isRunning: browserDriver.isRunning(p.id),
+        // Effective engine, so the agent knows whether the CDP-only tools apply.
+        engine: resolveEngine(p.engine, defaultEngine),
       }));
       return { profiles };
     }
@@ -357,6 +381,10 @@ async function dispatch(
         name: input.name,
         notes: input.notes,
         tags: input.tags,
+        // Pin the engine now, as the profiles:create IPC does. Left unset, the
+        // row would follow the app default and a later default change would move
+        // the profile onto another engine's empty data dir.
+        engine: input.engine ?? getDefaultEngine(),
         proxy: input.proxy,
         alignTimezoneToProxy: input.alignTimezoneToProxy,
         strictGeoCoherence: input.strictGeoCoherence,
@@ -377,6 +405,7 @@ async function dispatch(
       return {
         id: created.id,
         name: created.name,
+        engine: created.engine,
         proxy: redactProxy(created.proxy),
         fingerprint: fingerprintSummary(created.fingerprint),
       };
@@ -386,8 +415,23 @@ async function dispatch(
       const existing = profileManager.get(input.profile_id);
       if (!existing) throw new Error(`Profile ${input.profile_id} not found`);
 
+      // Same rule as the profiles:update IPC: a running browser is tied to its
+      // engine's binary + data dir, so refuse a real engine change (re-sending
+      // the current engine is fine). Checked first so nothing else is saved.
+      const defaultEngine = getDefaultEngine();
+      if (
+        input.engine !== undefined &&
+        browserDriver.isRunning(input.profile_id) &&
+        input.engine !== resolveEngine(existing.engine, defaultEngine)
+      ) {
+        throw new Error(
+          "Stop the profile before changing its engine: call close_profile, then update_profile again.",
+        );
+      }
+
       const patch: UpdateProfileInput = {};
       if (input.name !== undefined) patch.name = input.name;
+      if (input.engine !== undefined) patch.engine = input.engine;
       if (input.notes !== undefined) patch.notes = input.notes;
       if (input.tags !== undefined) patch.tags = input.tags;
       // `proxy: null` clears it, `proxy: {…}` sets it, omitted leaves as-is.
@@ -411,6 +455,7 @@ async function dispatch(
       return {
         id: updated.id,
         name: updated.name,
+        engine: resolveEngine(updated.engine, defaultEngine),
         tags: updated.tags,
         proxy: redactProxy(updated.proxy),
         fingerprint: fingerprintSummary(updated.fingerprint),
@@ -806,17 +851,24 @@ const FINGERPRINT_JSON_SCHEMA = {
   },
 } as const;
 
+const ENGINE_JSON_SCHEMA = {
+  type: "string",
+  enum: [...BROWSER_ENGINES],
+  description:
+    "Browser engine. cloakbrowser = patched Chromium (all tools). camoufox = Firefox-based, a non-Chrome TLS/JS fingerprint; it has no CDP, so click_ref, type_ref, cdp_send and cdp_send_no_safety refuse on it (use click / type), and of the fingerprint only device OS, locale, screen and timezone apply.",
+} as const;
+
 const TOOL_DEFINITIONS = [
   {
     name: "list_profiles",
     description:
-      "List all browser profiles available on this machine. Returns id, name, tags, last opened, and running state.",
+      "List all browser profiles available on this machine. Returns id, name, tags, engine, last opened, and running state.",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "create_profile",
     description:
-      "Create a new browser profile. Only `name` is required; a coherent default fingerprint is generated. Optionally pass a `proxy` and/or high-level `fingerprint` knobs. Optional top-level `seed` / `entropy` (or `fingerprint.seed`) makes device/WebGL + CloakBrowser noise deterministic — same seed + knobs → same device/WebGL; different seed → different device/noise with high probability. Top-level seed wins over fingerprint.seed. Unknown localeId or invalid timezone/screen/hwc/mem → INVALID_INPUT (profile not created). Call list_fingerprint_options for valid device families and locale ids.",
+      "Create a new browser profile. Only `name` is required; a coherent default fingerprint is generated. Optionally pass an `engine` (default: the app's default engine, fixed at creation), a `proxy` and/or high-level `fingerprint` knobs. Optional top-level `seed` / `entropy` (or `fingerprint.seed`) makes device/WebGL + CloakBrowser noise deterministic — same seed + knobs → same device/WebGL; different seed → different device/noise with high probability. Top-level seed wins over fingerprint.seed. Unknown localeId or invalid timezone/screen/hwc/mem → INVALID_INPUT (profile not created). Call list_fingerprint_options for valid device families and locale ids.",
     inputSchema: {
       type: "object",
       required: ["name"],
@@ -824,6 +876,7 @@ const TOOL_DEFINITIONS = [
         name: { type: "string", description: "Human-readable name" },
         notes: { type: "string" },
         tags: { type: "array", items: { type: "string" } },
+        engine: ENGINE_JSON_SCHEMA,
         proxy: PROXY_JSON_SCHEMA,
         fingerprint: FINGERPRINT_JSON_SCHEMA,
         seed: {
@@ -853,7 +906,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "launch_profile",
     description:
-      "Launch a profile in patched Chromium. Returns CDP endpoint. Idempotent: returns existing endpoint if already running.",
+      "Launch a profile on its engine. Returns the CDP endpoint (empty on Camoufox, which has no CDP). Idempotent: returns existing endpoint if already running.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1004,7 +1057,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "update_profile",
     description:
-      "Update an existing profile's name, notes, tags, proxy, and/or fingerprint. Every field is optional — only the ones you pass change. Set `proxy` to null to remove the proxy. Fingerprint changes are reconciled for coherence. If the profile is running, changes apply on the next launch (response includes appliesOnNextLaunch).",
+      "Update an existing profile's name, notes, tags, engine, proxy, and/or fingerprint. Every field is optional — only the ones you pass change. Set `proxy` to null to remove the proxy. Fingerprint changes are reconciled for coherence. If the profile is running, changes apply on the next launch (response includes appliesOnNextLaunch) — except an engine change, which is refused while it runs (close_profile first). Each engine keeps its own browser state, so after switching, the profile starts from that engine's cookies and logins, which may be empty.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1013,6 +1066,7 @@ const TOOL_DEFINITIONS = [
         name: { type: "string" },
         notes: { type: "string" },
         tags: { type: "array", items: { type: "string" } },
+        engine: ENGINE_JSON_SCHEMA,
         proxy: {
           description: "Proxy object to set, or null to clear. Omit to leave unchanged.",
           anyOf: [PROXY_JSON_SCHEMA, { type: "null" }],

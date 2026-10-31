@@ -41,17 +41,20 @@ async function check(name: string, fn: () => void | Promise<void>): Promise<void
 
 /**
  * The exact import decision from the profiles:import IPC: a recorded engine the
- * build can't run is cleared (so it resolves to the default) and the user is
- * notified. Replicated here to lock the contract.
+ * build can't run is cleared and the user is notified, then an unset engine is
+ * pinned to the current default. Replicated here to lock the contract.
  */
-function coerceImportedEngine(recorded: unknown): {
-  engine: BrowserEngine | undefined;
-  notice: boolean;
-} {
+function coerceImportedEngine(
+  recorded: unknown,
+  defaultEngine: BrowserEngine,
+): { engine: BrowserEngine; notice: boolean } {
+  let engine = recorded as BrowserEngine | undefined;
+  let notice = false;
   if (recorded !== undefined && !isBrowserEngine(recorded)) {
-    return { engine: undefined, notice: true };
+    engine = undefined;
+    notice = true;
   }
-  return { engine: recorded as BrowserEngine | undefined, notice: false };
+  return { engine: engine ?? defaultEngine, notice };
 }
 
 async function run(): Promise<void> {
@@ -84,21 +87,19 @@ async function run(): Promise<void> {
     assert.equal(isBrowserEngine(null), false);
     assert.equal(isBrowserEngine(42), false);
   });
-  await check("import of a not-in-roster engine → cleared + notice → default at launch", () => {
-    const r = coerceImportedEngine("cft");
-    assert.equal(r.engine, undefined);
+  await check("import of a not-in-roster engine → notice + pinned to the default", () => {
+    const r = coerceImportedEngine("cft", "camoufox");
+    assert.equal(r.engine, "camoufox");
     assert.equal(r.notice, true);
-    // Cleared engine resolves to the app default at launch.
-    assert.equal(resolveEngine(r.engine, "cloakbrowser"), "cloakbrowser");
   });
   await check("import of an in-roster engine → preserved, no notice", () => {
-    const r = coerceImportedEngine("camoufox");
+    const r = coerceImportedEngine("camoufox", "cloakbrowser");
     assert.equal(r.engine, "camoufox");
     assert.equal(r.notice, false);
   });
-  await check("import of an unset engine → unset, no notice", () => {
-    const r = coerceImportedEngine(undefined);
-    assert.equal(r.engine, undefined);
+  await check("import of an unset engine → pinned to the default, no notice", () => {
+    const r = coerceImportedEngine(undefined, "camoufox");
+    assert.equal(r.engine, "camoufox");
     assert.equal(r.notice, false);
   });
 
