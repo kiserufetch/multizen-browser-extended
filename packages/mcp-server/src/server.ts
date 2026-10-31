@@ -316,10 +316,14 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
       return ok(result);
     } catch (e) {
       const message = e instanceof z.ZodError ? e.message : e instanceof Error ? e.message : String(e);
+      // InputNotDeliveredError comes from @multizen/cdp-driver, which this
+      // package does not depend on, so match it by name.
       const code =
         e instanceof z.ZodError || e instanceof FingerprintReconcileError
           ? "INVALID_INPUT"
-          : "INTERNAL_ERROR";
+          : e instanceof Error && e.name === "InputNotDeliveredError"
+            ? "INPUT_NOT_DELIVERED"
+            : "INTERNAL_ERROR";
       activityLog.finish(event, "error", message, startedAt);
       return err(code, message);
     }
@@ -797,6 +801,10 @@ const FINGERPRINT_JSON_SCHEMA = {
   },
 } as const;
 
+/** Shared tail of the input tool descriptions (click, type, click_ref, type_ref). */
+const INPUT_DELIVERY_NOTE =
+  " On CloakBrowser, fails with INPUT_NOT_DELIVERED when the page did not receive the input (for example a hidden page that has not painted yet); the error message says what to do next.";
+
 const TOOL_DEFINITIONS = [
   {
     name: "list_profiles",
@@ -875,7 +883,8 @@ const TOOL_DEFINITIONS = [
   {
     name: "click",
     description:
-      "Click an element by CSS selector. The selector must be precise — call extract first to inspect the page accessibility tree, then derive a selector from it.",
+      "Click an element by CSS selector. The selector must be precise — call extract first to inspect the page accessibility tree, then derive a selector from it." +
+      INPUT_DELIVERY_NOTE,
     inputSchema: {
       type: "object",
       required: ["profile_id", "selector"],
@@ -890,7 +899,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "type",
-    description: "Type text into an input element by CSS selector.",
+    description: "Type text into an input element by CSS selector." + INPUT_DELIVERY_NOTE,
     inputSchema: {
       type: "object",
       required: ["profile_id", "selector", "text"],
@@ -904,7 +913,8 @@ const TOOL_DEFINITIONS = [
   {
     name: "click_ref",
     description:
-      "Click an element by its snapshot `ref` (e.g. 'e7') from the most recent extract. Prefer this over click: no CSS selector needed, and it scrolls the element into view. Refs are invalidated when the page changes — re-run extract and use the new refs. CloakBrowser only: on Camoufox extract returns no refs, so use click.",
+      "Click an element by its snapshot `ref` (e.g. 'e7') from the most recent extract. Prefer this over click: no CSS selector needed, and it scrolls the element into view. Refs are invalidated when the page changes — re-run extract and use the new refs. CloakBrowser only: on Camoufox extract returns no refs, so use click." +
+      INPUT_DELIVERY_NOTE,
     inputSchema: {
       type: "object",
       required: ["profile_id", "ref"],
@@ -917,7 +927,8 @@ const TOOL_DEFINITIONS = [
   {
     name: "type_ref",
     description:
-      "Focus an element by its snapshot `ref` (via a real click) and type text into it. Prefer this over type. Refs come from extract and are invalidated when the page changes. CloakBrowser only: on Camoufox extract returns no refs, so use type.",
+      "Focus an element by its snapshot `ref` (via a real click) and type text into it. Prefer this over type. Refs come from extract and are invalidated when the page changes. CloakBrowser only: on Camoufox extract returns no refs, so use type." +
+      INPUT_DELIVERY_NOTE,
     inputSchema: {
       type: "object",
       required: ["profile_id", "ref", "text"],

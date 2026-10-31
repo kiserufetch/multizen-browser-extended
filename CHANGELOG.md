@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`click`, `type`, `click_ref` and `type_ref` no longer report success for
+  input the page never received** (CloakBrowser profiles). Chromium drops presses
+  and keys sent to a page that is hidden and has not painted since it loaded, yet
+  acknowledges them as sent. Each tool now checks that the page saw the input. If
+  it did not, the call fails with `INPUT_NOT_DELIVERED` and says to bring the
+  window to the front and retry. `type_ref` checks its focusing click before
+  typing, so the text never lands in whatever element had focus. See
+  `docs/input-delivery-hidden-page.md`.
+
 ## [0.10.0] - 2026-10-31
 
 Syncs upstream `v0.4.2`: a browser engine per profile, with Camoufox (Firefox)
