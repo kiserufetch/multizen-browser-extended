@@ -112,7 +112,10 @@ export interface FingerprintConfig {
   device: DeviceFamily;
 
   // ── Headers / navigator ──────────────────────────────────────────
-  /** Full legacy User-Agent string */
+  /** Full legacy User-Agent string, with the full Chrome version. Browsers
+   *  report the reduced form (`Chrome/<major>.0.0.0`, see `reducedUserAgent`
+   *  in profile-manager); the full version only reaches the web via
+   *  `clientHints.secChUaFullVersionList`. */
   userAgent: string;
   /** `navigator.platform` — must match device family */
   platform: "MacIntel" | "Win32" | "Linux x86_64";

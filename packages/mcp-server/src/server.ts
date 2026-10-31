@@ -11,6 +11,8 @@ import {
   generateFingerprint,
   deviceCatalog,
   localeCatalog,
+  reducedUserAgent,
+  deviceMemoryApiValue,
 } from "@multizen/profile-manager";
 import type {
   LaunchedProfile,
@@ -666,8 +668,14 @@ async function dispatch(
       // OS and pins only screen + timezone, so comparing the rest of the stored
       // Chrome-shaped fingerprint would report drift that isn't a defect.
       const pinsChromeSurfaces = !/\bFirefox\//.test(live.userAgent);
+      // The stored fingerprint keeps the full-version UA and the physical RAM;
+      // the browser reports Chrome's reduced UA and the quantized Device Memory
+      // API value (the one the launcher passes to --fingerprint-device-memory).
+      // Compare against those web-facing forms, or every healthy profile drifts.
+      const expectedUserAgent = reducedUserAgent(expected.userAgent);
+      const expectedDeviceMemory = deviceMemoryApiValue(expected.deviceMemory);
       const drift: string[] = [];
-      if (pinsChromeSurfaces && live.userAgent !== expected.userAgent) drift.push("userAgent");
+      if (pinsChromeSurfaces && live.userAgent !== expectedUserAgent) drift.push("userAgent");
       if (pinsChromeSurfaces && live.platform !== expected.platform) drift.push("platform");
       if (live.timezone !== expected.timezone) drift.push("timezone");
       if (pinsChromeSurfaces && live.hardwareConcurrency !== expected.hardwareConcurrency) {
@@ -676,7 +684,7 @@ async function dispatch(
       if (
         pinsChromeSurfaces &&
         live.deviceMemory !== null &&
-        live.deviceMemory !== expected.deviceMemory
+        live.deviceMemory !== expectedDeviceMemory
       ) {
         drift.push("deviceMemory");
       }
@@ -701,11 +709,11 @@ async function dispatch(
         ok: drift.length === 0,
         live,
         expected: {
-          userAgent: expected.userAgent,
+          userAgent: expectedUserAgent,
           platform: expected.platform,
           languages: expected.languages,
           hardwareConcurrency: expected.hardwareConcurrency,
-          deviceMemory: expected.deviceMemory,
+          deviceMemory: expectedDeviceMemory,
           screen: expected.screen,
           webgl: expected.webgl,
           timezone: expected.timezone,
@@ -714,6 +722,7 @@ async function dispatch(
         drift,
         notes: [
           "CloakBrowser: pinned fields should show drift=[]. canvasHash is informational (seed-driven noise).",
+          "expected.userAgent / expected.deviceMemory are what the browser reports for the stored fingerprint: Chrome's reduced UA (Chrome/<major>.0.0.0) and the Device Memory API value (power of two, max 8). profile.fingerprint keeps the full version and the physical GB.",
           "Camoufox: only screen and timezone are compared — it generates its own Firefox UA/hardware/WebGL for the persona's OS.",
         ],
       };
@@ -1041,7 +1050,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "probe_fingerprint",
     description:
-      "Read back live fingerprint surfaces from a running profile (UA, platform, languages, hwc, deviceMemory, screen, WebGL, timezone, optional canvas hash) and compare to the stored profile.fingerprint. Returns { ok, live, expected, drift[] }. CloakBrowser: pinned fields should have empty drift. Camoufox: only screen and timezone are compared. Profile must be launched first.",
+      "Read back live fingerprint surfaces from a running profile (UA, platform, languages, hwc, deviceMemory, screen, WebGL, timezone, optional canvas hash) and compare to the stored profile.fingerprint. Returns { ok, live, expected, drift[] }. CloakBrowser: pinned fields should have empty drift; UA is compared in Chrome's reduced form and deviceMemory as the Device Memory API value (power of two, max 8). Camoufox: only screen and timezone are compared. Profile must be launched first.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],

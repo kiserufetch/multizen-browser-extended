@@ -10,6 +10,8 @@ export {
   findLocaleIdByCountry,
   CHROME_VERSION_FULL,
   CHROME_VERSION_MAJOR,
+  reducedUserAgent,
+  deviceMemoryApiValue,
   type DeviceCatalogEntry,
   type LocaleCatalogEntry,
   type GenerateFingerprintOptions,

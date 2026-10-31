@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
 import type { BrowserDriver } from "@multizen/mcp-server";
-import type { ProfileManager } from "@multizen/profile-manager";
+import { deviceMemoryApiValue, type ProfileManager } from "@multizen/profile-manager";
 import type {
   ChromiumStatus,
   ClientHints,
@@ -943,21 +943,6 @@ function primaryBrandVersion(ch: ClientHints | undefined): string | null {
     if (!/Chromium|Not[.\s/]?A[.\s/]?Brand/i.test(brand)) return version;
   }
   return null;
-}
-
-/**
- * The value a real browser reports for `navigator.deviceMemory` / the
- * `Sec-CH-Device-Memory` hint: physical RAM rounded to the NEAREST power of two
- * and CAPPED AT 8 — the Device Memory API's spec upper bound. Chrome computes
- * `2 ** round(log2(gb))` clamped to [0.25, 8] (Blink's `floor(log2+0.5)`), so it
- * never exposes a value above 8; emitting a persona's raw physical RAM
- * (16/18/32/64 GB) would be an instant, impossible-value bot tell. The
- * fingerprint keeps the physical value for the UI and persona coherence; only
- * the web-facing surfaces get this quantized value.
- */
-function deviceMemoryApiValue(physicalGb: number): number {
-  if (!(physicalGb > 0)) return 8;
-  return Math.min(8, 2 ** Math.round(Math.log2(physicalGb)));
 }
 
 function fingerprintSeed(profileId: ProfileId, fp: FingerprintConfig): string {

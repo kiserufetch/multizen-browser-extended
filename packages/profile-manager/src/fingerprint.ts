@@ -1833,6 +1833,39 @@ function buildUserAgent(device: DeviceSpec): string {
   return `Mozilla/5.0 (${device.uaPlatformToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION_FULL} Safari/537.36`;
 }
 
+/**
+ * The UA a real browser reports for a stored `userAgent`. Under Chrome's
+ * User-Agent Reduction, `navigator.userAgent` and the `User-Agent` header carry
+ * `Chrome/<major>.0.0.0`; the full build version is only exposed through
+ * `Sec-CH-UA-Full-Version-List` / `userAgentData.getHighEntropyValues()`. The
+ * catalog's platform tokens are already the frozen reduced ones, so only the
+ * version needs rewriting.
+ *
+ * The stored UA keeps the full version (the launcher reconciles it to the
+ * binary and the UI shows it), but no launch path sends it verbatim:
+ * CloakBrowser derives its own UA from --fingerprint-platform /
+ * --fingerprint-brand-version and reports the reduced form. Compare live
+ * surfaces against this, not against the stored string.
+ */
+export function reducedUserAgent(userAgent: string): string {
+  return userAgent.replace(/Chrome\/(\d+)\.\d+\.\d+\.\d+/, "Chrome/$1.0.0.0");
+}
+
+/**
+ * The value a real browser reports for `navigator.deviceMemory` / the
+ * `Sec-CH-Device-Memory` hint: physical RAM rounded to the NEAREST power of two
+ * and CAPPED AT 8 — the Device Memory API's spec upper bound. Chrome computes
+ * `2 ** round(log2(gb))` clamped to [0.25, 8] (Blink's `floor(log2+0.5)`), so it
+ * never exposes a value above 8; emitting a persona's raw physical RAM
+ * (16/18/32/64 GB) would be an instant, impossible-value bot tell. The
+ * fingerprint keeps the physical value for the UI and persona coherence; only
+ * the web-facing surfaces get this quantized value.
+ */
+export function deviceMemoryApiValue(physicalGb: number): number {
+  if (!(physicalGb > 0)) return 8;
+  return Math.min(8, 2 ** Math.round(Math.log2(physicalGb)));
+}
+
 function buildClientHints(device: DeviceSpec): ClientHints {
   // Chromium's GREASE pattern — randomised "Not?A_Brand" entry to discourage
   // brand allowlisting. The actual GREASE token rotates per Chromium build;

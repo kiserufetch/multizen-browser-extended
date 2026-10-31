@@ -6,8 +6,13 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { createMultizenMcpServer, type BrowserDriver } from "./server.js";
 import { MockBrowserDriver } from "./MockBrowserDriver.js";
-import type { ProfileManager } from "@multizen/profile-manager";
-import type { LaunchedProfile, ProfileId } from "@multizen/types";
+import {
+  CHROME_VERSION_FULL,
+  CHROME_VERSION_MAJOR,
+  generateFingerprint,
+  type ProfileManager,
+} from "@multizen/profile-manager";
+import type { FingerprintConfig, LaunchedProfile, Profile, ProfileId } from "@multizen/types";
 
 /**
  * End-to-end exercise of the MCP server CDP tool surfaces. We connect a real
@@ -136,10 +141,13 @@ class SpyDriver implements BrowserDriver {
   }
 }
 
-async function connect(driver: BrowserDriver): Promise<Client> {
+async function connect(
+  driver: BrowserDriver,
   // The profile manager is never touched by the CDP tool paths (they only
-  // need isRunning + cdpSend), so a bare stub is sufficient here.
-  const profileManager = {} as unknown as ProfileManager;
+  // need isRunning + cdpSend), so a bare stub is the default. probe_fingerprint
+  // reads the stored profile and passes one with `get`.
+  profileManager = {} as unknown as ProfileManager,
+): Promise<Client> {
   const { server } = createMultizenMcpServer({ profileManager, browserDriver: driver });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "0.0.0" });
@@ -671,4 +679,146 @@ test("request_human then wait_for_human unblocks on resume_human", async () => {
   assert.equal(res.parsed.resumed, true);
   assert.equal(res.parsed.timedOut, false);
   await client.close();
+});
+
+// ── probe_fingerprint drift ──────────────────────────────────────────────────
+
+interface LiveProbe {
+  userAgent: string;
+  platform: string;
+  languages: string[];
+  hardwareConcurrency: number;
+  deviceMemory: number | null;
+  screen: { width: number; height: number };
+  webgl: { vendor: string | null; renderer: string | null };
+  timezone: string;
+  canvasHash: string | null;
+}
+
+/** A profile manager serving one stored fingerprint, all the probe reads. */
+function profileManagerWith(id: string, fingerprint: FingerprintConfig): ProfileManager {
+  return {
+    get: (pid: string) => (pid === id ? ({ id, fingerprint } as unknown as Profile) : null),
+  } as unknown as ProfileManager;
+}
+
+/** A fingerprint as the generator stores it: full-version UA, physical RAM.
+ *  16 GB is a common persona value the Device Memory API reports as 8. */
+function storedFingerprint(overrides: Partial<FingerprintConfig> = {}): FingerprintConfig {
+  return {
+    ...generateFingerprint("probe-seed", { hostFilter: false }),
+    deviceMemory: 16,
+    ...overrides,
+  };
+}
+
+/** What CloakBrowser reports for the default `storedFingerprint()` when every
+ *  pin holds: the reduced UA and the capped deviceMemory. */
+function healthyLive(fp: FingerprintConfig): LiveProbe {
+  return {
+    userAgent: fp.userAgent.replace(
+      `Chrome/${CHROME_VERSION_FULL}`,
+      `Chrome/${CHROME_VERSION_MAJOR}.0.0.0`,
+    ),
+    platform: fp.platform,
+    languages: [...fp.languages],
+    hardwareConcurrency: fp.hardwareConcurrency,
+    deviceMemory: 8,
+    screen: { ...fp.screen },
+    webgl: { ...fp.webgl },
+    timezone: fp.timezone,
+    canvasHash: "1a2b3c",
+  };
+}
+
+async function probe(fp: FingerprintConfig, live: LiveProbe): Promise<CallResult> {
+  const spy = new SpyDriver();
+  spy.running.add("p1");
+  spy.respond = (method) =>
+    method === "Runtime.evaluate" ? { result: { value: live } } : { ok: true };
+  const client = await connect(spy, profileManagerWith("p1", fp));
+  const res = await call(client, "probe_fingerprint", { profile_id: "p1" });
+  await client.close();
+  return res;
+}
+
+test("probe_fingerprint: a healthy CloakBrowser profile reports drift=[]", async () => {
+  const fp = storedFingerprint();
+  // The stored UA carries the full version; the live one is reduced.
+  assert.ok(fp.userAgent.includes(`Chrome/${CHROME_VERSION_FULL} `), fp.userAgent);
+  const live = healthyLive(fp);
+  assert.ok(live.userAgent.includes(`Chrome/${CHROME_VERSION_MAJOR}.0.0.0 `), live.userAgent);
+
+  const res = await probe(fp, live);
+  assert.equal(res.isError, false);
+  assert.deepEqual(res.parsed.drift, []);
+  assert.equal(res.parsed.ok, true);
+  // `expected` holds the values the comparison used, so it lines up with `live`.
+  assert.equal(res.parsed.expected.userAgent, live.userAgent);
+  assert.equal(res.parsed.expected.deviceMemory, 8);
+});
+
+test("probe_fingerprint: deviceMemory is compared as the quantized API value", async () => {
+  // physical GB → navigator.deviceMemory (nearest power of two, capped at 8)
+  const cases: Array<[number, number]> = [
+    [2, 2],
+    [3, 4],
+    [4, 4],
+    [6, 8],
+    [12, 8],
+    [18, 8],
+    [64, 8],
+  ];
+  for (const [physical, api] of cases) {
+    const fp = storedFingerprint({ deviceMemory: physical });
+    const res = await probe(fp, { ...healthyLive(fp), deviceMemory: api });
+    assert.deepEqual(res.parsed.drift, [], `${physical} GB should be reported as ${api}`);
+  }
+  // A browser reporting the raw physical value is real drift, not a match.
+  const fp = storedFingerprint();
+  const raw = await probe(fp, { ...healthyLive(fp), deviceMemory: 16 });
+  assert.deepEqual(raw.parsed.drift, ["deviceMemory"]);
+  assert.equal(raw.parsed.ok, false);
+});
+
+test("probe_fingerprint: still reports userAgent drift on a wrong major or an unreduced UA", async () => {
+  const fp = storedFingerprint();
+  const live = healthyLive(fp);
+  const otherMajor = await probe(fp, {
+    ...live,
+    userAgent: live.userAgent.replace(
+      `Chrome/${CHROME_VERSION_MAJOR}.`,
+      `Chrome/${CHROME_VERSION_MAJOR - 1}.`,
+    ),
+  });
+  assert.deepEqual(otherMajor.parsed.drift, ["userAgent"]);
+  // Chrome never puts its full version in navigator.userAgent, so a live UA
+  // matching the stored string verbatim is itself a mismatch.
+  const unreduced = await probe(fp, { ...live, userAgent: fp.userAgent });
+  assert.deepEqual(unreduced.parsed.drift, ["userAgent"]);
+});
+
+test("probe_fingerprint: Camoufox compares only screen and timezone", async () => {
+  const fp = storedFingerprint();
+  // Camoufox generates its own Firefox UA / hardware / WebGL for the persona's OS.
+  const live: LiveProbe = {
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
+    platform: fp.platform === "Win32" ? "MacIntel" : "Win32",
+    languages: ["xx-XX"],
+    hardwareConcurrency: fp.hardwareConcurrency + 2,
+    deviceMemory: null,
+    screen: { ...fp.screen },
+    webgl: { vendor: "Mozilla", renderer: "Mozilla" },
+    timezone: fp.timezone,
+    canvasHash: null,
+  };
+  const pinned = await probe(fp, live);
+  assert.deepEqual(pinned.parsed.drift, []);
+
+  const moved = await probe(fp, {
+    ...live,
+    timezone: "Antarctica/Troll",
+    screen: { width: fp.screen.width + 1, height: fp.screen.height },
+  });
+  assert.deepEqual(moved.parsed.drift, ["timezone", "screen"]);
 });
