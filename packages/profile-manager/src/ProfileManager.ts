@@ -95,6 +95,10 @@ export class ProfileManager {
     }
     if (!cols.some((c) => c.name === "engine")) {
       this.db.exec(`ALTER TABLE profiles ADD COLUMN engine TEXT`);
+      // Rows older than this column keep their browser state in
+      // engines/cloakbrowser. Pin them: NULL means "follow the app default", so
+      // changing the default would move them onto an empty data dir.
+      this.db.exec(`UPDATE profiles SET engine = 'cloakbrowser'`);
     }
   }
 

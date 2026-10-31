@@ -7,6 +7,7 @@
  *   - resolveEngine precedence (AC2 launch resolution, AC10 default-for-new)
  *   - isBrowserEngine / import not-in-roster fallback (AC8)
  *   - SettingsStore coercion of a stored legacy "cft" (AC11)
+ *   - The migration pinning rows from before the engine column
  *
  * Run (tsx + @multizen/settings-store are test-only devDeps of this package):
  *   yarn workspace @multizen/profile-manager exec tsx scripts/test-engine-resolution.ts
@@ -23,6 +24,8 @@ import {
   type BrowserEngine,
 } from "@multizen/types";
 import { SettingsStore } from "@multizen/settings-store";
+import Database from "better-sqlite3";
+import { ProfileManager } from "../src/ProfileManager";
 
 let checks = 0;
 let fails = 0;
@@ -116,6 +119,36 @@ async function run(): Promise<void> {
     await check("a valid stored engine is preserved", async () => {
       assert.equal(await load("camoufox"), "camoufox");
       assert.equal(await load("cloakbrowser"), "cloakbrowser");
+    });
+
+    // ── Migration: rows from before the engine column stay on CloakBrowser ─────
+    await check("pre-engine rows are pinned; rows created after stay unpinned", () => {
+      const dbPath = join(dir, "legacy.db");
+      const legacy = new Database(dbPath);
+      legacy.exec(`CREATE TABLE profiles (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, notes TEXT,
+        tags TEXT NOT NULL DEFAULT '[]', proxy TEXT, fingerprint TEXT NOT NULL,
+        data_dir TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        last_opened_at TEXT)`);
+      legacy
+        .prepare(
+          `INSERT INTO profiles (id, name, fingerprint, data_dir, created_at, updated_at)
+           VALUES ('old', 'old', '{}', 'x', 'now', 'now')`,
+        )
+        .run();
+      legacy.close();
+
+      const open = () => new ProfileManager({ dbPath, profilesRoot: join(dir, "profiles") });
+      let pm = open();
+      assert.equal(pm.get("old")?.engine, "cloakbrowser");
+      const created = pm.create({ name: "new" });
+      assert.equal(created.engine, undefined);
+      pm.close();
+
+      // The backfill runs once: reopening must not pin a row created since.
+      pm = open();
+      assert.equal(pm.get(created.id)?.engine, undefined);
+      pm.close();
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
