@@ -1,9 +1,9 @@
 /**
- * Compare generate-time CHROME_VERSION_MAJOR against a CloakBrowser / CFT binary.
+ * Compare generate-time CHROME_VERSION_MAJOR against a CloakBrowser binary.
  *
  * Resolve order:
  *   1. MULTIZEN_CHROMIUM_BIN
- *   2. MultiZen bootstrap cache current.json (cloakbrowser, then cft)
+ *   2. MultiZen bootstrap cache current.json (cloakbrowser)
  *
  * Exit 0 + skip message when no binary is present (CI without CloakBrowser).
  * Fail when |constMajor - binaryMajor| > THRESHOLD (default 0).
@@ -57,10 +57,8 @@ function resolveBinary(): string | null {
   if (envBin && existsSync(envBin)) return envBin;
 
   for (const root of userDataRoots()) {
-    for (const engine of ["cloakbrowser", "cft"] as const) {
-      const hit = binaryFromCache(join(root, "chromium", engine));
-      if (hit) return hit;
-    }
+    const hit = binaryFromCache(join(root, "chromium", "cloakbrowser"));
+    if (hit) return hit;
   }
   return null;
 }
@@ -104,7 +102,7 @@ function main(): void {
   const binary = resolveBinary();
   if (!binary) {
     console.log(
-      "skip: no Chromium binary found (set MULTIZEN_CHROMIUM_BIN or install MultiZen CloakBrowser/CFT cache)",
+      "skip: no Chromium binary found (set MULTIZEN_CHROMIUM_BIN or install MultiZen CloakBrowser cache)",
     );
     process.exit(0);
   }
