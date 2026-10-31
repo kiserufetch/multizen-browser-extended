@@ -10,6 +10,13 @@
  * Throws if the budget is exhausted at any stage; the caller is responsible
  * for tearing down the half-launched browser.
  *
+ * `signal` lets the caller abandon the probe (e.g. the child crashed). Once it
+ * aborts, the probe rejects with the abort reason and never starts another
+ * fetch or connect(): left running, it would keep polling this port and, after
+ * a relaunch on the same port, connect the caller's already-closed session to
+ * the new browser. A connect() already in flight completes, so the caller
+ * must wait for this promise to settle before closing the session.
+ *
  * `fetch` and `sleep` are injectable so the staged ladder / budget behaviour
  * can be exercised without a real Chromium endpoint.
  */
@@ -23,12 +30,12 @@ export interface ReadinessSession {
 }
 
 export interface ReadinessDeps {
-  fetch: (url: string) => Promise<ReadinessResponseLike>;
+  fetch: (url: string, init?: { signal?: AbortSignal }) => Promise<ReadinessResponseLike>;
   sleep: (ms: number) => Promise<void>;
 }
 
 const defaultReadinessDeps: ReadinessDeps = {
-  fetch: (url) => fetch(url),
+  fetch: (url, init) => fetch(url, init),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
 };
 
@@ -37,14 +44,16 @@ export async function waitForCdpSessionReady(
   session: ReadinessSession,
   budgetMs: number,
   deps: ReadinessDeps = defaultReadinessDeps,
+  signal?: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + budgetMs;
   let lastError: unknown = null;
 
   // Stage 1: /json/version answers.
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     try {
-      const res = await deps.fetch(`http://127.0.0.1:${port}/json/version`);
+      const res = await deps.fetch(`http://127.0.0.1:${port}/json/version`, { signal });
       if (res.ok) {
         lastError = null;
         break;
@@ -62,8 +71,9 @@ export async function waitForCdpSessionReady(
 
   // Stage 2: a page target exists.
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     try {
-      const res = await deps.fetch(`http://127.0.0.1:${port}/json/list`);
+      const res = await deps.fetch(`http://127.0.0.1:${port}/json/list`, { signal });
       if (res.ok) {
         const targets = (await res.json()) as Array<{ type?: string }>;
         if (targets.some((t) => t.type === "page")) {
@@ -82,13 +92,18 @@ export async function waitForCdpSessionReady(
 
   // Stage 3: connect + attach (idempotent; returns immediately once attached).
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     try {
       await session.connect();
-      return;
     } catch (e) {
       lastError = e;
       await deps.sleep(200);
+      continue;
     }
+    // A connect() that was in flight when the caller gave up must not report
+    // ready; the caller closes the session once this settles.
+    signal?.throwIfAborted();
+    return;
   }
   throw new Error(
     `CDP connect/attach failed on port ${port} within ${budgetMs}ms: ${String(lastError)}`,

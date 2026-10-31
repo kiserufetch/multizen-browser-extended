@@ -25,6 +25,7 @@ import { companionDir } from "./extensions/companion";
 import { resolveLoadDir } from "./extensions/extensionStore.ts";
 import { killProcessTree, gracefulShutdown } from "./processTree";
 import { waitForCdpSessionReady } from "./cdpReadiness";
+import { attemptSpawn, awaitWhileAlive, SandboxStartupError } from "./spawnAttempt";
 import { sanitizeStartUrl } from "./startPage";
 
 function readSysctl(path: string): string | null {
@@ -34,18 +35,6 @@ function readSysctl(path: string): string | null {
     return null; // file absent (kernel doesn't expose this knob)
   }
 }
-
-/** Chromium stderr signatures that mean the user-namespace sandbox could not
- *  start (so a relaunch with --no-sandbox is warranted). Kept to failure-only
- *  phrases — a generic token like CLONE_NEWUSER could appear on a healthy
- *  launch and must NOT trigger the backstop. The backstop also requires the
- *  child to have actually exited, so a stray match alone can't disable the
- *  sandbox. */
-const SANDBOX_FAILURE_RE = /No usable sandbox|Failed to move to new (?:user )?namespace/i;
-
-/** Thrown by the spawn attempt when the sandbox failed to start, so the caller
- *  can relaunch once with --no-sandbox (never re-prompting). */
-class SandboxStartupError extends Error {}
 
 /**
  * Sync fallback used ONLY when the async sandbox resolver is absent or throws:
@@ -520,79 +509,33 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // (the AppArmor profile turned out not to be active), relaunch once WITH
     // --no-sandbox so the profile still launches (AC16/B1). `--no-sandbox` is
     // applied here, not in the args literal, so no arg rebuild is needed.
-    const attemptSpawn = async (
-      useNoSandbox: boolean,
-    ): Promise<{ child: ChildProcess; session: CdpSession }> => {
-      const spawnArgs = useNoSandbox ? ["--no-sandbox", ...args] : args;
-      const child = spawn(chromiumPath, spawnArgs, {
-        // Unix: make the child a process-group leader so we can group-kill the
-        // whole Chromium tree (renderers/GPU/utility) with process.kill(-pid),
-        // which survives the leader's death. Windows uses taskkill /T instead,
-        // so leave it attached there.
-        detached: process.platform !== "win32",
-        stdio: ["ignore", "ignore", "pipe"],
-        env: cleanEnv,
+    const spawnEngine = (useNoSandbox: boolean) =>
+      attemptSpawn(chromiumPath, {
+        spawn: () =>
+          spawn(chromiumPath, useNoSandbox ? ["--no-sandbox", ...args] : args, {
+            // Unix: make the child a process-group leader so we can group-kill the
+            // whole Chromium tree (renderers/GPU/utility) with process.kill(-pid),
+            // which survives the leader's death. Windows uses taskkill /T instead,
+            // so leave it attached there.
+            detached: process.platform !== "win32",
+            stdio: ["ignore", "ignore", "pipe"],
+            env: cleanEnv,
+          }),
+        createSession: () => new CdpSession({ port, engine }),
+        // Readiness ladder within a fixed 15s budget, reusing this one session
+        // (connect() is idempotent): (1) /json/version answers, (2) /json/list has
+        // a page target, (3) connect()+attach succeeds. attemptSpawn races it
+        // against a confirmed sandbox crash and aborts it when the crash wins.
+        waitForReady: (s, signal) => waitForCdpSessionReady(port, s, 15000, undefined, signal),
+        killProcessTree,
+        log: (line) => process.stderr.write(`${line}\n`),
       });
-      const pid = child.pid;
-      if (!pid) throw new Error("Failed to spawn Chromium");
-      // Treat as a sandbox crash ONLY when the FATAL signature appeared on
-      // stderr AND the child actually exited (either event may land first). A
-      // bare early exit, or a stray signature on a healthy child, is NOT a
-      // sandbox crash.
-      let sawSandboxCrash = false;
-      let crashReject: ((e: Error) => void) | undefined;
-      const signalCrashIfConfirmed = (): void => {
-        if (sawSandboxCrash && (child.exitCode !== null || child.signalCode !== null)) {
-          crashReject?.(new SandboxStartupError());
-        }
-      };
-      child.stderr?.on("data", (chunk: Buffer) => {
-        const line = chunk.toString("utf8").trim();
-        if (!line) return;
-        if (SANDBOX_FAILURE_RE.test(line)) {
-          sawSandboxCrash = true;
-          signalCrashIfConfirmed();
-        }
-        process.stderr.write(`[chromium ${pid}] ${line}\n`);
-      });
-      child.on("exit", (code, signal) => {
-        // First-line breadcrumb — the record's child.on("exit") below also
-        // handles running-changed teardown.
-        if (code !== 0 && code !== null) {
-          process.stderr.write(
-            `[multizen] Chromium pid ${pid} exited code=${code} signal=${signal ?? "-"}\n`,
-          );
-        }
-        signalCrashIfConfirmed();
-      });
-
-      const session = new CdpSession({ port, engine });
-      // Readiness ladder within a fixed 15s budget, reusing this one session
-      // (connect() is idempotent): (1) /json/version answers, (2) /json/list has
-      // a page target, (3) connect()+attach succeeds. Raced against a confirmed
-      // sandbox-crash signal so a failed sandbox aborts at once instead of
-      // waiting out the full budget.
-      const crashSignal = new Promise<never>((_, reject) => {
-        crashReject = reject;
-      });
-      try {
-        await Promise.race([waitForCdpSessionReady(port, session, 15000), crashSignal]);
-      } catch (e) {
-        // Tear down the half-launched browser — this record isn't in
-        // `this.running` yet, so kill the spawned child directly. The caller
-        // stops the socks5 bridge (same order as close()).
-        await session.close().catch(() => {});
-        await killProcessTree(pid);
-        throw e instanceof Error ? e : new Error(String(e));
-      }
-      return { child, session };
-    };
 
     let child: ChildProcess;
     let session: CdpSession;
     try {
       try {
-        ({ child, session } = await attemptSpawn(noSandbox));
+        ({ child, session } = await spawnEngine(noSandbox));
       } catch (e) {
         if (e instanceof SandboxStartupError && !noSandbox) {
           console.warn("[multizen] sandbox failed to start; relaunching with --no-sandbox");
@@ -602,7 +545,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
           // SingletonLock before reusing the data dir, or the retry silently
           // exits on the dead lock.
           await cleanStaleSingletonLocks(browserDataDir).catch(() => {});
-          ({ child, session } = await attemptSpawn(true));
+          ({ child, session } = await spawnEngine(true));
         } else {
           throw e;
         }
@@ -638,7 +581,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // .locale leaks the host locale (a th-TH persona reports en-US). This
     // fills a gap rather than shadowing a patch. navigator.language(s) come
     // from --accept-lang and stay untouched.
-    await session
+    const cdpBootstrap = session
       .bootstrapTargets(async (send) => {
         try {
           await send("Emulation.setLocaleOverride", { locale: fp.locale });
@@ -684,6 +627,19 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       .catch((e: unknown) => {
         console.error("[multizen] CDP bootstrap failed:", e);
       });
+    // The record's exit teardown below isn't wired yet, so watch the child
+    // through this await: a browser that dies mid-bootstrap (or died just
+    // before it) would otherwise be recorded as running, with its bridge up,
+    // until the user pressed Stop. There is no await from here to that
+    // child.on("exit"), so no exit can slip between the two.
+    if (!(await awaitWhileAlive(child, cdpBootstrap))) {
+      await killProcessTree(pid);
+      await session.close().catch(() => {});
+      await stopBridgeForProfile(profileId).catch(() => {});
+      throw new Error(
+        `Chromium exited during startup (code=${child.exitCode ?? "-"} signal=${child.signalCode ?? "-"})`,
+      );
+    }
 
     // Wire the companion's "Add to MultiZen" channel for this profile — scoped
     // to Web Store pages only (the host polls a DOM attribute there, never on

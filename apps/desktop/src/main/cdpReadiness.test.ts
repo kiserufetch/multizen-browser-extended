@@ -114,3 +114,77 @@ test("retries connect() and succeeds on a later attempt (idempotent connect)", a
   await assert.doesNotReject(waitForCdpSessionReady(9304, session, 2000, deps));
   assert.equal(attempts, 3);
 });
+
+// ── abort (the caller gave up on this attempt) ───────────────────────────────
+
+test("stops polling and never connects once aborted, even if the port comes up", async () => {
+  // The caller aborts after the first probe; from then on the port answers, as
+  // it would for a browser relaunched on the same port.
+  const ac = new AbortController();
+  let first = true;
+  const { deps, fetches } = makeDeps({
+    version: () => {
+      if (!first) return ok({});
+      first = false;
+      ac.abort();
+      return notOk();
+    },
+    list: () => ok([{ type: "page" }]),
+  });
+  let connects = 0;
+  const session = {
+    connect: async () => {
+      connects += 1;
+    },
+  };
+  await assert.rejects(waitForCdpSessionReady(9305, session, 2000, deps, ac.signal), {
+    name: "AbortError",
+  });
+  assert.equal(fetches.length, 1, "no probe after the abort");
+  assert.equal(connects, 0, "the abandoned session is never connected");
+});
+
+test("a connect() still in flight when aborted does not report ready", async () => {
+  const ac = new AbortController();
+  const { deps } = makeDeps({
+    version: () => ok({}),
+    list: () => ok([{ type: "page" }]),
+  });
+  let connects = 0;
+  const session = {
+    connect: async () => {
+      connects += 1;
+      ac.abort(); // the caller gives up while this attach is under way
+    },
+  };
+  await assert.rejects(waitForCdpSessionReady(9306, session, 2000, deps, ac.signal), {
+    name: "AbortError",
+  });
+  assert.equal(connects, 1);
+});
+
+test("passes the abort signal to every fetch so an in-flight probe is cancelled", async () => {
+  const ac = new AbortController();
+  const signals: Array<AbortSignal | undefined> = [];
+  const deps: ReadinessDeps = {
+    fetch: async (url, init) => {
+      signals.push(init?.signal);
+      return url.includes("/json/list") ? ok([{ type: "page" }]) : ok({});
+    },
+    sleep: async () => {},
+  };
+  await waitForCdpSessionReady(9307, { connect: async () => {} }, 1000, deps, ac.signal);
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every((s) => s === ac.signal));
+});
+
+test("rejects without probing when already aborted", async () => {
+  const ac = new AbortController();
+  ac.abort();
+  const { deps, fetches } = makeDeps({ version: () => ok({}) });
+  await assert.rejects(
+    waitForCdpSessionReady(9308, { connect: async () => {} }, 1000, deps, ac.signal),
+    { name: "AbortError" },
+  );
+  assert.equal(fetches.length, 0);
+});
