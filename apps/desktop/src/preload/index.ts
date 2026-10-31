@@ -11,11 +11,13 @@ import type {
 import type { ActivityEvent, PendingHandoff } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
 import type {
+  BrowserEngine,
   ChromiumStatus,
   DeviceFamily,
   EngineUpdateStatus,
   ExtensionConfig,
   ProxyConfig,
+  SandboxStatus,
   UpdateStatus,
 } from "@multizen/types";
 
@@ -136,6 +138,27 @@ const api = {
       const listener = (_: unknown, status: ChromiumStatus): void => cb(status);
       ipcRenderer.on("chromium:status", listener);
       return () => ipcRenderer.off("chromium:status", listener);
+    },
+  },
+  sandbox: {
+    /** Live Linux sandbox status for the Settings row (hidden off affected
+     *  systems). */
+    status: (): Promise<SandboxStatus> => ipcRenderer.invoke("sandbox:status"),
+    /** Run the one-time secure setup (pkexec); resolves to the new status. */
+    setup: (): Promise<SandboxStatus> => ipcRenderer.invoke("sandbox:setup"),
+  },
+  engine: {
+    /** Per-engine download/verify status stream — drives the on-demand engine
+     *  download banner (currently Camoufox). */
+    onDownloadStatus: (
+      cb: (payload: { engine: BrowserEngine; status: ChromiumStatus }) => void,
+    ): (() => void) => {
+      const listener = (
+        _: unknown,
+        payload: { engine: BrowserEngine; status: ChromiumStatus },
+      ): void => cb(payload);
+      ipcRenderer.on("engine:status", listener);
+      return () => ipcRenderer.off("engine:status", listener);
     },
   },
   extensions: {

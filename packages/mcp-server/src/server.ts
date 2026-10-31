@@ -52,6 +52,17 @@ export interface BrowserDriver {
     sessionId?: string,
     opts?: { safe?: boolean },
   ): Promise<unknown>;
+  // ── Engine-neutral curated verbs. Chromium implements these via CDP; a
+  //    non-CDP engine (Firefox/Camoufox) implements them its own way. The MCP
+  //    tool layer calls these instead of composing CDP, so the curated tools
+  //    run on every engine. (wait_for_* stay composed on evaluateJs above.)
+  evaluateJs(profileId: ProfileId, expression: string, sessionId?: string): Promise<unknown>;
+  getCookies(profileId: ProfileId, urls?: string[], sessionId?: string): Promise<unknown>;
+  setCookies(profileId: ProfileId, cookies: unknown[], sessionId?: string): Promise<unknown>;
+  listTabs(profileId: ProfileId, sessionId?: string): Promise<unknown>;
+  newTab(profileId: ProfileId, url?: string, sessionId?: string): Promise<unknown>;
+  activateTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown>;
+  closeTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown>;
 }
 
 export interface MultizenMcpServerOptions {
@@ -512,14 +523,7 @@ async function dispatch(
     case "evaluate_js": {
       const { profile_id, expression, sessionId } = EvaluateJsSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      // Runtime.evaluate works without Runtime.enable — no domain is enabled.
-      return await browserDriver.cdpSend(
-        profile_id,
-        "Runtime.evaluate",
-        { expression, returnByValue: true },
-        sessionId,
-        { safe: true },
-      );
+      return await browserDriver.evaluateJs(profile_id, expression, sessionId);
     }
     case "wait_for_selector": {
       const { profile_id, selector, timeout_ms, sessionId } = WaitForSelectorSchema.parse(args);
@@ -527,13 +531,9 @@ async function dispatch(
       const expression = `!!document.querySelector(${JSON.stringify(selector)})`;
       const found = await pollUntil(
         async () => {
-          const res = (await browserDriver.cdpSend(
-            profile_id,
-            "Runtime.evaluate",
-            { expression, returnByValue: true },
-            sessionId,
-            { safe: true },
-          )) as { result?: { value?: unknown } };
+          const res = (await browserDriver.evaluateJs(profile_id, expression, sessionId)) as {
+            result?: { value?: unknown };
+          };
           return res?.result?.value === true;
         },
         timeout_ms ?? 30000,
@@ -544,59 +544,34 @@ async function dispatch(
       const { profile_id, urls, sessionId } = GetCookiesSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
       // Network.getCookies works without Network.enable.
-      const params = urls ? { urls } : {};
-      return await browserDriver.cdpSend(profile_id, "Network.getCookies", params, sessionId, {
-        safe: true,
-      });
+      return await browserDriver.getCookies(profile_id, urls, sessionId);
     }
     case "set_cookies": {
       const { profile_id, cookies, sessionId } = SetCookiesSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
       // Network.setCookies (plural) sets the whole batch in one call without
       // Network.enable.
-      return await browserDriver.cdpSend(profile_id, "Network.setCookies", { cookies }, sessionId, {
-        safe: true,
-      });
+      return await browserDriver.setCookies(profile_id, cookies, sessionId);
     }
     case "list_tabs": {
       const { profile_id, sessionId } = ListTabsSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.cdpSend(profile_id, "Target.getTargets", {}, sessionId, {
-        safe: true,
-      });
+      return await browserDriver.listTabs(profile_id, sessionId);
     }
     case "new_tab": {
       const { profile_id, url, sessionId } = NewTabSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.cdpSend(
-        profile_id,
-        "Target.createTarget",
-        { url: url ?? "about:blank" },
-        sessionId,
-        { safe: true },
-      );
+      return await browserDriver.newTab(profile_id, url, sessionId);
     }
     case "activate_tab": {
       const { profile_id, target_id, sessionId } = TabIdSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.cdpSend(
-        profile_id,
-        "Target.activateTarget",
-        { targetId: target_id },
-        sessionId,
-        { safe: true },
-      );
+      return await browserDriver.activateTab(profile_id, target_id, sessionId);
     }
     case "close_tab": {
       const { profile_id, target_id, sessionId } = TabIdSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.cdpSend(
-        profile_id,
-        "Target.closeTarget",
-        { targetId: target_id },
-        sessionId,
-        { safe: true },
-      );
+      return await browserDriver.closeTab(profile_id, target_id, sessionId);
     }
     case "wait_for_navigation":
     case "wait_for_load": {
@@ -608,12 +583,10 @@ async function dispatch(
       // purely through Runtime.evaluate (no domain enable).
       const loaded = await pollUntil(
         async () => {
-          const res = (await browserDriver.cdpSend(
+          const res = (await browserDriver.evaluateJs(
             profile_id,
-            "Runtime.evaluate",
-            { expression: "document.readyState", returnByValue: true },
+            "document.readyState",
             sessionId,
-            { safe: true },
           )) as { result?: { value?: unknown } };
           return res?.result?.value === "complete";
         },
@@ -680,26 +653,28 @@ async function dispatch(
         };
       })()`;
 
-      const res = (await browserDriver.cdpSend(
-        profile_id,
-        "Runtime.evaluate",
-        { expression, returnByValue: true },
-        undefined,
-        { safe: true },
-      )) as { result?: { value?: LiveFingerprintProbe }; exceptionDetails?: unknown };
+      const res = (await browserDriver.evaluateJs(profile_id, expression)) as {
+        result?: { value?: LiveFingerprintProbe };
+        exceptionDetails?: unknown;
+      };
 
       if (res.exceptionDetails || !res.result?.value) {
-        throw new Error("probe_fingerprint: Runtime.evaluate failed to collect live surfaces");
+        throw new Error("probe_fingerprint: evaluation failed to collect live surfaces");
       }
       const live = res.result.value;
+      // Camoufox generates its own Firefox UA / hardware / WebGL for the persona's
+      // OS and pins only screen + timezone, so comparing the rest of the stored
+      // Chrome-shaped fingerprint would report drift that isn't a defect.
+      const pinsChromeSurfaces = !/\bFirefox\//.test(live.userAgent);
       const drift: string[] = [];
-      if (live.userAgent !== expected.userAgent) drift.push("userAgent");
-      if (live.platform !== expected.platform) drift.push("platform");
+      if (pinsChromeSurfaces && live.userAgent !== expected.userAgent) drift.push("userAgent");
+      if (pinsChromeSurfaces && live.platform !== expected.platform) drift.push("platform");
       if (live.timezone !== expected.timezone) drift.push("timezone");
-      if (live.hardwareConcurrency !== expected.hardwareConcurrency) {
+      if (pinsChromeSurfaces && live.hardwareConcurrency !== expected.hardwareConcurrency) {
         drift.push("hardwareConcurrency");
       }
       if (
+        pinsChromeSurfaces &&
         live.deviceMemory !== null &&
         live.deviceMemory !== expected.deviceMemory
       ) {
@@ -712,14 +687,15 @@ async function dispatch(
         drift.push("screen");
       }
       if (
-        live.webgl.vendor !== expected.webgl.vendor ||
-        live.webgl.renderer !== expected.webgl.renderer
+        pinsChromeSurfaces &&
+        (live.webgl.vendor !== expected.webgl.vendor ||
+          live.webgl.renderer !== expected.webgl.renderer)
       ) {
         drift.push("webgl");
       }
       const expectedLangs = expected.languages.join(",");
       const liveLangs = (live.languages ?? []).join(",");
-      if (liveLangs && liveLangs !== expectedLangs) drift.push("languages");
+      if (pinsChromeSurfaces && liveLangs && liveLangs !== expectedLangs) drift.push("languages");
 
       return {
         ok: drift.length === 0,
@@ -738,7 +714,7 @@ async function dispatch(
         drift,
         notes: [
           "CloakBrowser: pinned fields should show drift=[]. canvasHash is informational (seed-driven noise).",
-          "CFT: host-bound surfaces (platform/WebGL/hwc) may drift — stock Chromium cannot fully spoof them.",
+          "Camoufox: only screen and timezone are compared — it generates its own Firefox UA/hardware/WebGL for the persona's OS.",
         ],
       };
     }
@@ -928,7 +904,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "click_ref",
     description:
-      "Click an element by its snapshot `ref` (e.g. 'e7') from the most recent extract. Prefer this over click: no CSS selector needed, and it scrolls the element into view. Refs are invalidated when the page changes — re-run extract and use the new refs.",
+      "Click an element by its snapshot `ref` (e.g. 'e7') from the most recent extract. Prefer this over click: no CSS selector needed, and it scrolls the element into view. Refs are invalidated when the page changes — re-run extract and use the new refs. CloakBrowser only: on Camoufox extract returns no refs, so use click.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "ref"],
@@ -941,7 +917,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "type_ref",
     description:
-      "Focus an element by its snapshot `ref` (via a real click) and type text into it. Prefer this over type. Refs come from extract and are invalidated when the page changes.",
+      "Focus an element by its snapshot `ref` (via a real click) and type text into it. Prefer this over type. Refs come from extract and are invalidated when the page changes. CloakBrowser only: on Camoufox extract returns no refs, so use type.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "ref", "text"],
@@ -1065,7 +1041,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "probe_fingerprint",
     description:
-      "Read back live fingerprint surfaces from a running profile (UA, platform, languages, hwc, deviceMemory, screen, WebGL, timezone, optional canvas hash) and compare to the stored profile.fingerprint. Returns { ok, live, expected, drift[] }. CloakBrowser: pinned fields should have empty drift. CFT: host-bound platform/WebGL/hwc may legitimately drift. Profile must be launched first.",
+      "Read back live fingerprint surfaces from a running profile (UA, platform, languages, hwc, deviceMemory, screen, WebGL, timezone, optional canvas hash) and compare to the stored profile.fingerprint. Returns { ok, live, expected, drift[] }. CloakBrowser: pinned fields should have empty drift. Camoufox: only screen and timezone are compared. Profile must be launched first.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],

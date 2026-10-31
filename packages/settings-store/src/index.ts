@@ -1,18 +1,19 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { BrowserEngine } from "@multizen/types";
+
+export type { BrowserEngine };
 
 /**
- * Which Chromium-derived binary the bootstrap downloads on first run.
- *   - "cft": Chrome for Testing — Google's official automation channel,
- *     same binary Puppeteer/Playwright use. Stable, reproducible, but
- *     no anti-detect patches (CFT branding, vanilla TLS fingerprint).
- *   - "cloakbrowser": CloakBrowser — Chromium with 50+ source-level
- *     stealth patches (canvas farbling, WebRTC, CDP traces removed).
- *     Drops detection rate against Cloudflare/DataDome/Akamai. Binary
- *     is "free to use, no redistribution" — we auto-download to user
- *     machine, never bundle. Slightly older Mac builds (145 vs 148 CFT).
+ * Linux sandbox secure-setup state.
+ * - "unset": never decided; re-evaluate live each launch.
+ * - "declined": user chose to launch without the sandbox; do not auto-prompt.
+ * - "unsupported": the AppArmor secure setup cannot be performed on this system
+ *   (reason surfaced once + kept visible in Settings); do not re-nag.
+ * Only meaningful on Linux. "active" is never stored — it is verified live
+ * against the OS at launch (a persisted flag must never be trusted).
  */
-export type BrowserEngine = "cft" | "cloakbrowser";
+export type LinuxSandboxState = "unset" | "declined" | "unsupported";
 
 export interface AppSettings {
   /** Theme — "dark" only for now, kept for forward compatibility */
@@ -30,9 +31,9 @@ export interface AppSettings {
    */
   autoUpdate: boolean;
   /**
-   * Automatically check for + stage new versions of the downloaded Chromium
-   * ENGINE (CloakBrowser / Chrome for Testing) in the background. A staged
-   * engine applies on the next profile launch; running browsers are never
+   * Automatically check for + stage new versions of the downloaded browser
+   * ENGINE (CloakBrowser / Camoufox) in the background. A staged engine
+   * applies on the next profile launch; running browsers are never
    * interrupted. Manual "Check for updates" works regardless of this flag.
    */
   engineAutoUpdate: boolean;
@@ -44,19 +45,26 @@ export interface AppSettings {
    * env var force-disables it regardless. See docs/TELEMETRY.md.
    */
   usageReporting: boolean;
+  /**
+   * Linux sandbox secure-setup state (see LinuxSandboxState). Only consulted on
+   * Linux kernels that restrict unprivileged user namespaces; ignored elsewhere.
+   */
+  linuxSandboxState: LinuxSandboxState;
 }
 
 const DEFAULTS: AppSettings = {
   theme: "dark",
   mcpHttpEnabled: true,
   mcpHttpPort: 7777,
-  // Prefer CloakBrowser as the primary runtime. Chrome for Testing stays
-  // available as a compatibility fallback from Settings.
+  // CloakBrowser is the default engine for newly created profiles.
   browserEngine: "cloakbrowser",
   autoUpdate: true,
   engineAutoUpdate: true,
   // Opt-in. Never phone home unless the user explicitly turns this on.
   usageReporting: false,
+  // Re-evaluated live on each Linux launch until the user decides or the system
+  // is found unable to run the secure setup.
+  linuxSandboxState: "unset",
 };
 
 export class SettingsStore {
@@ -82,7 +90,7 @@ export class SettingsStore {
     }
 
     const merged: AppSettings = { ...DEFAULTS, ...raw };
-    if (merged.browserEngine !== "cft" && merged.browserEngine !== "cloakbrowser") {
+    if (merged.browserEngine !== "cloakbrowser" && merged.browserEngine !== "camoufox") {
       merged.browserEngine = DEFAULTS.browserEngine;
     }
     if (typeof merged.autoUpdate !== "boolean") {
@@ -93,6 +101,13 @@ export class SettingsStore {
     }
     if (typeof merged.usageReporting !== "boolean") {
       merged.usageReporting = DEFAULTS.usageReporting;
+    }
+    if (
+      merged.linuxSandboxState !== "unset" &&
+      merged.linuxSandboxState !== "declined" &&
+      merged.linuxSandboxState !== "unsupported"
+    ) {
+      merged.linuxSandboxState = DEFAULTS.linuxSandboxState;
     }
     this.cache = merged;
     return merged;

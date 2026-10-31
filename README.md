@@ -7,8 +7,7 @@
 
   <p>
     Local Chromium profiles with their own cookies, fingerprint, and proxy.<br/>
-    Drive them through MCP from Cursor, Claude Desktop, or any MCP client.<br/>
-    Step in manually whenever the agent hits a CAPTCHA or 2FA prompt.
+    Drive them through MCP from Cursor, Claude Desktop, or any MCP client.
   </p>
 
   <p>
@@ -28,6 +27,19 @@
     <a href="https://discord.gg/pd6MhzPbJ3">Discord</a>
   </p>
 
+  <p>
+    <sub>PROXY PARTNER</sub>
+    <br/>
+    <a href="https://dashboard.thordata.com/register?invitation_code=E8XWP3FP">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/thordata-logo-dark.svg" />
+        <img src=".github/assets/thordata-logo.svg" alt="Thordata" height="24" />
+      </picture>
+    </a>
+    <br/>
+    <sub>Residential + ISP proxies · 10% off with <code>MULTIZEN10</code></sub>
+  </p>
+
   <br/>
 
   <img src=".github/assets/profiles-list.jpg" alt="MultiZen profile library with platform, proxy country, and AI-activity indicators" width="100%" />
@@ -40,7 +52,7 @@
 This repository is a fork of [`multizenteam/multizen-browser`](https://github.com/multizenteam/multizen-browser).
 
 <!-- FORK-BASE: update this version whenever you pull changes from upstream -->
-**Based on upstream release:** `v0.3.1` (+ upstream `master` through `b0bc604`)
+**Based on upstream release:** `v0.4.2` (upstream `master` through `794bbf4`)
 
 **Fork app version:** `0.9.0` (independent semver from upstream).
 
@@ -51,13 +63,13 @@ Fork-specific work (see [`CHANGELOG.md`](CHANGELOG.md)) includes:
 - MCP extras: always-on `cdp_send` / `cdp_send_no_safety`, `probe_fingerprint`, session-stable multi-client HTTP transport
 - Release CI typecheck gate before the multi-OS build matrix
 
-Sync notes: [`docs/upstream-merge-2026-10-06.md`](docs/upstream-merge-2026-10-06.md) (latest), [`docs/upstream-merge-v0.3.1.md`](docs/upstream-merge-v0.3.1.md), [`docs/upstream-merge-v0.3.0.md`](docs/upstream-merge-v0.3.0.md). Whenever you merge again from the original repository, update the **Based on upstream release** line above.
+Sync notes: [`docs/upstream-merge-v0.4.2.md`](docs/upstream-merge-v0.4.2.md) (latest), [`docs/upstream-merge-2026-10-06.md`](docs/upstream-merge-2026-10-06.md), [`docs/upstream-merge-v0.3.1.md`](docs/upstream-merge-v0.3.1.md), [`docs/upstream-merge-v0.3.0.md`](docs/upstream-merge-v0.3.0.md). Whenever you merge again from the original repository, update the **Based on upstream release** line above.
 
 ## What it is
 
-MultiZen is a desktop app that runs a library of isolated Chromium browser profiles. Each profile has its own cookies, login state, fingerprint, and proxy. A local MCP server on `127.0.0.1:7777` exposes browser-drive tools (navigate, click, type, extract, screenshot) to any MCP client.
+MultiZen is a desktop app that runs a library of isolated browser profiles. Each profile has its own cookies, login state, fingerprint, and proxy, and runs on your choice of engine — CloakBrowser (Chromium) or Camoufox (Firefox). A local MCP server on `127.0.0.1:7777` exposes browser-drive tools (navigate, click, type, extract, screenshot, evaluate JS, cookies, tabs, waits) to any MCP client.
 
-The result: your AI agent in Cursor or Claude Desktop can complete real authenticated workflows. When it hits a 2FA prompt or CAPTCHA, you step in through the same Chromium window. When you are done, the agent picks up where it left off. Cookies and session state survive between launches.
+The result: your AI agent in Cursor or Claude Desktop can complete real authenticated workflows. When it hits a 2FA prompt or CAPTCHA, you step in through the same browser window. When you are done, the agent picks up where it left off. Cookies and session state survive between launches, so logins and context carry over across AI sessions.
 
 ## Install
 
@@ -84,7 +96,11 @@ chmod +x MultiZen-linux-x86_64.AppImage
 ./MultiZen-linux-x86_64.AppImage
 ```
 
-Some distros need `libfuse2` (`apt install libfuse2t64` on Ubuntu 24.04+). If Chromium's sandbox refuses to start, add `--no-sandbox`.
+Some distros need `libfuse2` (`apt install libfuse2t64` on Ubuntu 24.04+).
+
+On Ubuntu 24.04+ (and other kernels that restrict unprivileged user namespaces) the browser's sandbox is blocked by default. On the first affected launch MultiZen offers a one-time **secure setup**: it installs a small AppArmor profile that re-permits the sandbox for just this browser (one password prompt). The sandbox then stays on with no warning banner. You can also run or re-run it later from Settings. If you decline or it can't run, MultiZen launches the browser without the sandbox so it still works.
+
+Prefer to do it by hand? Settings shows the exact command; it writes `/etc/apparmor.d/multizen-cloakbrowser` and loads it with `apparmor_parser`. To force sandbox-off regardless, launch the AppImage with `--no-sandbox`.
 
 ### Windows
 
@@ -129,9 +145,10 @@ Each profile is a real Chromium window with persistent state on disk. The MCP se
 |  | What it does |
 | --- | --- |
 | **MCP server** | Native localhost endpoint. Works with Cursor, Claude Desktop, Cline, Continue, anything else that speaks MCP. |
+| **Per-profile engine** | Choose each profile's browser: **CloakBrowser** (Chromium) or **Camoufox** (Firefox-based, for a genuinely non-Chrome TLS/JS fingerprint). |
 | **Anti-detect Chromium** | Source-patched browser engine (CloakBrowser). Canvas, WebGL, and audio spoofed at C++ level instead of JS injection; WebRTC IP leak-prevented via Chromium's proxied-UDP policy. |
 | **Persistent state** | Cookies, login, IndexedDB, localStorage stay per-profile across launches and across AI sessions. |
-| **Human handoff** | AI gets stuck on 2FA or CAPTCHA, you take over in the same Chromium window, the agent continues when you are done. |
+| **Human handoff** | AI gets stuck on 2FA or CAPTCHA, you take over in the same browser window, the agent continues when you are done. |
 | **Cross-platform persona** | Run a Windows persona on a Mac host (or vice versa). C++ patches keep the fingerprint coherent across V8, Blink, and CSS feature signatures. |
 | **Proxy + persona alignment** | Per-profile HTTP or SOCKS5 proxy with a local SOCKS5 bridge so DNS resolution stays remote. Auto-aligns timezone, locale, and `navigator.geolocation` to the proxy egress IP. |
 | **Self-hosted** | Profiles live on your disk in plain SQLite plus Chromium user-data-dir format. No account, no license server; anonymous telemetry is opt-in and off by default. |
@@ -192,7 +209,7 @@ http_headers = { Authorization = "Bearer <token>" }
 }
 ```
 
-Restart your client. The agent now has tools: `list_profiles`, `create_profile`, `update_profile`, `delete_profile`, `launch_profile`, `close_profile`, `navigate`, `click`, `type`, `extract`, `screenshot`, `list_fingerprint_options`. Profile management is full CRUD: `create_profile` / `update_profile` accept an optional `proxy` and high-level `fingerprint` (device, locale, timezone, screen), and `list_fingerprint_options` enumerates the valid device families and locale groups.
+Restart your client. The agent now has the full tool set — profile management (`list_profiles`, `create_profile`, `update_profile`, `delete_profile`, `launch_profile`, `close_profile`, `list_fingerprint_options`), page driving (`navigate`, `click`, `type`, `click_ref`, `type_ref`, `extract`, `screenshot`, `evaluate_js`), tabs (`list_tabs`, `new_tab`, `activate_tab`, `close_tab`), cookies (`get_cookies`, `set_cookies`), waits (`wait_for_load`, `wait_for_navigation`, `wait_for_selector`), human handoff (`request_human`, `wait_for_human`, `resume_human`), and diagnostics / raw access (`probe_fingerprint`, `cdp_send`, `cdp_send_no_safety`). Profile management is full CRUD: `create_profile` / `update_profile` accept an optional `proxy` and high-level `fingerprint` (device, locale, timezone, screen), and `list_fingerprint_options` enumerates the valid device families and locale groups. `click_ref`, `type_ref`, `cdp_send` and `cdp_send_no_safety` are CloakBrowser-only, because Camoufox has no CDP.
 
 ## Stack
 
@@ -203,8 +220,8 @@ Restart your client. The agent now has tools: `list_profiles`, `create_profile`,
 | Main process | TypeScript ESM, electron-vite, native MCP SDK |
 | MCP server | `@modelcontextprotocol/sdk` over Streamable HTTP + SSE |
 | Profile storage | better-sqlite3 with idempotent migrations |
-| Browser driver | chrome-remote-interface over CDP |
-| Browser engine | CloakBrowser (open-source patched Chromium) |
+| Browser driver | chrome-remote-interface over CDP (Chromium); playwright-core (Firefox) |
+| Browser engine | CloakBrowser (patched Chromium) or Camoufox (Firefox), per profile |
 | Build | Yarn 4 workspaces, electron-vite, electron-builder |
 | CI | GitHub Actions matrix on macOS, Windows, Linux |
 
@@ -241,7 +258,6 @@ packages/
 
 Things landing in upcoming releases.
 
-- **multizen-pro patched Chromium**: TLS JA3/JA4 spoof, HTTP/2 SETTINGS fingerprint, native Sec-CH-UA-* overrides. Bumps the anti-detect ceiling well past 90/100 on fingerprint-scan.
 - **Behavioral injection**: humanized mouse paths, keystroke timing, scroll jitter applied at the CDP input layer.
 - **Per-profile cloud sync** (opt-in, end-to-end encrypted): so the same profile follows you across laptops.
 - **Team workspaces**: shared profile pool with audit log.
@@ -262,12 +278,6 @@ Things landing in upcoming releases.
 ## Acceptable use
 
 Building a multi-account browser is dual-use. We support QA testing across roles and regions, agency workflows you are authorized to run, market research, multi-marketplace e-commerce ops, AI-driven sales engineering, and personal accounts you legitimately own. We do not support platform ToS violations, mass account farming, ban evasion, or fraud. Full policy at [getmultizen.com/acceptable-use](https://getmultizen.com/acceptable-use).
-
-## Status and history
-
-`v0.2.x` is the current AI-native MCP rewrite (Electron + React + TS + patched Chromium engine).
-
-The legacy `v0.1.1` codebase (Electron + Vue 2 multi-session browser, no MCP) is preserved on the [`archive/vue-v1-legacy`](https://github.com/multizenteam/multizen-browser/tree/archive/vue-v1-legacy) branch and tag [`v0.1.1-legacy-final`](https://github.com/multizenteam/multizen-browser/releases/tag/v0.1.1-legacy-final).
 
 ## License
 

@@ -97,6 +97,43 @@ class SpyDriver implements BrowserDriver {
     this.calls.push({ profileId, method, params, sessionId, opts });
     return this.respond(method, params);
   }
+  // The curated verbs compose CDP exactly as ChromiumBrowserDriver does, so the
+  // dispatch tests below keep pinning the method + params that reach the browser.
+  async evaluateJs(profileId: ProfileId, expression: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(
+      profileId,
+      "Runtime.evaluate",
+      { expression, returnByValue: true },
+      sessionId,
+      { safe: true },
+    );
+  }
+  async getCookies(profileId: ProfileId, urls?: string[], sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Network.getCookies", urls ? { urls } : {}, sessionId, {
+      safe: true,
+    });
+  }
+  async setCookies(profileId: ProfileId, cookies: unknown[], sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Network.setCookies", { cookies }, sessionId, { safe: true });
+  }
+  async listTabs(profileId: ProfileId, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.getTargets", {}, sessionId, { safe: true });
+  }
+  async newTab(profileId: ProfileId, url?: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(
+      profileId,
+      "Target.createTarget",
+      { url: url ?? "about:blank" },
+      sessionId,
+      { safe: true },
+    );
+  }
+  async activateTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.activateTarget", { targetId }, sessionId, { safe: true });
+  }
+  async closeTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.closeTarget", { targetId }, sessionId, { safe: true });
+  }
 }
 
 async function connect(driver: BrowserDriver): Promise<Client> {
