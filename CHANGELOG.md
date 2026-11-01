@@ -19,7 +19,9 @@ listed below. Measurements, causes, and what still needs engine changes:
   confidence moderate, grade C) and `probe_fingerprint` reported `webgl` drift. Mesa personas
   showed vendor `Mesa` and a bare renderer, which Chrome never reports. Every Linux pair is now
   `Google Inc. (<GL vendor>)` / `ANGLE (<GL vendor>, <renderer>, OpenGL …)`, which the engine
-  passes through unchanged (CreepJS: high, grade A).
+  passes through unchanged (CreepJS: high, grade A). An Intel GPU is then clean to CreepJS, but for
+  NVIDIA and AMD CloakBrowser itself reports WebGL limits CreepJS does not know, whatever the string:
+  `suspicious gpu` and `suspicious capabilities` stay.
 - **Camoufox profiles read the same at every launch, and their window matches the persona.** It
   used to draw new threads, GPU, available screen, window size, canvas, audio and font-metric
   noise at every launch (138 differences between two launches of one profile, now 12), with
@@ -54,6 +56,21 @@ listed below. Measurements, causes, and what still needs engine changes:
 - **A Camoufox profile's fingerprint changes once**, at its first launch on this version, and then
   stays put. It was new at every launch before.
 - `probe_fingerprint` also compares `hardwareConcurrency` on Camoufox, which now pins it.
+- **The Docker image starts a sound server.** `docker/session.sh` runs PipeWire with a silent
+  speaker and microphone (`docker/pipewire.conf`) before the server. Without one, CloakBrowser
+  played into Chromium's fake output (`AudioContext.baseLatency` 441/48000) and showed a made-up
+  device list with two `audiooutput`, and Camoufox had no device at all: 44100 Hz, 0 channels, no
+  media devices. Now both report 48 kHz stereo and a microphone. PipeWire rather than PulseAudio,
+  which pages can't tell apart here but adds 200 MB to the image instead of 20.
+- **Linux desktop fonts in the image:** Ubuntu, Cantarell, FreeSans, and Carlito and Caladea,
+  which Chromium takes for Calibri and Cambria. A Linux persona now has 11 of the probe's 15 Linux
+  fonts instead of 8, a Windows persona 5 of its 59 instead of 3. `fonts-ubuntu` is why the image
+  enables Debian's non-free area. Still no Microsoft fonts. Another 20 MB.
+- **A Linux persona has its panel on CloakBrowser:** the persona's available screen
+  (`availScreen`, screen height minus 30) reaches the engine as `--fingerprint-taskbar-height`.
+  `screen.availHeight` and `outerHeight` used to equal the screen's, which CreepJS counts twice
+  toward "like headless". This applies to existing Linux profiles on CloakBrowser too: their
+  `availHeight` is 30 px lower from the next launch. Windows personas are unchanged.
 
 ## [0.11.0] - 2026-11-01
 

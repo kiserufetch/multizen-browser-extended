@@ -720,6 +720,10 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     hardwareConcurrency: [6, 8, 12, 16],
     deviceMemory: [8, 16, 32],
   },
+  // Measured on CloakBrowser 146.0.7680.177.5 (docs/detection-baselines): an Intel GPU here is clean
+  // to CreepJS, but for any NVIDIA or AMD string, this form or another, the engine reports WebGL limits
+  // (MAX_TEXTURE_SIZE 32768) that CreepJS doesn't know: "suspicious gpu" and "suspicious capabilities".
+  // A string from its own Linux pool, all NVIDIA, gets the same two.
   {
     family: "linux-laptop-intel",
     label: "Linux laptop (Intel Iris Xe)",
