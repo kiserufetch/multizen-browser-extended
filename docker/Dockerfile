@@ -6,17 +6,30 @@
 FROM node:22-bookworm-slim AS runtime-base
 # xvfb and the libraries are Chromium's, the second group Firefox's. Then: pgrep for the
 # process tree, unshare for the sandbox preflight, tar for the engine archive, and fonts
-# so a persona's text doesn't fall back to nothing.
-RUN apt-get update \
+# so a persona's text doesn't fall back to nothing. The pipewire group is the sound server
+# session.sh starts, and libpulse0 is how both browsers talk to it: what pages read of audio
+# and media devices comes from there (docs/detection-baselines). pulseaudio itself would
+# bring 160 MB of codecs with it.
+# The second line of fonts is a Linux desktop's: Ubuntu, Cantarell, FreeSans, and Carlito and
+# Caladea, which Chromium takes for Calibri and Cambria by their metrics, as with LibreOffice.
+# All free to redistribute; fonts-ubuntu (Ubuntu Font Licence 1.0) is why non-free is on.
+# Not fonts-noto-core or fonts-croscore: CreepJS reads their faces as macOS 12-13 and as Linux
+# on a Windows persona. No Microsoft fonts: they aren't ours to ship.
+RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
+  && apt-get update \
   && apt-get install -y --no-install-recommends \
     xvfb \
     libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
     libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 libxshmfence1 \
     libdbus-1-3 libglib2.0-0 libx11-xcb1 libxcb1 libxext6 libxi6 libxrender1 libxtst6 libgtk-3-0 \
     libdbus-glib-1-2 libxt6 libpci3 libegl1 libgl1 libgles2 libgl1-mesa-dri \
+    pipewire pipewire-pulse wireplumber dbus-daemon libpulse0 \
     procps util-linux tar tini ca-certificates \
     fonts-liberation fonts-noto-color-emoji fonts-noto-cjk fonts-dejavu-core \
+    fonts-ubuntu fonts-cantarell fonts-freefont-ttf fonts-crosextra-carlito fonts-crosextra-caladea \
   && rm -rf /var/lib/apt/lists/*
+COPY docker/pipewire.conf /etc/pipewire/pipewire.conf.d/multizen.conf
+COPY --chmod=0755 docker/session.sh /usr/local/bin/multizen-session
 
 FROM node:22-bookworm-slim AS build
 # Only for better-sqlite3, when no prebuilt binary fits.
@@ -62,7 +75,7 @@ RUN mkdir -p /data /tmp/.X11-unix /repo/docs/detection-baselines /repo/scripts/d
 USER node
 VOLUME /data
 WORKDIR /repo/scripts/detection-baseline
-ENTRYPOINT ["tini", "--", "node", "--import", "tsx", "run.ts"]
+ENTRYPOINT ["tini", "--", "multizen-session", "node", "--import", "tsx", "run.ts"]
 
 FROM runtime-base
 # With no UTF-8 locale a browser can't open a file whose name isn't ASCII: upload_file and a
@@ -83,5 +96,5 @@ RUN mkdir -p /data /tmp/.X11-unix \
 USER node
 VOLUME /data
 EXPOSE 7777
-ENTRYPOINT ["tini", "--", "node", "/app/dist/cli.js"]
+ENTRYPOINT ["tini", "--", "multizen-session", "node", "/app/dist/cli.js"]
 CMD ["serve"]

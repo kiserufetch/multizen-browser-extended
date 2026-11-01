@@ -1,0 +1,2 @@
+# Run inside Linux containers: CRLF from a Windows checkout would break the shebang.
+docker/*.sh text eol=lf
