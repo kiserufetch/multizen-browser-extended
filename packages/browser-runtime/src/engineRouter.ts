@@ -87,7 +87,7 @@ export interface EngineRouterOptions {
   displayModeDefault?: DisplayModeSetting;
   /** A server's --headless: the first word on a mode. */
   forcedDisplayMode?: DisplayMode;
-  /** The global setting, read at each launch so a change applies without a restart. */
+  /** The global setting, asked for at each launch. A desktop's reads the live value; a server's is its value at start. */
   getDefaultDisplayMode?: () => DisplayMode | undefined;
   /** What the machine offers. Default: this process's. */
   displayEnvironment?: {
@@ -514,6 +514,7 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
       this.chromiumDriver.closeAll(opts),
       this.firefoxDriver ? this.firefoxDriver.closeAll() : undefined,
       ...launches.map((launch) => launch.promise.catch(() => {})),
+      ...[...this.closing.values()].map((closing) => closing.catch(() => {})),
     ]);
     this.bindings.clear();
   }

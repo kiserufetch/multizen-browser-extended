@@ -15,15 +15,19 @@ import {
 import { dataDirPathWarning, dataPaths, isWildcardHost, type ServerConfig } from "../config.ts";
 import { startHandoffWebhook } from "../handoffWebhook.ts";
 import { log } from "../log.ts";
-import { buildRuntime, enginesInUse, SERVER_VERSION, takeOverFromPreviousRun } from "../runtime.ts";
+import {
+  buildRuntime,
+  enginesInUse,
+  RUNTIME_CLOSE_BUDGET_MS,
+  SERVER_VERSION,
+  takeOverFromPreviousRun,
+} from "../runtime.ts";
 import { preflightProcess, preflightUserNamespaces } from "../sandboxPreflight.ts";
 import { ensurePrivateFile } from "../secretKey.ts";
 import type { ShutdownManager } from "../shutdown.ts";
 
 /** HTTP stop closes sessions and sockets; it has no slow path of its own. */
 const HTTP_STOP_BUDGET_MS = 3_000;
-/** Covers closeAll's own budget, the bridges and the database. */
-const RUNTIME_CLOSE_BUDGET_MS = 12_000;
 
 /** No usable token and no `--no-auth`: the server must not start. */
 export class NoOwnerTokenError extends Error {}
@@ -135,6 +139,9 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
       ? { tls: { cert: readFileSync(config.tls.certPath), key: readFileSync(config.tls.keyPath) } }
       : {}),
     sessionPolicy: { idleTtlMs: config.sessionIdleTtlMs, maxSessions: config.maxSessions },
+    ...(config.leaseOnSessionClose === "release"
+      ? { onSessionClosed: (sessionId: string) => runtime.shared.leases.dropSession(sessionId) }
+      : {}),
     publicHealthz: true,
     publicRoutes: [panel],
     authedRoutes: [createDownloadRoute({ driver: runtime.driver, profiles: runtime.profileManager })],

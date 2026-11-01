@@ -4,7 +4,13 @@ import assert from "node:assert/strict";
 
 import { MultizenError } from "@multizen/types";
 
-import { CdpSession, InputNotDeliveredError, randomRefBase, type TargetSender } from "./CdpSession.js";
+import {
+  CdpSession,
+  InputNotDeliveredError,
+  randomRefBase,
+  type DialogScope,
+  type TargetSender,
+} from "./CdpSession.js";
 import { describeNamedKey, parseChord } from "./keyboard.js";
 import { TargetRegistry } from "./targetRegistry.js";
 import type { AccessibilityNode } from "./types.js";
@@ -138,7 +144,12 @@ const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve,
 /** A session through the real connect(), on the fake instead of a socket. */
 function newSession(
   browser: FakeBrowser,
-  opts: { platform?: "macos"; operationDeadlineMs?: number; refBase?: number } = {},
+  opts: {
+    platform?: "macos";
+    operationDeadlineMs?: number;
+    refBase?: number;
+    dialogScope?: DialogScope;
+  } = {},
 ): CdpSession {
   const s = new CdpSession({ port: 0, refBase: 0, ...opts });
   (s as unknown as { openBrowserSocket: () => Promise<unknown> }).openBrowserSocket = async () =>
@@ -146,14 +157,17 @@ function newSession(
   return s;
 }
 
-async function connected(pages: string[] = ["P"]): Promise<{ b: FakeBrowser; s: CdpSession }> {
+async function connected(
+  pages: string[] = ["P"],
+  opts: Parameters<typeof newSession>[1] = {},
+): Promise<{ b: FakeBrowser; s: CdpSession }> {
   const b = new FakeBrowser();
   b.handlers.set("Target.setAutoAttach", (_p, sid) => {
     // The browser reports its existing pages when asked to auto-attach.
     if (!sid) for (const id of pages) b.attachPage(id, `S-${id}`);
     return {};
   });
-  const s = newSession(b);
+  const s = newSession(b, opts);
   await s.connect();
   return { b, s };
 }
@@ -438,6 +452,8 @@ for (const [type, parent] of [
       b.calls("Target.detachFromTarget").map((c) => c.params.sessionId),
       [`S-${type}`],
     );
+    // Through the session it came from. The browser's own says "No session with given id".
+    assert.equal(b.calls("Target.detachFromTarget")[0]?.sessionId, parent);
     assert.deepEqual(b.methods(`S-${type}`).filter((m) => m.endsWith(".enable")), [], "no domain enabled on it");
     const tabs = (await s.listTabs()) as { tabs?: Array<{ targetId: string }> };
     assert.ok(!(tabs.tabs ?? []).some((t) => t.targetId === `T-${type}`));
@@ -594,8 +610,10 @@ test("no tab left: a verb says so instead of hanging", async () => {
 // ── refs ─────────────────────────────────────────────────────────────────────
 
 /** One tab with a same-process iframe and an OOPIF holding a nested OOPIF. */
-async function framedPage(): Promise<{ b: FakeBrowser; s: CdpSession; names: Map<string, string> }> {
-  const { b, s } = await connected(["A"]);
+async function framedPage(
+  opts: Parameters<typeof newSession>[1] = {},
+): Promise<{ b: FakeBrowser; s: CdpSession; names: Map<string, string> }> {
+  const { b, s } = await connected(["A"], opts);
   b.attachIframe("OOPIF", "S-OOP", "S-A");
   await settle();
   b.attachIframe("NESTED", "S-NEST", "S-OOP");
@@ -1040,6 +1058,314 @@ test("a dialog opened mid-typing stops the typing and says DIALOG_OPEN", async (
   });
   await assertMultizenCode(s.typeRef(names.get("Main button")!, "abc"), "DIALOG_OPEN");
   assert.equal(keys, 1);
+});
+
+// ── whose dialogs: agent-tabs, a desktop's headed window ─────────────────────
+
+const agentTabs = { dialogScope: "agent-tabs" } as const;
+
+test("all-tabs, the default: the policy answers on a tab nobody here has touched", async () => {
+  const { b } = await connected(["A"]);
+  b.attachPage("B", "S-B");
+  await settle();
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "m" }, "S-B");
+  await settle();
+  assert.deepEqual(answers(b), [{ accept: false }]);
+});
+
+test("agent-tabs: a person's tab keeps its dialog, with Page enabled and no answer", async () => {
+  const { b, s } = await connected(["A"], agentTabs);
+  b.attachPage("B", "S-B");
+  await settle();
+  assert.ok(b.methods("S-B").includes("Page.enable"));
+  for (const type of ["alert", "confirm", "prompt", "beforeunload"]) {
+    b.event("Page.javascriptDialogOpening", { type, message: "m" }, "S-B");
+    b.event("Page.javascriptDialogClosed", { result: true, userInput: "" }, "S-B");
+  }
+  await settle();
+  assert.deepEqual(answers(b), [], "left to the browser's own dialog, and the person");
+  assert.equal(s.hasOpenDialog(), false);
+  assert.deepEqual(s.listDialogs(), [], "not an agent's to see");
+});
+
+test("agent-tabs: a manual policy doesn't make a person's dialog an agent's either", async () => {
+  const { b, s } = await connected(["A"], agentTabs);
+  await s.setDialogPolicy({ mode: "manual" });
+  b.attachPage("B", "S-B");
+  await settle();
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "m" }, "S-B");
+  assert.deepEqual(s.listDialogs(), []);
+  await s.setDialogPolicy({ mode: "auto" });
+  assert.deepEqual(answers(b), []);
+});
+
+test("agent-tabs: the root tab gets the policy, as it always has", async () => {
+  const { b } = await connected(["A"], agentTabs);
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "m" }, "S-A");
+  await settle();
+  assert.deepEqual(answers(b), [{ accept: false }]);
+});
+
+test("agent-tabs: a dialog already up on the root tab when the session connects gets the policy", async () => {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) {
+      b.attachPage("A", "S-A");
+      b.event("Page.javascriptDialogOpening", { type: "alert", message: "m" }, "S-A");
+    }
+    return {};
+  });
+  const s = newSession(b, agentTabs);
+  await s.connect();
+  await settle();
+  assert.deepEqual(answers(b), [{ accept: true }]);
+});
+
+for (const [how, target] of [
+  ["activate_tab", (s: CdpSession) => s.activateTab("B")],
+  ["cdp_send on its session", (s: CdpSession) => s.cdpSend("Page.bringToFront", {}, "S-B")],
+  ["evaluate_js on its session", (s: CdpSession) => s.evaluateJs("1", "S-B")],
+] as const) {
+  test(`agent-tabs: ${how} makes it an agent's tab, for the policy from then on`, async () => {
+    const { b, s } = await connected(["A"], agentTabs);
+    b.attachPage("B", "S-B");
+    await settle();
+    await target(s);
+    b.event("Page.javascriptDialogOpening", { type: "confirm", message: "m" }, "S-B");
+    await settle();
+    assert.deepEqual(answers(b), [{ accept: false }]);
+  });
+}
+
+test("agent-tabs: new_tab's tab is the agent's from the start", async () => {
+  const { b, s } = await connected(["A"], agentTabs);
+  b.handlers.set("Target.createTarget", () => {
+    b.attachPage("NEW", "S-NEW");
+    return { targetId: "NEW" };
+  });
+  await s.newTab("http://t/");
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "m" }, "S-NEW");
+  await settle();
+  assert.deepEqual(answers(b), [{ accept: false }]);
+});
+
+test("agent-tabs: a person's tab that page verbs fall to is the agent's only once one runs", async () => {
+  const { b, s } = await connected(["A"], agentTabs);
+  b.attachPage("B", "S-B");
+  await settle();
+  b.event("Target.targetDestroyed", { targetId: "A" });
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "first" }, "S-B");
+  b.event("Page.javascriptDialogClosed", { result: true, userInput: "" }, "S-B");
+  await settle();
+  assert.deepEqual(answers(b), [], "the agent has done nothing on it yet");
+  await s.snapshot().catch(() => {});
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "second" }, "S-B");
+  await settle();
+  assert.deepEqual(answers(b), [{ accept: false }]);
+});
+
+test("agent-tabs: a dialog a person left open goes to the policy when an agent comes to that tab", async () => {
+  const { b, s } = await connected(["A"], agentTabs);
+  b.attachPage("B", "S-B");
+  await settle();
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "m" }, "S-B");
+  await settle();
+  assert.deepEqual(answers(b), []);
+  await s.activateTab("B");
+  await settle();
+  assert.deepEqual(answers(b), [{ accept: false }]);
+});
+
+test("agent-tabs: in manual mode that dialog is one the agent's verbs report, and handle_dialog answers", async () => {
+  const { b, s } = await connected(["A"], agentTabs);
+  await s.setDialogPolicy({ mode: "manual" });
+  b.attachPage("B", "S-B");
+  await settle();
+  b.event("Page.javascriptDialogOpening", { type: "prompt", message: "Name?" }, "S-B");
+  await s.activateTab("B");
+  assert.equal(s.listDialogs()[0]?.message, "Name?");
+  await assertMultizenCode(s.screenshot(), "DIALOG_OPEN");
+  await s.handleDialog({ action: "accept", promptText: "Ann" });
+  assert.deepEqual(answers(b), [{ accept: true, promptText: "Ann" }]);
+});
+
+test("agent-tabs: a dialog the person already answered is nothing to the agent coming later", async () => {
+  const { b, s } = await connected(["A"], agentTabs);
+  b.attachPage("B", "S-B");
+  await settle();
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "m" }, "S-B");
+  b.event("Page.javascriptDialogClosed", { result: false, userInput: "" }, "S-B");
+  await s.activateTab("B");
+  await settle();
+  assert.deepEqual(answers(b), []);
+});
+
+test("agent-tabs: a person's tab that closes with its dialog up leaves nothing behind", async () => {
+  const { b, s } = await connected(["A"], agentTabs);
+  b.attachPage("B", "S-B");
+  await settle();
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "m" }, "S-B");
+  b.event("Target.targetDestroyed", { targetId: "B" });
+  b.attachPage("B", "S-B");
+  await settle();
+  await s.activateTab("B");
+  await settle();
+  assert.deepEqual(answers(b), []);
+});
+
+test("agent-tabs: a panel handoff keeps every tab's dialog for the person at the panel", async () => {
+  const { b, s } = await connected(["A"], agentTabs);
+  b.attachPage("B", "S-B");
+  await settle();
+  await s.setHandoffMode(true);
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "m" }, "S-B");
+  assert.equal(s.listDialogs().length, 1);
+});
+
+// ── cleanup after a failed operation ─────────────────────────────────────────
+
+test("a snapshot past its deadline still takes Accessibility off again", async () => {
+  const { b, s } = await connected(["A"], { operationDeadlineMs: 30 });
+  let answer: (value: unknown) => void = () => {};
+  b.handlers.set("Accessibility.getFullAXTree", () => new Promise((resolve) => (answer = resolve)));
+  await assertMultizenCode(s.snapshot(), "TIMEOUT");
+  assert.deepEqual(b.calls("Accessibility.disable"), [], "the command it waits on is still out");
+  answer({ nodes: [] });
+  await settle();
+  assert.equal(b.calls("Accessibility.disable").length, 1);
+  assert.equal(b.calls("Accessibility.disable")[0]?.sessionId, "S-A");
+  assertStealth(b);
+});
+
+test("an upload past its deadline still stops catching file choosers", async () => {
+  const { b, s, names } = await framedPage({ operationDeadlineMs: 50 });
+  b.handlers.set("DOM.describeNode", () => ({ node: { nodeName: "BUTTON", attributes: [] } }));
+  let answer: (value: unknown) => void = () => {};
+  b.handlers.set("Page.createIsolatedWorld", () => new Promise((resolve) => (answer = resolve)));
+  await assertMultizenCode(s.uploadFile({ ref: names.get("Main button")! }, ["x"]), "TIMEOUT");
+  answer({ executionContextId: 77 });
+  await settle();
+  assert.deepEqual(
+    b.calls("Page.setInterceptFileChooserDialog").map((c) => c.params.enabled),
+    [true, false],
+  );
+});
+
+test("a cleanup that can't go out doesn't replace the error that got there", async () => {
+  const { b, s } = await connected(["A"]);
+  b.handlers.set("Accessibility.disable", () => Promise.reject(new Error("session gone")));
+  b.handlers.set("Accessibility.getFullAXTree", () => Promise.reject(new Error("the real one")));
+  await assert.rejects(s.snapshot(), /the real one/);
+});
+
+// ── press_key and its frames ─────────────────────────────────────────────────
+
+test("press_key with no target goes on when a child frame won't take the probe", async () => {
+  const { b, s } = await framedPage();
+  const worlds = b.handlers.get("Page.createIsolatedWorld")!;
+  b.handlers.set("Page.createIsolatedWorld", (p, sid) => {
+    if (sid === "S-OOP") return Promise.reject(new Error("Session with given id not found"));
+    return worlds(p, sid);
+  });
+  await assert.doesNotReject(s.pressKey("Enter"));
+  assert.ok(b.calls("Input.dispatchKeyEvent").length > 0);
+});
+
+test("press_key with no target: the first frame refusing the probe is still an error", async () => {
+  const { b, s } = await framedPage();
+  b.handlers.set("Page.createIsolatedWorld", () => Promise.reject(new Error("the page is gone")));
+  await assert.rejects(s.pressKey("Enter"), /the page is gone/);
+  assert.deepEqual(b.calls("Input.dispatchKeyEvent"), []);
+});
+
+/** The probe's read, answered per session: nothing seen, unless a test says otherwise. */
+function probeReads(b: FakeBrowser, read: (sid: string | undefined) => unknown): void {
+  const evaluate = b.handlers.get("Runtime.evaluate")!;
+  b.handlers.set("Runtime.evaluate", (p, sid) =>
+    String(p.expression).includes("visibilityState") && p.contextId !== undefined
+      ? read(sid)
+      : evaluate(p, sid),
+  );
+}
+
+const sawNothing = {
+  result: {
+    value: JSON.stringify({ pressed: false, released: false, keys: 0, hidden: true, painted: false }),
+  },
+};
+
+test("press_key: a child frame's document going says nothing about the key", async () => {
+  const { b, s } = await framedPage();
+  probeReads(b, (sid) => {
+    if (sid === "S-OOP") return Promise.reject(new Error("Cannot find context with specified id"));
+    return sawNothing;
+  });
+  await assert.rejects(s.pressKey("Enter"), InputNotDeliveredError);
+});
+
+test("press_key: the main frame's document going means the key navigated: delivered", async () => {
+  const { b, s } = await framedPage();
+  probeReads(b, (sid) => {
+    if (sid === "S-A") return Promise.reject(new Error("Cannot find context with specified id"));
+    return sawNothing;
+  });
+  await assert.doesNotReject(s.pressKey("Enter"));
+});
+
+test("press_key: a child frame that stops answering costs one read, not every read", async () => {
+  const { b, s } = await framedPage();
+  let reads = 0;
+  let mainReads = 0;
+  probeReads(b, (sid) => {
+    if (sid === "S-OOP") {
+      reads += 1;
+      return Promise.reject(new Error("Session with given id not found"));
+    }
+    // A few rounds of nothing, so it has the chance to ask that frame again.
+    mainReads += 1;
+    const keys = mainReads > 6 ? 1 : 0;
+    return {
+      result: {
+        value: JSON.stringify({ pressed: false, released: false, keys, hidden: false, painted: true }),
+      },
+    };
+  });
+  await s.pressKey("Enter");
+  assert.ok(mainReads > 6);
+  assert.equal(reads, 1);
+});
+
+// ── close ────────────────────────────────────────────────────────────────────
+
+test("close twice while one runs: one close of the socket, and both end", async () => {
+  const { b, s } = await connected(["A"]);
+  // As chrome-remote-interface's does: each call takes the listeners of the one before.
+  let finish: () => void = () => {};
+  b.close = () => {
+    b.closed += 1;
+    return new Promise<void>((resolve) => (finish = resolve));
+  };
+  const first = s.close();
+  const second = s.close();
+  assert.equal(b.closed, 1);
+  finish();
+  await Promise.all([first, second]);
+  await s.close();
+  assert.equal(b.closed, 1, "and nothing more once closed");
+});
+
+test("a failed close can be tried again", async () => {
+  const { b, s } = await connected(["A"]);
+  b.close = () => {
+    b.closed += 1;
+    return Promise.reject(new Error("no"));
+  };
+  await assert.rejects(s.close(), /no/);
+  b.close = async () => {
+    b.closed += 1;
+  };
+  await s.close();
+  assert.equal(b.closed, 2);
 });
 
 // ── new verbs ────────────────────────────────────────────────────────────────

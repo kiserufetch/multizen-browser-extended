@@ -17,8 +17,9 @@ export interface HandoffBindingOptions {
   /**
    * Whether a person works on this profile through the panel, not in a window of their own.
    * Then a handoff keeps dialogs open and catches file choosers for them. Otherwise the
-   * window handles both as it always has: Chromium shows no dialog while CDP has one, and
-   * holding it open would strand a person who can't see it.
+   * window handles both as it always has: Chromium shows its own dialog whether or not CDP
+   * has Page enabled there, and the dialog policy answers it first only on the tabs that
+   * policy covers, which on a desktop are the root tab and those an agent has acted on.
    */
   panelDriven: (profileId: ProfileId) => boolean;
 }

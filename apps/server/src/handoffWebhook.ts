@@ -7,7 +7,7 @@ const WEBHOOK_TIMEOUT_MS = 5_000;
 
 export interface HandoffWebhookOptions {
   handoff: HumanHandoff;
-  /** The owner's, from the command line. Nothing an agent says reaches it. */
+  /** The owner's, from the command line: no agent says where it goes. Its body has the agent's reason. */
   url: string;
   /** Signs the body as `X-MultiZen-Signature: sha256=<hex>`. */
   secret?: string;

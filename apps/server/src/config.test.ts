@@ -433,6 +433,18 @@ test("server session defaults: 30 minutes idle, 64 sessions; flags and environme
   assert.equal(flags.maxSessions, 3);
 });
 
+test("--lease-on-session-close: keep unless told otherwise, flag over environment", () => {
+  assert.equal(parseServeConfig([], {}, LINUX).leaseOnSessionClose, "keep");
+  const env = { MULTIZEN_LEASE_ON_SESSION_CLOSE: "release" };
+  assert.equal(parseServeConfig([], env, LINUX).leaseOnSessionClose, "release");
+  const flag = ["--lease-on-session-close", "keep"];
+  assert.equal(parseServeConfig(flag, env, LINUX).leaseOnSessionClose, "keep");
+  assert.throws(
+    () => parseServeConfig(["--lease-on-session-close", "maybe"], {}, LINUX),
+    /--lease-on-session-close must be one of keep, release/,
+  );
+});
+
 test("remote settings from the environment follow the same rules", () => {
   const remote = {
     MULTIZEN_HOST: "0.0.0.0",

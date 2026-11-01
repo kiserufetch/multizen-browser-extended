@@ -1,12 +1,9 @@
 /**
- * Tracks the browser's page targets (tabs) and which one is "active" — the
- * target page-level actions (navigate / click / type / extract) route to.
- *
- * Today the driver binds to a single page for the whole session, so closing
- * that tab kills it (defect #18) and new tabs / popups go unnoticed (#19). This
- * registry is the browser-wide target model those fixes build on: it is pure
- * (no CDP, no I/O), so the selection and re-selection logic can be unit-tested
- * exhaustively, and the CdpSession feeds it from Target.* events.
+ * Tracks the browser's page targets (tabs) and which one is "active": the
+ * target page-level actions (navigate / click / type / extract) route to. It is
+ * pure (no CDP, no I/O), so the selection and re-selection logic can be
+ * unit-tested exhaustively. CdpSession feeds it from Target.* events, and the
+ * Firefox driver from Playwright's pages.
  *
  * Re-selection policy: when the active page is removed, fall back to the most
  * recently seen remaining page (the one the operator most likely switched to),

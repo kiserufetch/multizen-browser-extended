@@ -158,3 +158,20 @@ test("a token that ended loses its leases, and only its leases", () => {
   assert.doesNotThrow(() => registry.assertAccess("p2", kept));
   assert.throws(() => registry.assertAccess("p3", revoked), /leased by kept/);
 });
+
+test("a session's end drops what that session holds, and nothing a reattach took from it", () => {
+  const registry = new LeaseRegistry();
+  const first: LeaseHolder = { principalId: "a", principalName: "a", sessionId: "s1" };
+  const second: LeaseHolder = { principalId: "a", principalName: "a", sessionId: "s2" };
+  const other: LeaseHolder = { principalId: "b", principalName: "b", sessionId: "s9" };
+  registry.acquire("p1", first);
+  const moved = registry.acquire("p2", first);
+  registry.acquire("p2", second, { leaseId: moved.leaseId });
+  registry.acquire("p3", second);
+
+  registry.dropSession("s1");
+
+  assert.doesNotThrow(() => registry.assertAccess("p1", other), "held by s1, which ended");
+  assert.throws(() => registry.assertAccess("p2", other), /leased by a/, "reattached to s2");
+  assert.throws(() => registry.assertAccess("p3", other), /leased by a/);
+});

@@ -282,6 +282,18 @@ app.whenReady().then(async () => {
     profilesRoot: join(dataRoot, "profiles"),
   });
 
+  // A stopped server's dir, as a live one is caught above. Its proxy passwords are sealed
+  // under a key this app doesn't have, so every read of a profile would throw.
+  if (profileManager.storedSecrets().sealed > 0) {
+    dialog.showErrorBox(
+      "MultiZen can't use this data directory",
+      `${dataRoot} belongs to a MultiZen server: its proxy passwords are encrypted, and the app ` +
+        "has no key for them.\n\nUse it through that server, or start MultiZen with a different data directory.",
+    );
+    app.quit();
+    return;
+  }
+
   // Reclaim shared store entries no profile references any more (e.g. left by a
   // crash mid-delete) plus stale staging dirs. Best-effort; never blocks startup.
   void sweepOrphans(

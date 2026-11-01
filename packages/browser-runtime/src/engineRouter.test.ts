@@ -430,6 +430,32 @@ test("closeAll: a launch finishing after it had begun is closed and fails", asyn
   assert.equal(driver.running.size, 0);
 });
 
+test("closeAll waits for a close already under way, even one that fails", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver);
+  const launching = r.launch("p");
+  await turn();
+  driver.finish("p");
+  await launching;
+  let finish: (e?: Error) => void = () => {};
+  driver.close = () =>
+    new Promise<void>((resolve, reject) => {
+      finish = (e) => (e ? reject(e) : resolve());
+    });
+  driver.closeAll = async () => {};
+  const closing = r.close("p").catch(() => {});
+  await turn();
+  let done = false;
+  const closingAll = r.closeAll().then(() => {
+    done = true;
+  });
+  await turn();
+  assert.equal(done, false, "that browser is still going down");
+  finish(new Error("it went badly"));
+  await closingAll;
+  await closing;
+});
+
 test("closeAll covers launches: it doesn't return before they have settled", async () => {
   const driver = new SlowDriver();
   const r = limitedRouter(driver);

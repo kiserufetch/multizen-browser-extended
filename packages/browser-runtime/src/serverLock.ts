@@ -15,6 +15,8 @@ const execFileP = promisify(execFile);
 
 const LOCK_FILE = "server.lock";
 const ACQUIRE_ATTEMPTS = 3;
+/** A stuck PowerShell must not hold up a start: unanswered, a lock counts as held. */
+const IDENTITY_TIMEOUT_MS = 30_000;
 
 export type ServerLockMode = "serve" | "stdio" | "cli";
 
@@ -87,7 +89,7 @@ async function windowsProcessIdentity(pid: number): Promise<ProcessIdentity | nu
   const { stdout } = await execFileP(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-Command", script],
-    { windowsHide: true },
+    { windowsHide: true, timeout: IDENTITY_TIMEOUT_MS },
   );
   const text = stdout.trim();
   if (!text) return null;

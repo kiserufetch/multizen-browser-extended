@@ -7,12 +7,15 @@ import { createMultizenMcpServer } from "@multizen/mcp-server";
 import { dataDirPathWarning, type StdioConfig } from "../config.ts";
 import { errorFields, log, protocolStdout } from "../log.ts";
 import { DEFAULT_KEEPALIVE_MS, RelayKeepAlive, whySessionGone } from "../relayKeepAlive.ts";
-import { buildRuntime, enginesInUse, SERVER_VERSION, takeOverFromPreviousRun } from "../runtime.ts";
+import {
+  buildRuntime,
+  enginesInUse,
+  RUNTIME_CLOSE_BUDGET_MS,
+  SERVER_VERSION,
+  takeOverFromPreviousRun,
+} from "../runtime.ts";
 import { preflightProcess, preflightUserNamespaces } from "../sandboxPreflight.ts";
 import type { ShutdownManager } from "../shutdown.ts";
-
-/** Covers closeAll's own budget, the bridges and the database. */
-const RUNTIME_CLOSE_BUDGET_MS = 12_000;
 
 /** The holder's mode decides the advice: only a `serve` can be proxied to. */
 export function stdioLockHint(e: ServerLockHeldError, dataDir: string): string {

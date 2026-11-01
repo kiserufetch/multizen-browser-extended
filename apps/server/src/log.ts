@@ -17,7 +17,14 @@ const writeStderr = process.stderr.write.bind(process.stderr);
 
 let writeLine: (line: string) => unknown = writeStdout;
 
+const LEVELS: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
+const configuredLevel = process.env.MULTIZEN_LOG_LEVEL?.toLowerCase();
+const knownLevel = configuredLevel !== undefined && Object.hasOwn(LEVELS, configuredLevel);
+/** MULTIZEN_LOG_LEVEL: nothing below it is written. Default `info`: a browser's stderr is `debug`. */
+const minimumLevel = knownLevel ? LEVELS[configuredLevel as LogLevel] : LEVELS.info;
+
 function emit(level: LogLevel, msg: string, fields?: LogFields): void {
+  if (LEVELS[level] < minimumLevel) return;
   const ts = new Date().toISOString();
   let line: string;
   try {
@@ -64,6 +71,11 @@ function strayWriter(level: LogLevel, source: string): typeof process.stdout.wri
  */
 export function installLogging(target: "stdout" | "stderr"): void {
   writeLine = target === "stderr" ? writeStderr : writeStdout;
+  if (configuredLevel !== undefined && !knownLevel) {
+    emit("warn", "MULTIZEN_LOG_LEVEL is not debug, info, warn or error: using info", {
+      value: process.env.MULTIZEN_LOG_LEVEL,
+    });
+  }
 
   console.debug = (...args: unknown[]) => emit("debug", format(...args));
   console.log = (...args: unknown[]) => emit("info", format(...args));

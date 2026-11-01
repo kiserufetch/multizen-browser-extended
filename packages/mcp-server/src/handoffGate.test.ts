@@ -291,7 +291,7 @@ test("request_human returns at once with its id; a repeat is the same handoff", 
   assert.equal(first.body.handoff_status, "pending");
   assert.equal(first.body.kind, "2fa");
   assert.equal(typeof first.body.expires_at, "string");
-  assert.match(first.body.note, /panel/);
+  assert.match(first.body.note, /at \/panel on this server/);
   const repeat = await call(client, "request_human", { reason: "again", kind: "captcha" });
   assert.equal(repeat.body.handoff_id, first.body.handoff_id);
   assert.equal(repeat.body.kind, "2fa");

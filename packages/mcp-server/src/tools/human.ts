@@ -83,10 +83,9 @@ export const HUMAN_HANDLERS: ReadonlyMap<string, ExtensionTool["handler"]> = new
         ...(kind ? { kind } : {}),
         requestedBy: ctx.caller.principal.name,
       });
-      // Surface the window to the operator (best-effort; don't fail the call).
-      await ctx.browserDriver
-        .cdpSend(id, "Page.bringToFront", {}, undefined, { safe: true })
-        .catch(() => {});
+      // Surface the window to the operator (best-effort; don't fail the call). A verb, not
+      // cdp_send: Camoufox has no CDP.
+      await ctx.browserDriver.performAction(id, { type: "bring_to_front" }).catch(() => {});
       return {
         status: "waiting_for_human",
         handoff_id: record.id,
@@ -94,7 +93,7 @@ export const HUMAN_HANDLERS: ReadonlyMap<string, ExtensionTool["handler"]> = new
         kind: record.kind,
         reason: record.reason,
         expires_at: record.expiresAt,
-        note: "A human must complete this step (e.g. CAPTCHA/2FA): in the browser window, or for a profile with no window (headless, xvfb) in the handoff panel at /panel on this server. Repeat wait_for_human, or poll get_human_status, until the status is no longer pending. Only resumed means they did it; aborted and expired mean you must not assume so.",
+        note: `A human must complete this step (e.g. CAPTCHA/2FA): in the browser window, or for a profile with no window (headless, xvfb) ${ctx.handoffGate ? "in the handoff panel at /panel on this server" : "in the desktop app's handoff panel; plain stdio has no panel"}. Repeat wait_for_human, or poll get_human_status, until the status is no longer pending. Only resumed means they did it; aborted and expired mean you must not assume so.`,
       };
     },
   ],

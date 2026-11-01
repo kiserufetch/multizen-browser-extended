@@ -82,7 +82,20 @@ export interface CdpSessionOptions {
   refBase?: number;
   /** Replaces {@link OPERATION_DEADLINE_MS}. */
   operationDeadlineMs?: number;
+  /** Whose tabs the dialog policy answers for. Default `all-tabs`. See {@link DialogScope}. */
+  dialogScope?: DialogScope;
 }
+
+/**
+ * `all-tabs`: nobody else can answer, as with no window, so the policy answers on every tab.
+ * `agent-tabs`: a window with a person at it. The policy answers on the root tab and on a
+ * tab an agent has acted on, and a person's own tab keeps its dialogs. Chromium shows one
+ * natively with Page enabled and nobody answering, and takes the person's answer (measured
+ * on CloakBrowser 146, headed). `hasBrowserHandler` can't tell the cases apart: it is true
+ * in headless too, where nobody sees the dialog. Page stays enabled on every tab because
+ * enabling it under an open dialog hangs and never reports that dialog.
+ */
+export type DialogScope = "all-tabs" | "agent-tabs";
 
 /**
  * Where a browser run starts numbering its refs. Each run numbers afresh, so with a
@@ -439,6 +452,14 @@ function tabNotFound(targetId: string): MultizenError {
   });
 }
 
+/** What the browser says about a dialog as it opens. */
+interface DialogOpening {
+  type: DialogType;
+  message: string;
+  url?: string;
+  defaultPrompt?: string;
+}
+
 /**
  * Thin wrapper around chrome-remote-interface that exposes the
  * primitives our MCP tools call: navigate, click, type, extract,
@@ -507,6 +528,10 @@ export class CdpSession {
 
   private dialogPolicy: DialogPolicy = { mode: "auto" };
   private readonly openDialogs = new Map<string, TrackedDialog>();
+  /** Under `agent-tabs`: the root tab and every tab an agent has acted on. */
+  private readonly agentTabs = new Set<string>();
+  /** Under `agent-tabs`: a dialog up on a person's tab, by session, until someone answers. */
+  private readonly personDialogs = new Map<string, DialogOpening>();
   private dialogSeq = 0;
   /** Operations that can't finish while a dialog blocks their tab's renderer. */
   private readonly dialogWatchers = new Set<{ targetId: string; fire: () => void }>();
@@ -522,6 +547,8 @@ export class CdpSession {
    *  then fail loud with a clear message instead of hanging on a dead socket or
    *  returning stale state. */
   private disconnected = false;
+  /** The one close under way. See {@link close}. */
+  private closing: Promise<void> | null = null;
   /** Ends each operation in flight, so nothing waits out a deadline on a dead browser. */
   private readonly operations = new Set<(e: Error) => void>();
 
@@ -668,6 +695,8 @@ export class CdpSession {
       throw e;
     }
     this.client = client;
+    const root = this.tabs.get(this.targets.active() ?? "");
+    if (root) this.targetTab(root);
   }
 
   private async openBrowserSocket(): Promise<CDP.Client> {
@@ -732,15 +761,13 @@ export class CdpSession {
     );
     client.on(
       "Page.javascriptDialogOpening",
-      (
-        p: { type: DialogType; message: string; url?: string; defaultPrompt?: string },
-        sessionId?: string,
-      ) => this.onDialogOpening(client, p, sessionId),
+      (p: DialogOpening, sessionId?: string) => this.onDialogOpening(client, p, sessionId),
     );
     client.on("Page.javascriptDialogClosed", (_p: object, sessionId?: string) => {
       for (const [id, dialog] of this.openDialogs) {
         if (dialog.sessionId === sessionId) this.openDialogs.delete(id);
       }
+      if (sessionId) this.personDialogs.delete(sessionId);
     });
     client.on(
       "Page.fileChooserOpened",
@@ -805,7 +832,9 @@ export class CdpSession {
     }
     void (async () => {
       await resumeTarget(client, sessionId);
-      await sendTo(client, "Target.detachFromTarget", { sessionId }).catch(() => {});
+      // Through the session it came from: the browser's answers "No session with given id"
+      // for a worker under a page, which then stays attached (measured on CloakBrowser 146).
+      await sendTo(client, "Target.detachFromTarget", { sessionId }, parentSessionId).catch(() => {});
     })();
   }
 
@@ -878,6 +907,8 @@ export class CdpSession {
     this.tabs.delete(targetId);
     this.sessionTabs.delete(tab.sessionId);
     this.setupDone.delete(targetId);
+    this.agentTabs.delete(targetId);
+    this.personDialogs.delete(tab.sessionId);
     for (const [sessionId, oopif] of tab.oopifs) {
       this.sessionTabs.delete(sessionId);
       this.setupDone.delete(oopif.targetId);
@@ -903,10 +934,17 @@ export class CdpSession {
     this.refs.clear();
     this.refByNode.clear();
     this.openDialogs.clear();
+    this.agentTabs.clear();
+    this.personDialogs.clear();
     this.fileChoosers.clear();
     this.frameViewports.clear();
   }
 
+  /**
+   * Safe to call again while one runs, and both get the same end: chrome-remote-interface's
+   * close takes the socket's close listeners away, so its second call would orphan its first,
+   * and whoever awaits that one (a profile's shutdown) would wait forever.
+   */
   async close(): Promise<void> {
     this.abortOperations();
     for (const t of this.teardowns.splice(0)) {
@@ -916,9 +954,19 @@ export class CdpSession {
         // ignore
       }
     }
-    if (!this.client) return;
-    await this.client.close();
-    this.client = null;
+    if (!this.closing) {
+      const client = this.client;
+      if (!client) return;
+      this.closing = client
+        .close()
+        .then(() => {
+          this.client = null;
+        })
+        .finally(() => {
+          this.closing = null;
+        });
+    }
+    await this.closing;
   }
 
   /**
@@ -1118,6 +1166,21 @@ export class CdpSession {
     return sendTo<T>(this.require(), method, params, sessionId, timeoutMs);
   }
 
+  /**
+   * Undoes what an operation did, whatever became of it: {@link send} sends nothing once
+   * its operation has failed, and a domain left enabled is what the stealth rule forbids.
+   * Runs in a finally, so it must not replace the error that got there.
+   */
+  private async sendCleanup(
+    method: string,
+    params?: Record<string, unknown>,
+    sessionId?: string,
+    timeoutMs?: number,
+  ): Promise<void> {
+    if (this.disconnected || !this.client) return;
+    await sendTo(this.client, method, params, sessionId, timeoutMs).catch(() => {});
+  }
+
   /** The active tab, for verbs that act on the page. */
   private activeTab(): TabSession {
     this.require();
@@ -1128,7 +1191,20 @@ export class CdpSession {
         hint: "Call new_tab.",
       });
     }
+    this.targetTab(tab);
     return tab;
+  }
+
+  /**
+   * An agent has this tab now, so the dialog policy does too. A dialog a person left open
+   * on it is the policy's from here on, as the verb on its way would only hang behind it.
+   */
+  private targetTab(tab: TabSession): void {
+    this.agentTabs.add(tab.targetId);
+    const waiting = this.personDialogs.get(tab.sessionId);
+    if (!waiting || !this.client) return;
+    this.personDialogs.delete(tab.sessionId);
+    this.onDialogOpening(this.client, waiting, tab.sessionId);
   }
 
   /**
@@ -1165,6 +1241,8 @@ export class CdpSession {
       (BROWSER_LEVEL_METHOD.test(method)
         ? undefined
         : this.tabs.get(this.targets.active() ?? "")?.sessionId);
+    const routedTab = routed ? this.sessionTabs.get(routed) : undefined;
+    if (routedTab) this.targetTab(routedTab);
     const rawSend = buildSender(client, routed);
     const timeoutMs = opts.timeoutMs ?? DEFAULT_CDP_TIMEOUT_MS;
     // Bound every command so a wedged renderer / stalled transport can't hang
@@ -1271,7 +1349,9 @@ export class CdpSession {
   /** Makes a tab the target of page verbs, and brings it to the foreground. */
   async activateTab(targetId: string, sessionId?: string): Promise<unknown> {
     this.require();
-    if (!this.tabs.has(targetId)) throw tabNotFound(targetId);
+    const tab = this.tabs.get(targetId);
+    if (!tab) throw tabNotFound(targetId);
+    this.targetTab(tab);
     const result = await this.cdpSend("Target.activateTarget", { targetId }, sessionId, {
       safe: true,
     }).catch((e: unknown) => {
@@ -1289,6 +1369,8 @@ export class CdpSession {
    * browser picks its own neighbour to show, so this raises the one chosen here.
    */
   async closeTab(targetId: string, sessionId?: string): Promise<unknown> {
+    const tab = this.tabs.get(targetId);
+    if (tab) this.targetTab(tab);
     const result = await this.cdpSend("Target.closeTarget", { targetId }, sessionId, {
       safe: true,
     }).catch((e: unknown) => {
@@ -1313,15 +1395,20 @@ export class CdpSession {
    * until someone answers. In auto mode that is us, at once. In manual mode the
    * dialog waits for handleDialog, and operations on its tab report DIALOG_OPEN
    * instead of hanging. An OOPIF's dialog arrives here too, on the page session.
+   * Under `agent-tabs`, one on a tab no agent has acted on is the person's to answer.
    */
-  private onDialogOpening(
-    client: CDP.Client,
-    p: { type: DialogType; message: string; url?: string; defaultPrompt?: string },
-    sessionId: string | undefined,
-  ): void {
+  private onDialogOpening(client: CDP.Client, p: DialogOpening, sessionId: string | undefined): void {
     const tab = sessionId ? this.sessionTabs.get(sessionId) : undefined;
     // A session an agent attached and enabled sees the same dialog; this one answers.
     if (!tab || !sessionId || tab.sessionId !== sessionId) return;
+    if (
+      this.opts.dialogScope === "agent-tabs" &&
+      !this.handoffMode &&
+      !this.agentTabs.has(tab.targetId)
+    ) {
+      this.personDialogs.set(sessionId, p);
+      return;
+    }
     if (this.dialogPolicy.mode === "auto" && !this.handoffMode) {
       void this.answerDialog(client, sessionId, p.type, this.dialogPolicy);
       return;
@@ -1665,47 +1752,63 @@ export class CdpSession {
    *
    * It listens in the frame's own isolated world, on that frame's session: a capture
    * listener on the main frame's window sees nothing of what goes to a child frame,
-   * same-process or not.
+   * same-process or not. The first frame is the one that counts: a page that won't arm
+   * is an error. Any other is just left out, like a frame a snapshot can't read.
    */
   private async armInputProbe(frames: readonly FrameAddress[]): Promise<ArmedProbe[]> {
     const probes: ArmedProbe[] = [];
-    for (const { sessionId, frameId } of frames) {
-      const { executionContextId } = await this.send<{ executionContextId: number }>(
-        "Page.createIsolatedWorld",
-        { frameId, worldName: INPUT_PROBE_WORLD },
-        sessionId,
-      );
-      await this.send(
-        "Runtime.evaluate",
-        { expression: INPUT_PROBE_INSTALL, contextId: executionContextId },
-        sessionId,
-      );
-      probes.push({ sessionId, contextId: executionContextId });
+    for (const [index, { sessionId, frameId }] of frames.entries()) {
+      const timeoutMs = index === 0 ? undefined : SNAPSHOT_FRAME_TIMEOUT_MS;
+      try {
+        const { executionContextId } = await this.send<{ executionContextId: number }>(
+          "Page.createIsolatedWorld",
+          { frameId, worldName: INPUT_PROBE_WORLD },
+          sessionId,
+          timeoutMs,
+        );
+        await this.send(
+          "Runtime.evaluate",
+          { expression: INPUT_PROBE_INSTALL, contextId: executionContextId },
+          sessionId,
+          timeoutMs,
+        );
+        probes.push({ sessionId, contextId: executionContextId });
+      } catch (e) {
+        if (index === 0) throw e;
+      }
     }
     return probes;
   }
 
   /**
    * Read the probes until `done` holds or the grace period ends. Returns null
-   * when a document was replaced since its probe was armed: the input caused a
-   * navigation, so it was delivered. Visibility comes from the first frame.
+   * when the first frame's document was replaced since its probe was armed: the
+   * input caused a navigation, so it was delivered. Another frame going says nothing
+   * about the input, so it just stops being read. Visibility comes from the first frame.
    */
   private async readInputProbe(
     probes: readonly ArmedProbe[],
     done: (s: InputProbeState) => boolean,
   ): Promise<InputProbeState | null> {
     const deadline = Date.now() + INPUT_PROBE_GRACE_MS;
+    let live = probes;
     for (;;) {
       const states: InputProbeState[] = [];
-      for (const { sessionId, contextId } of probes) {
+      for (const probe of live) {
+        const first = probe === probes[0];
         try {
           const r = await this.send<{ result: { value: string } }>(
             "Runtime.evaluate",
-            { expression: INPUT_PROBE_READ, contextId, returnByValue: true },
-            sessionId,
+            { expression: INPUT_PROBE_READ, contextId: probe.contextId, returnByValue: true },
+            probe.sessionId,
+            first ? undefined : SNAPSHOT_FRAME_TIMEOUT_MS,
           );
           states.push(JSON.parse(r.result.value) as InputProbeState);
         } catch (e) {
+          if (!first) {
+            live = live.filter((other) => other !== probe);
+            continue;
+          }
           if (PROBE_CONTEXT_GONE.test((e as Error).message)) return null;
           throw e;
         }
@@ -1721,14 +1824,15 @@ export class CdpSession {
     }
   }
 
+  /** The context may be gone with the old document, or the session dropped. */
   private async stopInputProbe(probes: readonly ArmedProbe[]): Promise<void> {
     await Promise.all(
       probes.map(({ sessionId, contextId }) =>
-        this.send("Runtime.evaluate", { expression: INPUT_PROBE_STOP, contextId }, sessionId).catch(
-          () => {
-            // Context gone with the old document, or the session dropped. Runs in a
-            // finally, so it must not replace the error that got us here.
-          },
+        this.sendCleanup(
+          "Runtime.evaluate",
+          { expression: INPUT_PROBE_STOP, contextId },
+          sessionId,
+          SNAPSHOT_FRAME_TIMEOUT_MS,
         ),
       ),
     );
@@ -2042,7 +2146,7 @@ export class CdpSession {
           label: `selector ${selector}`,
         };
       } finally {
-        await this.send("Runtime.releaseObject", { objectId }, tab.sessionId).catch(() => {});
+        await this.sendCleanup("Runtime.releaseObject", { objectId }, tab.sessionId);
       }
     });
   }
@@ -2316,9 +2420,7 @@ export class CdpSession {
         );
         return r.result.value;
       } finally {
-        await this.send("Runtime.releaseObject", { objectId: object.objectId }, el.sessionId).catch(
-          () => {},
-        );
+        await this.sendCleanup("Runtime.releaseObject", { objectId: object.objectId }, el.sessionId);
       }
     });
     if (outcome === "not-select") {
@@ -2380,11 +2482,11 @@ export class CdpSession {
       );
     } finally {
       opened.cancel();
-      await this.send(
+      await this.sendCleanup(
         "Page.setInterceptFileChooserDialog",
         { enabled: this.handoffMode },
         el.sessionId,
-      ).catch(() => {});
+      );
     }
   }
 
@@ -2626,7 +2728,7 @@ export class CdpSession {
         this.axUsers.set(sessionId, left);
       } else {
         this.axUsers.delete(sessionId);
-        await this.send("Accessibility.disable", undefined, sessionId).catch(() => {});
+        await this.sendCleanup("Accessibility.disable", undefined, sessionId);
       }
     }
   }

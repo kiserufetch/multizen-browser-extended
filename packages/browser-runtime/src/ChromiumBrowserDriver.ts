@@ -34,7 +34,7 @@ import {
   resolveEngine,
   type BrowserEngine,
 } from "@multizen/types";
-import { CdpSession } from "@multizen/cdp-driver";
+import { CdpSession, type DialogScope } from "@multizen/cdp-driver";
 import { EngineRegistry } from "./engineRegistry.ts";
 import type { EgressPolicy } from "./egressPolicy.ts";
 import { asEgressBlocked, startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
@@ -246,6 +246,12 @@ export interface ChromiumBrowserDriverOptions {
    * until an agent asks.
    */
   armDownloadsAtLaunch?: boolean;
+  /**
+   * Whose tabs a headed browser's dialog policy answers for. Default `agent-tabs`: on a
+   * desktop a person's own tabs show their dialogs. A server's browsers have nobody at them.
+   * With no window, in headless or xvfb, it is always `all-tabs`: nobody could answer.
+   */
+  headedDialogScope?: DialogScope;
   /** What one profile's downloads may take. Default: no limit. */
   downloadQuotaBytes?: number;
   /**
@@ -254,6 +260,11 @@ export interface ChromiumBrowserDriverOptions {
    * connection, and loopback no longer skips it.
    */
   egress?: EgressPolicy;
+}
+
+/** With no window, nobody could answer a dialog the policy left alone. */
+export function dialogScopeFor(displayMode: DisplayMode, headed: DialogScope): DialogScope {
+  return displayMode === "headed" ? headed : "all-tabs";
 }
 
 export type RunningStateChange =
@@ -302,6 +313,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private readonly extraDisabledFeatures: readonly string[];
   private readonly extraArgs: readonly string[];
   private readonly armDownloadsAtLaunch: boolean;
+  private readonly headedDialogScope: DialogScope;
   private readonly downloadQuotaBytes: number | undefined;
   private readonly egress?: EgressPolicy;
 
@@ -325,6 +337,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     this.extraDisabledFeatures = opts.extraDisabledFeatures ?? [];
     this.extraArgs = opts.extraArgs ?? [];
     this.armDownloadsAtLaunch = opts.armDownloadsAtLaunch ?? false;
+    this.headedDialogScope = opts.headedDialogScope ?? "agent-tabs";
     this.downloadQuotaBytes = opts.downloadQuotaBytes;
     this.egress = opts.egress;
   }
@@ -816,6 +829,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         host: "127.0.0.1",
         engine,
         platform: cloakBrowserPlatform(fp),
+        dialogScope: dialogScopeFor(displayMode, this.headedDialogScope),
       });
       // Readiness ladder within a fixed budget, reusing this one session
       // (connect() is idempotent): (1) /json/version answers, (2) /json/list has
@@ -1005,20 +1019,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     const r = record;
     this.running.set(profileId, record);
 
-    const onExit = (): void => {
-      const wasTracked = this.running.has(profileId);
-      clearInterval(record.windowWatcher);
-      void session.close().catch(() => {});
-      void stopBridgeForProfile(profileId).catch(() => {});
-      void xvfb?.stop().catch(() => {});
-      this.running.delete(profileId);
-      if (wasTracked) {
-        // close() removes from the map first so wasTracked is false there;
-        // this path covers (a) user quit Chrome directly with ⌘Q, and (b)
-        // our own kill() from the windowWatcher when the last window closed.
-        this.emit("running-changed", { kind: "closed", profileId, reason: "external-exit" });
-      }
-    };
+    const onExit = (): void => this.onBrowserExit(profileId, record);
     child.on("exit", onExit);
     // It may have died during the bootstrap above, with nothing here listening yet.
     if (child.exitCode !== null || child.signalCode !== null) onExit();
@@ -1034,6 +1035,25 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     }
     this.emit("running-changed", { kind: "launched", profileId });
     return { id: profileId, cdpEndpoint, pid, startedAt, displayMode };
+  }
+
+  /**
+   * One browser's end, for its own record only. A planned close has let go of the record by
+   * now, and a relaunch may already be up under this profile, with a bridge of its own.
+   */
+  private onBrowserExit(profileId: ProfileId, record: RunningProcess): void {
+    const wasTracked = this.running.get(profileId) === record;
+    clearInterval(record.windowWatcher);
+    void record.session.close().catch(() => {});
+    void record.xvfb?.stop().catch(() => {});
+    if (wasTracked) {
+      void stopBridgeForProfile(profileId).catch(() => {});
+      this.running.delete(profileId);
+      // close() removes from the map first so wasTracked is false there;
+      // this path covers (a) user quit Chrome directly with ⌘Q, and (b)
+      // our own kill() from the windowWatcher when the last window closed.
+      this.emit("running-changed", { kind: "closed", profileId, reason: "external-exit" });
+    }
   }
 
   /** During a launch this means the browser that launch brings up, so it waits for it. */

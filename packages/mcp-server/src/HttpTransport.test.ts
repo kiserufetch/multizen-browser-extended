@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
@@ -63,59 +63,41 @@ function mcpUrl(port: number): URL {
 }
 
 test("legacy SSE: reconnect after close initialises a fresh session", async () => {
-  const port = await freePort();
-  const t = new HttpTransport({ port, createServer: makeServer, heartbeatMs: 0 });
-  await t.start();
-  try {
-    const c1 = new Client({ name: "c1", version: "0" });
-    await c1.connect(new SSEClientTransport(sseUrl(port)));
+  await withTransport({}, async (port) => {
+    const c1 = await connectSse(port);
     assert.equal((await c1.listTools()).tools.length, 1);
     await c1.close();
 
     // The reconnect is the regression: previously the late teardown of the
     // first connection could clobber the new session's server binding.
-    const c2 = new Client({ name: "c2", version: "0" });
-    await c2.connect(new SSEClientTransport(sseUrl(port)));
+    const c2 = await connectSse(port);
     assert.equal((await c2.listTools()).tools.length, 1);
     await c2.close();
-  } finally {
-    await t.stop();
-  }
+  });
 });
 
 test("legacy SSE: a second client does not break the first", async () => {
-  const port = await freePort();
-  const t = new HttpTransport({ port, createServer: makeServer, heartbeatMs: 0 });
-  await t.start();
-  try {
-    const c1 = new Client({ name: "c1", version: "0" });
-    await c1.connect(new SSEClientTransport(sseUrl(port)));
-    const c2 = new Client({ name: "c2", version: "0" });
-    await c2.connect(new SSEClientTransport(sseUrl(port)));
+  await withTransport({}, async (port, t) => {
+    const c1 = await connectSse(port);
+    const c2 = await connectSse(port);
     assert.equal(t.status().sse, 2);
 
     // Closing c1 must not disturb c2 (each is bound to its own server).
     await c1.close();
     assert.equal((await c2.listTools()).tools.length, 1);
     await c2.close();
-  } finally {
-    await t.stop();
-  }
+  });
 });
 
 test("stop() resolves promptly even with an open SSE connection", async () => {
-  const port = await freePort();
-  const t = new HttpTransport({ port, createServer: makeServer, heartbeatMs: 0 });
-  await t.start();
-  const c = new Client({ name: "c", version: "0" });
-  await c.connect(new SSEClientTransport(sseUrl(port)));
+  await withTransport({}, async (port, t) => {
+    await connectSse(port);
 
-  const started = Date.now();
-  await t.stop();
-  const elapsed = Date.now() - started;
-  assert.ok(elapsed < 2000, `stop() took ${elapsed}ms with an open SSE stream`);
-
-  await c.close().catch(() => {});
+    const started = Date.now();
+    await t.stop();
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 2000, `stop() took ${elapsed}ms with an open SSE stream`);
+  });
 });
 
 test("streamable HTTP: initialise + listTools over /mcp", async () => {
@@ -294,15 +276,29 @@ async function connectStreamable(port: number, token?: string): Promise<Client> 
   return c;
 }
 
+/**
+ * An EventSource left open retries forever, and that alone keeps this file's process alive.
+ * So a failed connect closes its transport, and any test's client is closed when it ends,
+ * whether or not the test got as far as doing that itself.
+ */
+const sseClients = new Set<Client>();
+afterEach(async () => {
+  await Promise.all([...sseClients].map((c) => c.close().catch(() => {})));
+  sseClients.clear();
+});
+
 async function connectSse(port: number, token?: string): Promise<Client> {
   const headers = token ? bearer(token) : {};
   const c = new Client({ name: "c", version: "0" });
-  await c.connect(
-    new SSEClientTransport(sseUrl(port), {
-      eventSourceInit: { fetch: (url, init) => fetch(url, { ...init, headers: { ...init?.headers, ...headers } }) },
-      requestInit: { headers },
-    }),
-  );
+  const transport = new SSEClientTransport(sseUrl(port), {
+    eventSourceInit: { fetch: (url, init) => fetch(url, { ...init, headers: { ...init?.headers, ...headers } }) },
+    requestInit: { headers },
+  });
+  await c.connect(transport).catch(async (e: unknown) => {
+    await transport.close();
+    throw e;
+  });
+  sseClients.add(c);
   return c;
 }
 
@@ -502,6 +498,9 @@ test("an idle session expires on both transports; its id then gets 404", async (
   );
 });
 
+/** Well past what connecting and starting a call can take on a loaded machine. */
+const IDLE_TTL_MS = 1_000;
+
 for (const [name, connect] of [
   ["streamable", connectStreamable],
   ["legacy SSE", connectSse],
@@ -509,12 +508,12 @@ for (const [name, connect] of [
   test(`${name}: a call in flight isn't idle, however long it takes; after it, the clock starts`, async () => {
     const gate = barrier();
     await withTransport(
-      { sessionPolicy: { idleTtlMs: 60 }, createServer: serverWithTool(gate.wait) },
+      { sessionPolicy: { idleTtlMs: IDLE_TTL_MS }, createServer: serverWithTool(gate.wait) },
       async (port, t) => {
         const c = await connect(port);
         const open = (): number => t.status().streamable + t.status().sse;
         const call = c.callTool({ name: "slow", arguments: { at: "start" } });
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await new Promise((resolve) => setTimeout(resolve, 2 * IDLE_TTL_MS));
         assert.equal(open(), 1, "expired with a call in flight");
 
         gate.open();
@@ -530,7 +529,7 @@ for (const [name, connect] of [
 test("a cancelled call stops counting as in flight", async () => {
   const gate = barrier();
   await withTransport(
-    { sessionPolicy: { idleTtlMs: 60 }, createServer: serverWithTool(gate.wait) },
+    { sessionPolicy: { idleTtlMs: IDLE_TTL_MS }, createServer: serverWithTool(gate.wait) },
     async (port, t) => {
       const c = await connectStreamable(port);
       const cancel = new AbortController();
@@ -625,15 +624,16 @@ test("past its limit an address gets 429 with Retry-After, while a right token s
 });
 
 test("the window ends and the address may try again", async () => {
+  let now = 0;
   await withTransport(
     {
       authenticate: tokensFor(),
-      authFailureLimiter: new AuthFailureLimiter({ limit: 1, windowMs: 50 }),
+      authFailureLimiter: new AuthFailureLimiter({ limit: 1, windowMs: 50, now: () => now }),
     },
     async (port) => {
       assert.equal((await rawRequest(port)).status, 401);
       assert.equal((await rawRequest(port)).status, 429);
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      now = 51;
       assert.equal((await rawRequest(port)).status, 401);
     },
   );

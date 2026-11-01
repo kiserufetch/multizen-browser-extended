@@ -13,6 +13,7 @@ import { MultizenError, type ChromiumStatus, type DisplayMode, type ProfileId } 
 import {
   browserDataDirForEngine,
   ChromiumBrowserDriver,
+  dialogScopeFor,
   focusFirstPage,
   type ChromiumBrowserDriverOptions,
 } from "./ChromiumBrowserDriver.ts";
@@ -20,7 +21,7 @@ import { EgressPolicy, type EgressLookup } from "./egressPolicy.ts";
 import type { EngineRegistry } from "./engineRegistry.ts";
 import { EngineRouter } from "./engineRouter.ts";
 import type { RuntimeHost } from "./host.ts";
-import { startBridgeForProfile, stopAllBridges } from "./socks5Bridge.ts";
+import { startBridgeForProfile, stopAllBridges, stopBridgeForProfile } from "./socks5Bridge.ts";
 
 const host: RuntimeHost = {
   userDataDir: () => "unused",
@@ -993,6 +994,47 @@ test("xvfb: the record's display stops on close and on a browser that exits by i
     record.xvfb = { stop: async () => void stops++ };
     await driver.close(id);
     assert.equal(stops, 1);
+  });
+});
+
+test("dialogs: a person's tabs are theirs only with a window to answer in", () => {
+  assert.equal(dialogScopeFor("headed", "agent-tabs"), "agent-tabs");
+  assert.equal(dialogScopeFor("headed", "all-tabs"), "all-tabs", "a server");
+  assert.equal(dialogScopeFor("headless", "agent-tabs"), "all-tabs");
+  assert.equal(dialogScopeFor("xvfb", "agent-tabs"), "all-tabs");
+});
+
+test("an old browser's exit leaves its relaunch running, and that one's bridge", async (t) => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    const running = (driver as unknown as { running: Map<ProfileId, unknown> }).running;
+    const onExit = (record: unknown): void =>
+      (driver as unknown as { onBrowserExit: (p: ProfileId, r: unknown) => void }).onBrowserExit(id, record);
+    const closed: string[] = [];
+    const record = (name: string) => ({
+      session: { close: async () => void closed.push(name) },
+      windowWatcher: setInterval(() => {}, 60_000).unref(),
+    });
+    const changes: unknown[] = [];
+    driver.on("running-changed", (change) => changes.push(change));
+    const bridge = (): Promise<string> =>
+      startBridgeForProfile(id, null, new EgressPolicy({ mode: "block-private" }));
+    t.after(() => stopBridgeForProfile(id));
+
+    const relaunched = record("new");
+    running.set(id, relaunched);
+    const url = await bridge();
+
+    onExit(record("old"));
+    assert.equal(running.get(id), relaunched);
+    assert.deepEqual(changes, [], "this profile hasn't gone anywhere");
+    assert.deepEqual(closed, ["old"], "its own session goes, though");
+    assert.equal(await bridge(), url, "the same bridge: a new one would be a new port");
+
+    onExit(relaunched);
+    assert.equal(running.has(id), false);
+    assert.deepEqual(changes, [{ kind: "closed", profileId: id, reason: "external-exit" }]);
+    assert.notEqual(await bridge(), url);
   });
 });
 

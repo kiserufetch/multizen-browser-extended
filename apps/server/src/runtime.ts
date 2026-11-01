@@ -29,6 +29,9 @@ import { withinBudget } from "./shutdown.ts";
 
 export const SERVER_VERSION: string = pkg.version;
 
+/** Covers closeAll's own budget, the bridges and the database. */
+export const RUNTIME_CLOSE_BUDGET_MS = 12_000;
+
 /** Software GL in a container makes the first page slower than on a desktop. */
 const READINESS_BUDGET_MS = 30_000;
 /** Longer than a graceful close plus taskkill and the orphan post-check. */
@@ -276,6 +279,7 @@ export async function buildRuntime(
     extraDisabledFeatures: measurement.disabledFeatures ?? serverDisabledFeatures(process.platform),
     ...(measurement.chromiumArgs ? { extraArgs: measurement.chromiumArgs } : {}),
     armDownloadsAtLaunch: true,
+    headedDialogScope: "all-tabs",
     downloadQuotaBytes,
     requireSandbox: true,
     ownsDataDir: true,

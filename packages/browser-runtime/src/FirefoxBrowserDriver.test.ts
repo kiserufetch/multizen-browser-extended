@@ -12,6 +12,7 @@ import {
   camoufoxDisplayOptions,
   EGRESS_FIREFOX_PREFS,
   FirefoxBrowserDriver,
+  type FirefoxBrowserDriverOptions,
   openStartPage,
   persistentContextOptions,
 } from "./FirefoxBrowserDriver.ts";
@@ -1023,14 +1024,22 @@ test("closeAll covers a launch under way", async (t) => {
 });
 
 /** A rig whose verbs give up quickly. */
-function hurriedRig(t: TestContext, opts: { operationDeadlineMs?: number; closeDeadlineMs?: number }): Rig {
+function hurriedRig(
+  t: TestContext,
+  opts: Pick<
+    FirefoxBrowserDriverOptions,
+    "operationDeadlineMs" | "closeDeadlineMs" | "findPids" | "killTree"
+  >,
+): Rig {
   const dir = mkdtempSync(join(tmpdir(), "mz-ff-"));
   const page = new FakePage();
   const context = new FakeContext(page);
   const driver = new FirefoxBrowserDriver({
     profileManager: { get: (id: ProfileId) => (id === ID ? { id, dataDir: dir } : null) } as never,
-    browserDataDir: () => "unused",
+    browserDataDir: () => "the-data-dir",
     refBase: 0,
+    findPids: async () => [],
+    killTree: async () => {},
     ...opts,
   });
   (driver as unknown as { adopt: (...a: unknown[]) => unknown }).adopt(ID, context, false, "windows");
@@ -1145,6 +1154,7 @@ function journalRig(t: TestContext, findPids: (dir: string) => Promise<number[]>
     refBase: 0,
     closeDeadlineMs: 20,
     findPids,
+    killTree: async () => {},
     processJournal: {
       add: (entry) => journal.push(["add", entry]),
       remove: (pid) => journal.push(["remove", pid]),
@@ -1219,19 +1229,140 @@ test("a browser that won't close: its slot goes free, its entry stays until it r
   assert.deepEqual(journal.at(-1), ["remove", 4242]);
 });
 
-test("a browser that won't close is given up on, once, as closed", async (t) => {
-  const { driver, context } = hurriedRig(t, { closeDeadlineMs: 20 });
+test("a browser that won't close is killed, then reported closed, once", async (t) => {
+  const asked: string[] = [];
+  const order: string[] = [];
+  const { driver, context } = hurriedRig(t, {
+    closeDeadlineMs: 20,
+    findPids: async (dir) => {
+      asked.push(dir);
+      return [4242];
+    },
+    killTree: async (pid) => {
+      order.push(`kill ${pid}`);
+    },
+  });
+  t.mock.method(console, "warn", () => {});
   const realClose = context.close.bind(context);
   context.close = hangs;
   const changes: Array<{ kind: string; reason?: string }> = [];
-  driver.on("running-changed", (c) => changes.push(c));
+  driver.on("running-changed", (c) => {
+    order.push(c.kind);
+    changes.push(c);
+  });
   await driver.close(ID);
   assert.equal(driver.isRunning(ID), false);
+  assert.deepEqual(asked, ["the-data-dir"], "its PID was never learned, so it is looked up");
+  assert.deepEqual(order, ["kill 4242", "closed"], "dead before anyone is told it is closed");
   assert.deepEqual(changes, [{ kind: "closed", profileId: ID, reason: "user-close" }]);
   // And if Firefox does answer later, nothing is reported twice.
   context.close = realClose;
   context.emit("close");
   assert.equal(changes.length, 1);
+});
+
+test("a browser with a known PID that won't close: that one is killed, with no search", async (t) => {
+  const killed: number[] = [];
+  const asked: string[] = [];
+  const { driver, context } = hurriedRig(t, {
+    closeDeadlineMs: 20,
+    findPids: async (dir) => {
+      asked.push(dir);
+      return [1];
+    },
+    killTree: async (pid) => void killed.push(pid),
+  });
+  t.mock.method(console, "warn", () => {});
+  (driver as unknown as { running: Map<ProfileId, { pid: number }> }).running.get(ID)!.pid = 777;
+  const realClose = context.close.bind(context);
+  context.close = hangs;
+  await driver.close(ID);
+  assert.deepEqual(killed, [777]);
+  assert.deepEqual(asked, []);
+  context.close = realClose;
+});
+
+test("a browser that closes in time isn't killed", async (t) => {
+  const killed: number[] = [];
+  const { driver } = hurriedRig(t, { closeDeadlineMs: 1_000, killTree: async (pid) => void killed.push(pid) });
+  await driver.close(ID);
+  assert.deepEqual(killed, []);
+});
+
+// ── a launch that fails part way ─────────────────────────────────────────────
+
+function failingLaunchRig(
+  t: TestContext,
+  opts: Partial<FirefoxBrowserDriverOptions> = {},
+): { driver: FirefoxBrowserDriver; context: FakeContext; started: () => number } {
+  const dir = mkdtempSync(join(tmpdir(), "mz-ff-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const context = new FakeContext();
+  const driver = new FirefoxBrowserDriver({
+    profileManager: {
+      get: (id: ProfileId) =>
+        id === ID ? { id, dataDir: dir, fingerprint: { device: "windows-laptop" } } : null,
+      markOpened: () => {},
+    } as never,
+    browserDataDir: () => "the-data-dir",
+    closeDeadlineMs: 20,
+    firstPageDeadlineMs: 20,
+    findPids: async () => [],
+    killTree: async () => {},
+    egress: new EgressPolicy({ mode: "block-private" }),
+    ...opts,
+  });
+  let started = 0;
+  (driver as unknown as { startContext: unknown }).startContext = async () => {
+    started += 1;
+    return context;
+  };
+  t.after(() => stopBridgeForProfile(ID));
+  return { driver, context, started: () => started };
+}
+
+/** The profile's bridge, new if there is none: a launch finds this one and uses it. */
+const launchesBridge = (): Promise<string> =>
+  startBridgeForProfile(ID, null, new EgressPolicy({ mode: "block-private" }));
+
+test("a first tab that fails ends the browser and its bridge, and the launch says why", async (t) => {
+  const { driver, context } = failingLaunchRig(t);
+  let closes = 0;
+  context.close = async () => {
+    closes += 1;
+  };
+  context.newPage = () => Promise.reject(new Error("no tab for you"));
+  const url = await launchesBridge();
+  await assert.rejects(driver.launch(ID), /no tab for you/);
+  assert.equal(closes, 1);
+  assert.equal(driver.isRunning(ID), false);
+  assert.notEqual(await launchesBridge(), url, "that bridge went with it");
+});
+
+test("a first tab that never comes is bounded, and a browser that won't close then is killed", async (t) => {
+  const killed: number[] = [];
+  const { driver, context } = failingLaunchRig(t, {
+    findPids: async () => [4242],
+    killTree: async (pid) => void killed.push(pid),
+  });
+  t.mock.method(console, "warn", () => {});
+  context.newPage = hangs;
+  context.close = hangs;
+  await assert.rejects(driver.launch(ID), /did not open a tab within 20 ms/);
+  assert.deepEqual(killed, [4242]);
+  assert.equal(driver.isRunning(ID), false);
+});
+
+test("a fingerprint config that throws leaves no bridge behind", async (t) => {
+  const { driver, started } = failingLaunchRig(t, {
+    buildFingerprintConfig: () => {
+      throw new Error("bad persona");
+    },
+  });
+  const url = await launchesBridge();
+  await assert.rejects(driver.launch(ID), /bad persona/);
+  assert.equal(started(), 0, "no browser came of it");
+  assert.notEqual(await launchesBridge(), url, "that bridge went with it");
 });
 
 // ── refs across browser runs, and extract's size ─────────────────────────────

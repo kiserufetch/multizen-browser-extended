@@ -7,7 +7,11 @@ const APP_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const LOG_MODULE = pathToFileURL(fileURLToPath(new URL("./log.ts", import.meta.url))).href;
 
 /** Runs `body` in a child that imported log.ts and installed it for `target`. */
-function run(target: "stdout" | "stderr", body: string): { stdout: string; stderr: string } {
+function run(
+  target: "stdout" | "stderr",
+  body: string,
+  level?: string,
+): { stdout: string; stderr: string } {
   const script = `
     const { installLogging, log, protocolStdout, flushLogs, errorFields } = await import(${JSON.stringify(LOG_MODULE)});
     installLogging(${JSON.stringify(target)});
@@ -18,6 +22,7 @@ function run(target: "stdout" | "stderr", body: string): { stdout: string; stder
     cwd: APP_ROOT,
     encoding: "utf8",
     timeout: 60_000,
+    env: { ...process.env, MULTIZEN_LOG_LEVEL: level },
   });
   assert.equal(res.status, 0, res.stderr);
   return { stdout: res.stdout, stderr: res.stderr };
@@ -45,6 +50,7 @@ test("console.* is rebound, with levels and format strings kept", () => {
   const { stdout } = run(
     "stdout",
     `console.log("n=%d", 5); console.info("i"); console.debug("d"); console.warn("w"); console.error("e", new Error("boom").message);`,
+    "debug",
   );
   assert.deepEqual(
     jsonLines(stdout).map((l) => [l.level, l.msg]),
@@ -56,6 +62,24 @@ test("console.* is rebound, with levels and format strings kept", () => {
       ["error", "e boom"],
     ],
   );
+});
+
+test("MULTIZEN_LOG_LEVEL decides what is written, debug being off unless asked for", () => {
+  const body = `log.debug("d"); log.info("i"); log.warn("w"); log.error("e"); console.debug("cd");`;
+  const levels = (level?: string): unknown[] =>
+    jsonLines(run("stdout", body, level).stdout).map((l) => l.msg);
+  assert.deepEqual(levels(), ["i", "w", "e"]);
+  assert.deepEqual(levels("debug"), ["d", "i", "w", "e", "cd"]);
+  assert.deepEqual(levels("WARN"), ["w", "e"]);
+  assert.deepEqual(levels("error"), ["e"]);
+});
+
+test("a MULTIZEN_LOG_LEVEL nobody knows gets a warning, and info", () => {
+  const lines = jsonLines(run("stdout", `log.debug("d"); log.info("i");`, "loud").stdout);
+  assert.deepEqual(lines.map((l) => [l.level, l.value]), [
+    ["warn", "loud"],
+    ["info", undefined],
+  ]);
 });
 
 test("stdio mode: stdout stays empty whatever gets written, all logs on stderr", () => {

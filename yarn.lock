@@ -1072,6 +1072,7 @@ __metadata:
     "@types/chrome-remote-interface": "npm:^0.31.14"
     "@types/ws": "npm:^8.5.13"
     chrome-remote-interface: "npm:^0.33.3"
+    tsx: "npm:^4.19.2"
     typescript: "npm:^5.7.0"
     ws: "npm:^8.18.0"
   languageName: unknown

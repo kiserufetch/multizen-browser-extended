@@ -44,10 +44,11 @@ function invalidLease(profileId: ProfileId): MultizenError {
  * interleaving, a lease keeps a sequence of them from being interleaved by anyone else.
  * Optional, so a profile with no lease works as if this weren't here.
  *
- * A lease runs on its TTL alone. A session's end doesn't drop it, because a client
- * coming back after a dropped connection reattaches with the id; nor does a human
- * handoff pause it, so renewing stays possible during one. Expired entries go when next
- * looked at, so no timer outlives the process's interest in them.
+ * A lease runs on its TTL. By default a session's end doesn't drop it, because a client
+ * coming back after a dropped connection reattaches with the id: a server told otherwise
+ * calls {@link dropSession}. Nor does a human handoff pause it, so renewing stays possible
+ * during one. Expired entries go when next looked at, so no timer outlives the process's
+ * interest in them.
  */
 export class LeaseRegistry {
   private readonly leases = new Map<ProfileId, Lease>();
@@ -148,6 +149,13 @@ export class LeaseRegistry {
   dropPrincipal(principalId: string): void {
     for (const [profileId, lease] of this.leases) {
       if (lease.holder.principalId === principalId) this.leases.delete(profileId);
+    }
+  }
+
+  /** What this session holds now. A lease it was reattached from has a newer holder. */
+  dropSession(sessionId: string): void {
+    for (const [profileId, lease] of this.leases) {
+      if (lease.holder.sessionId === sessionId) this.leases.delete(profileId);
     }
   }
 

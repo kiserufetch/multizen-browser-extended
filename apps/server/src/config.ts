@@ -57,7 +57,9 @@ export interface ServerConfig {
   /** A session with no call in flight and no request for this long is closed. */
   sessionIdleTtlMs: number;
   maxSessions: number;
-  /** The owner's endpoint, told about each new handoff. Nothing an agent says reaches it. */
+  /** What a session's end does to its leases. `keep`: they run on, for a client coming back. */
+  leaseOnSessionClose: LeaseOnSessionClose;
+  /** The owner's endpoint, told about each new handoff, with the agent's reason. No token or page content. */
   handoffWebhook?: string;
   /** Signs the webhook's body. */
   handoffWebhookSecret?: string;
@@ -66,6 +68,9 @@ export interface ServerConfig {
   /** What one profile's downloads may take. */
   downloadQuotaBytes: number;
 }
+
+export const LEASE_ON_SESSION_CLOSE = ["keep", "release"] as const;
+export type LeaseOnSessionClose = (typeof LEASE_ON_SESSION_CLOSE)[number];
 
 export type Env = Record<string, string | undefined>;
 
@@ -465,6 +470,7 @@ export function parseServeConfig(
     port: { type: "string" },
     "session-idle-ttl-ms": { type: "string" },
     "max-sessions": { type: "string" },
+    "lease-on-session-close": { type: "string" },
     "uploads-root": { type: "string" },
     ...BROWSER_LIMIT_OPTIONS,
     ...DISPLAY_OPTIONS,
@@ -474,6 +480,13 @@ export function parseServeConfig(
   rejectPositionals(flags.positionals);
   const idleTtl = flags.flag("session-idle-ttl-ms") ?? env.MULTIZEN_SESSION_IDLE_TTL_MS;
   const maxSessions = flags.flag("max-sessions") ?? env.MULTIZEN_MAX_SESSIONS;
+  const leaseOnClose =
+    flags.flag("lease-on-session-close") ?? env.MULTIZEN_LEASE_ON_SESSION_CLOSE ?? "keep";
+  if (!(LEASE_ON_SESSION_CLOSE as readonly string[]).includes(leaseOnClose)) {
+    throw new UsageError(
+      `--lease-on-session-close must be one of ${LEASE_ON_SESSION_CLOSE.join(", ")}, got "${leaseOnClose}"`,
+    );
+  }
   return {
     dataDir: resolveDataDir(flags, env, facts),
     ...remoteFields(flags, env),
@@ -484,6 +497,7 @@ export function parseServeConfig(
         : parsePositiveInt("--session-idle-ttl-ms", idleTtl),
     maxSessions:
       maxSessions === undefined ? DEFAULT_MAX_SESSIONS : parsePositiveInt("--max-sessions", maxSessions),
+    leaseOnSessionClose: leaseOnClose as LeaseOnSessionClose,
     defaultEngine: resolveDefaultEngine(flags, env),
     ...uploadsRootField(flags, env),
     ...browserLimitFields(flags, env),

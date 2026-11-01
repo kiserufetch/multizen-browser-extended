@@ -11,6 +11,7 @@ Usage:
                         [--allowed-hosts <name[:port],...>] [--allowed-origins <origin,...>]
                         [--public-url <url>] [--trust-proxy]
                         [--session-idle-ttl-ms <ms>] [--max-sessions <n>]
+                        [--lease-on-session-close keep|release]
                         [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
                         [--handoff-webhook <url>] [--handoff-webhook-secret <secret>]
                         [--handoff-ttl-ms <ms>] [--download-quota-bytes <n>]
@@ -34,12 +35,16 @@ MULTIZEN_BROWSER_QUEUE_TIMEOUT_MS, MULTIZEN_DISPLAY_MODE, MULTIZEN_HEADLESS=1,
 MULTIZEN_ARCHIVE_PASSPHRASE, MULTIZEN_ALLOW_REMOTE=1,
 MULTIZEN_ALLOW_INSECURE_REMOTE=1, MULTIZEN_TLS_CERT, MULTIZEN_TLS_KEY, MULTIZEN_ALLOWED_HOSTS,
 MULTIZEN_ALLOWED_ORIGINS, MULTIZEN_PUBLIC_URL, MULTIZEN_TRUST_PROXY=1,
-MULTIZEN_SESSION_IDLE_TTL_MS, MULTIZEN_MAX_SESSIONS, MULTIZEN_SECRET_KEY,
+MULTIZEN_SESSION_IDLE_TTL_MS, MULTIZEN_MAX_SESSIONS, MULTIZEN_LEASE_ON_SESSION_CLOSE,
+MULTIZEN_LOG_LEVEL (debug, info, warn, error; default info), MULTIZEN_SECRET_KEY,
 MULTIZEN_SECRET_KEY_NEW (secrets rotate only), MULTIZEN_EGRESS_POLICY, MULTIZEN_EGRESS_ALLOW,
 MULTIZEN_HANDOFF_WEBHOOK, MULTIZEN_HANDOFF_WEBHOOK_SECRET, MULTIZEN_HANDOFF_TTL_MS,
 MULTIZEN_DOWNLOAD_QUOTA_BYTES.
 
 --max-browsers counts both engines and defaults to what the machine's memory allows.
+
+--lease-on-session-close keep, the default, lets a lease run on its TTL when its session ends, so a
+client coming back reattaches with its lease_id. release drops the session's leases with it.
 
 --display-mode is the mode when a launch and its profile name none: auto takes xvfb on Linux with no
 DISPLAY if Xvfb is installed, headless if not, and headed elsewhere. --headless allows no windows at

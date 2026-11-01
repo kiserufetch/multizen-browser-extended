@@ -12,7 +12,7 @@ import {
   generateFingerprint,
   type ProfileManager,
 } from "@multizen/profile-manager";
-import type { FingerprintConfig, LaunchedProfile, Profile, ProfileId } from "@multizen/types";
+import type { DriverAction, FingerprintConfig, LaunchedProfile, Profile, ProfileId } from "@multizen/types";
 
 /**
  * End-to-end exercise of the MCP server CDP tool surfaces. We connect a real
@@ -53,7 +53,11 @@ const notUsedHere = async (): Promise<never> => {
  *  response, so dispatch composition (method + params + safe flag) is
  *  observable without a browser. */
 class SpyDriver implements BrowserDriver {
-  performAction = notUsedHere;
+  readonly actions: DriverAction[] = [];
+  async performAction(_profileId: ProfileId, action: DriverAction): Promise<{ ok: true }> {
+    this.actions.push(action);
+    return { ok: true };
+  }
   listDownloads = notUsedHere;
   getDownload = notUsedHere;
   setDialogPolicy = notUsedHere;
@@ -727,8 +731,12 @@ test("request_human then wait_for_human unblocks on resume_human", async () => {
   const req = await call(client, "request_human", { profile_id: "p1", reason: "solve CAPTCHA" });
   assert.equal(req.isError, false);
   assert.equal(req.parsed.status, "waiting_for_human");
-  // request_human brings the window forward (best-effort).
-  assert.ok(spy.calls.some((c) => c.method === "Page.bringToFront"));
+  // request_human brings the window forward (best-effort), with no CDP for Camoufox to lack.
+  assert.ok(spy.actions.some((a) => a.type === "bring_to_front"));
+  assert.ok(!spy.calls.some((c) => c.method === "Page.bringToFront"));
+  // No gate: the desktop or plain stdio, neither with a /panel to send anyone to.
+  assert.match(String(req.parsed.note), /plain stdio has no panel/);
+  assert.doesNotMatch(String(req.parsed.note), /\/panel on this server/);
   const waiting = call(client, "wait_for_human", { profile_id: "p1", timeout_ms: 5000 });
   await call(client, "resume_human", { profile_id: "p1" });
   const res = await waiting;

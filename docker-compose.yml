@@ -18,6 +18,11 @@ services:
     # Above the server's own shutdown watchdog.
     stop_grace_period: 30s
     shm_size: 1gb
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     # Docker's default seccomp profile blocks the user namespaces Chromium's sandbox needs.
     # This one is that default plus those calls. It is the sandbox's only requirement here:
     # no added capability, and the sandbox is never turned off.

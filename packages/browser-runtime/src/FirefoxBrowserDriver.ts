@@ -54,6 +54,7 @@ import { resolveProxyLaunchGeo } from "./launchGeo";
 import { asEgressBlocked, startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { sanitizeStartUrl } from "./startPage";
 import type { RunningStateChange } from "./ChromiumBrowserDriver.ts";
+import { killProcessTree } from "./processTree.ts";
 import { findPidsByDataDir, type ProcessJournal } from "./runState.ts";
 import { startXvfb, type XvfbHandle } from "./xvfb.ts";
 
@@ -102,8 +103,10 @@ const FRAME_DEADLINE_MS = 5_000;
 const DEFAULT_FRAME_QUALITY = 60;
 /** One event from the panel. */
 const HUMAN_INPUT_DEADLINE_MS = 15_000;
-/** After this a close gives up on Firefox answering: the slot must not stay taken forever. */
+/** After this a close stops waiting for Firefox to answer and kills it. */
 const CLOSE_DEADLINE_MS = 15_000;
+/** A browser that can't open its first tab by now has nothing to offer the launch. */
+const FIRST_PAGE_DEADLINE_MS = 30_000;
 /** How long closing waits for a finished download to be copied out. */
 const DOWNLOAD_DRAIN_MS = 3_000;
 /** Under the downloads dir: Playwright's working copies, which it deletes on close. A
@@ -263,6 +266,10 @@ export interface FirefoxBrowserDriverOptions {
   xvfbRunDir?: string;
   /** Replaces {@link findPidsByDataDir}. */
   findPids?: (userDataDir: string) => Promise<number[]>;
+  /** Replaces {@link killProcessTree}. */
+  killTree?: (pid: number) => Promise<void>;
+  /** Replaces {@link FIRST_PAGE_DEADLINE_MS}. */
+  firstPageDeadlineMs?: number;
 }
 
 type PersistentContextOptions = NonNullable<Parameters<typeof firefox.launchPersistentContext>[1]>;
@@ -412,6 +419,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   private readonly processJournal?: ProcessJournal;
   private readonly xvfbRunDir?: string;
   private readonly findPids: (userDataDir: string) => Promise<number[]>;
+  private readonly killTree: (pid: number) => Promise<void>;
+  private readonly firstPageDeadlineMs: number;
 
   /**
    * Bounds every verb in one place, rather than in each body, so nothing an agent
@@ -451,6 +460,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     this.processJournal = opts.processJournal;
     this.xvfbRunDir = opts.xvfbRunDir;
     this.findPids = opts.findPids ?? ((userDataDir) => findPidsByDataDir(userDataDir));
+    this.killTree = opts.killTree ?? ((pid) => killProcessTree(pid));
+    this.firstPageDeadlineMs = opts.firstPageDeadlineMs ?? FIRST_PAGE_DEADLINE_MS;
   }
 
   override on<K extends keyof FirefoxDriverEvents>(event: K, listener: FirefoxDriverEvents[K]): this {
@@ -605,41 +616,32 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     // profiles, matching the Chromium engine's non-proxied-UDP hardening. A page
     // otherwise leaks the operator's real address via STUN outside the proxy. A direct
     // profile under an egress policy gets the same, as the bridge can't see UDP.
-    const config: Record<string, unknown> = {
-      ...camoufoxDisplayOptions(displayMode, xvfb),
-      exclude_addons: ["UBO"],
-      ...(proxy ? { block_webrtc: true } : {}),
-      ...(this.buildFingerprintConfig
-        ? this.buildFingerprintConfig({ ...profile, fingerprint })
-        : {}),
-    };
-
-    const extraPrefs = enforcing ? { ...this.extraPrefs, ...EGRESS_FIREFOX_PREFS } : this.extraPrefs;
-    let context: BrowserContext;
+    let context: BrowserContext | undefined;
     try {
-      const opts = (await launchOptions(
-        config as Parameters<typeof launchOptions>[0],
-      )) as PersistentContextOptions;
-      // Playwright deletes these when the context closes, so each is copied out when
-      // it completes. What a crash left in there belongs to nothing.
-      const downloadsPath = join(profile.dataDir, PROFILE_DOWNLOADS_DIR, PLAYWRIGHT_DOWNLOADS_DIR);
-      await rm(downloadsPath, { recursive: true, force: true }).catch(() => {});
-      context = await firefox.launchPersistentContext(
-        userDataDir,
-        persistentContextOptions(opts, {
-          downloadsPath,
-          ...(proxy ? { proxy } : {}),
-          ...(this.launchExtras ? { launchExtras: this.launchExtras } : {}),
-          ...(extraPrefs ? { extraPrefs } : {}),
-        }),
-      );
+      const config: Record<string, unknown> = {
+        ...camoufoxDisplayOptions(displayMode, xvfb),
+        exclude_addons: ["UBO"],
+        ...(proxy ? { block_webrtc: true } : {}),
+        ...(this.buildFingerprintConfig
+          ? this.buildFingerprintConfig({ ...profile, fingerprint })
+          : {}),
+      };
+
+      const extraPrefs = enforcing ? { ...this.extraPrefs, ...EGRESS_FIREFOX_PREFS } : this.extraPrefs;
+      context = await this.startContext(profile, userDataDir, config, {
+        ...(proxy ? { proxy } : {}),
+        ...(this.launchExtras ? { launchExtras: this.launchExtras } : {}),
+        ...(extraPrefs ? { extraPrefs } : {}),
+      });
+      if (context.pages().length === 0) await this.openFirstPage(context);
     } catch (e) {
+      // Nothing holds this context yet, so nothing else would ever end its browser.
+      if (context) await this.closeOrKill(context, () => this.findPids(userDataDir));
       await xvfb?.stop().catch(() => {});
       if (hasProxyBridge) stopBridgeForProfile(profileId);
       throw e;
     }
 
-    if (context.pages().length === 0) await context.newPage();
     const record = this.adopt(
       profileId,
       context,
@@ -671,6 +673,64 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       startedAt: record.startedAt,
       displayMode,
     };
+  }
+
+  private async startContext(
+    profile: Profile,
+    userDataDir: string,
+    config: Record<string, unknown>,
+    ours: Pick<FirefoxBrowserDriverOptions, "launchExtras" | "extraPrefs"> & {
+      proxy?: { server: string };
+    },
+  ): Promise<BrowserContext> {
+    const opts = (await launchOptions(
+      config as Parameters<typeof launchOptions>[0],
+    )) as PersistentContextOptions;
+    // Playwright deletes these when the context closes, so each is copied out when
+    // it completes. What a crash left in there belongs to nothing.
+    const downloadsPath = join(profile.dataDir, PROFILE_DOWNLOADS_DIR, PLAYWRIGHT_DOWNLOADS_DIR);
+    await rm(downloadsPath, { recursive: true, force: true }).catch(() => {});
+    return firefox.launchPersistentContext(
+      userDataDir,
+      persistentContextOptions(opts, { downloadsPath, ...ours }),
+    );
+  }
+
+  private async openFirstPage(context: BrowserContext): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`Camoufox did not open a tab within ${this.firstPageDeadlineMs} ms`)),
+        this.firstPageDeadlineMs,
+      );
+    });
+    try {
+      await Promise.race([context.newPage(), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Closes a context, or past the deadline kills what it runs: a browser that won't answer
+   * still holds its data dir, so it can't count as closed while it runs. True if it had to kill.
+   */
+  private async closeOrKill(context: BrowserContext, pids: () => Promise<number[]>): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
+    const gaveUp = new Promise<true>((resolve) => {
+      timer = setTimeout(() => resolve(true), this.closeDeadlineMs);
+    });
+    const closed = context.close().catch(() => {}).then(() => false as const);
+    const stuck = await Promise.race([closed, gaveUp]);
+    clearTimeout(timer);
+    if (!stuck) return false;
+    console.warn(`[multizen] Camoufox did not close within ${this.closeDeadlineMs} ms; killing it`);
+    const found = await pids().catch((e: unknown) => {
+      console.warn(`[multizen] could not find the Camoufox process: ${(e as Error).message}`);
+      return [];
+    });
+    await Promise.all(found.map((pid) => this.killTree(pid)));
+    return true;
   }
 
   /**
@@ -844,15 +904,12 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     }
     // The "close" handler clears the map entry, stops the bridge, and emits the
     // running-changed "closed" event.
-    let timer: NodeJS.Timeout | undefined;
-    const gaveUp = new Promise<true>((resolve) => {
-      timer = setTimeout(() => resolve(true), this.closeDeadlineMs);
+    const stuck = await this.closeOrKill(r.context, async () => {
+      if (r.pid) return [r.pid];
+      const profile = this.profileManager.get(profileId);
+      return profile ? this.findPids(this.browserDataDir(profile)) : [];
     });
-    const closed = r.context.close().catch(() => {}).then(() => false as const);
-    const stuck = await Promise.race([closed, gaveUp]);
-    clearTimeout(timer);
     if (stuck) {
-      console.warn(`[multizen] Camoufox did not close within ${this.closeDeadlineMs} ms; giving up on it`);
       this.onContextClosed(profileId, r);
       return;
     }

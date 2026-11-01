@@ -817,6 +817,9 @@ async function startSite(): Promise<Site> {
   let port = 0;
   const handler = (req: IncomingMessage, res: ServerResponse): void => {
     const url = new URL(req.url ?? "/", "http://x");
+    if (url.pathname === "/spec-next") {
+      hits.push({ frame: "spec-next", what: "request", value: String(req.headers["sec-purpose"] ?? "") });
+    }
     if (url.pathname === "/hit") {
       hits.push({
         frame: url.searchParams.get("frame") ?? "",
@@ -875,6 +878,13 @@ async function startSite(): Promise<Site> {
         <input aria-label="Tab two input" oninput="hit('type', this.value)">`,
       ),
       "/popup": page("S5 popup", "popup", `<p>Popup</p>`),
+      "/spec": page(
+        "S5 speculation",
+        "spec",
+        `<a id="go" href="/spec-next" style="display:block;width:300px;height:80px">Go on</a>
+        <script type="speculationrules">{"prerender":[{"source":"list","urls":["/spec-next"]}]}</script>`,
+      ),
+      "/spec-next": page("S5 spec next", "spec-next", `<button onclick="hit('click')">Spec next button</button>`),
       "/other": page("S5 other", "other", `<button onclick="hit('click')">Main button</button>`),
     };
     const body = html[url.pathname];
@@ -1445,6 +1455,26 @@ async function tabsFlow(): Promise<void> {
     expect(profiles.find((p) => p.id === id)?.isRunning, "the profile stopped with its first tab");
     pass("closing the root tab while another exists", `the session lives on in ${tab3}`);
 
+    // ── speculation rules: a click that could activate a prerender ──
+    const specTab = (await tabs()).activeTargetId;
+    await act("navigate", { url: `${site.parent}/spec` });
+    await new Promise((done) => setTimeout(done, 1_000));
+    await act("click", { selector: "#go" });
+    const specRequest = await site.waitHit("spec-next", "request");
+    const specTree = await extractUntil("Spec next button");
+    const specTabs = await tabs();
+    expect(specTabs.activeTargetId === specTab, `the tab changed: ${JSON.stringify(specTabs)}`);
+    expect(
+      specTabs.targetInfos.filter((t) => t.type === "page" && t.targetId === specTab)[0]?.url.endsWith("/spec-next"),
+      `the tab is elsewhere: ${JSON.stringify(specTabs)}`,
+    );
+    await act("click_ref", { ref: refOf(specTree, "Spec next button") });
+    await site.waitHit("spec-next", "click");
+    pass(
+      "a page with speculation rules: the click lands, the tab stays, verbs go on",
+      specRequest.value ? `sec-purpose ${specRequest.value}` : "no prerender: an attached session rules it out",
+    );
+
     // ── navigation ──
     site.hits.length = 0;
     const before = refOf(after, "Main button");
@@ -1605,17 +1635,6 @@ function busyPage(ms: number): string {
 function errorOf(result: ToolResult): Record<string, unknown> {
   expect(result.isError, `expected an error: ${result.content[0]?.text}`);
   return (JSON.parse(result.content[0]?.text ?? "{}") as { error: Record<string, unknown> }).error;
-}
-
-/** Spends at most what the caller still wants to wait, for what must be gone by then. */
-async function isSettledWithin(pending: Promise<unknown>, ms: number): Promise<boolean> {
-  let timer: NodeJS.Timeout | undefined;
-  const late = new Promise<false>((done) => {
-    timer = setTimeout(() => done(false), ms);
-  });
-  const settled = await Promise.race([pending.then(() => true as const, () => true as const), late]);
-  clearTimeout(timer);
-  return settled;
 }
 
 async function waitUntilStopped(client: Client, id: string, budgetMs: number): Promise<number> {
@@ -1832,7 +1851,11 @@ async function preemptionChecks(url: string, token: string, id: string): Promise
   const queued = await httpClient(url, token);
   const closer = await httpClient(url, token);
   const { pid } = await call(holder, "launch_profile", { profile_id: id });
-  const stuck = rawCall(holder, "evaluate_js", { profile_id: id, expression: busyPage(25_000) });
+  // Stuck for good on Camoufox, whose close can't get through to a page holding its thread.
+  const stuck = rawCall(holder, "evaluate_js", {
+    profile_id: id,
+    expression: IS_CAMOUFOX ? "while (true) {}" : busyPage(25_000),
+  });
   await new Promise((done) => setTimeout(done, 500));
   const waiting = rawCall(queued, "click", { profile_id: id, selector: "#left" });
   await new Promise((done) => setTimeout(done, 300));
@@ -1848,26 +1871,61 @@ async function preemptionChecks(url: string, token: string, id: string): Promise
   expect(waiterError.code === "PROFILE_NOT_RUNNING", `waiter: ${JSON.stringify(waiterError)}`);
   expect(holderError.code === "PROFILE_NOT_RUNNING", `holder: ${JSON.stringify(holderError)}`);
   expect(holderMs < 3_000, `the holder took ${holderMs} ms to fail`);
-  // Camoufox doesn't quit while a page holds its thread: the close gives up at its deadline.
+  // Camoufox doesn't quit while a page holds its thread: the close kills it at its deadline.
   expect(closeMs < (IS_CAMOUFOX ? CAMOUFOX_CLOSE_BUDGET_MS : 15_000), `the close took ${closeMs} ms`);
   pass(
     "close_profile preempts a stuck page",
     `waiter failed in ${waiterMs} ms, holder in ${holderMs} ms, closed in ${closeMs} ms`,
   );
   const stillRunning = (): boolean => readJournal().entries.some((e) => e.pid === pid);
-  if (stillRunning()) {
-    expect(IS_CAMOUFOX, `CloakBrowser ${String(pid)} was closed yet is still in the journal`);
-    expect(processExists(Number(pid)), `the journal still lists ${String(pid)}, which is gone`);
+  if (IS_CAMOUFOX) {
+    await waitFor(() => !processExists(Number(pid)), `${String(pid)} to be gone once closed`, 3_000);
     const freed = (await call(closer, "list_profiles")).profiles as Array<{ id: string; isRunning: boolean }>;
-    expect(!freed.find((p) => p.id === id)?.isRunning, "the slot of a browser given up on should be free");
-    pass("a browser that refused to close: its slot is free, its journal entry stays", `pid ${String(pid)}`);
-    await waitFor(() => !stillRunning(), "its entry to go when it finally exits", 30_000);
-    await waitFor(() => !processExists(Number(pid)), "its process to end", 10_000);
-    pass("when it does exit, the exit handler clears the entry");
+    expect(!freed.find((p) => p.id === id)?.isRunning, "the slot of a browser killed should be free");
+    await waitFor(() => !stillRunning(), "its journal entry to go", 10_000);
+    // The server is still up and names the data dir too.
+    await waitFor(
+      () => leftoverProcesses().every((p) => /\b(node(\.exe)?|MainThread)\b/i.test(p)),
+      `its tree to be gone: ${leftoverProcesses().join(", ")}`,
+      5_000,
+    );
+    pass("a browser that refused to close is killed: no process, slot free, entry gone", `pid ${String(pid)}`);
+  } else {
+    expect(!stillRunning(), `CloakBrowser ${String(pid)} was closed yet is still in the journal`);
   }
   await holder.close();
   await queued.close();
   await closer.close();
+}
+
+/**
+ * A session really over, by DELETE, as against leaseChecks' client going away, whose session
+ * lasts until it idles out: `keep` and `release` part ways here.
+ */
+async function leaseOnSessionCloseChecks(
+  url: string,
+  token: string,
+  id: string,
+  mode: "keep" | "release",
+): Promise<void> {
+  const holder = await httpClient(url, token);
+  const other = await httpClient(url, token);
+  await call(holder, "acquire_profile", { profile_id: id, ttl_ms: 60_000 });
+  const held = errorOf(await rawCall(other, "click", { profile_id: id, selector: "#left" }));
+  expect(held.code === "PROFILE_LEASED", JSON.stringify(held));
+
+  await (holder.transport as StreamableHTTPClientTransport).terminateSession();
+  await holder.close();
+  if (mode === "release") {
+    await call(other, "click", { profile_id: id, selector: "#left" });
+    pass("--lease-on-session-close release: a session's end frees its lease");
+  } else {
+    const after = errorOf(await rawCall(other, "click", { profile_id: id, selector: "#left" }));
+    expect(after.code === "PROFILE_LEASED", JSON.stringify(after));
+    pass("--lease-on-session-close keep, the default: a session's end leaves its lease");
+    await call(other, "release_profile", { profile_id: id, force: true });
+  }
+  await other.close();
 }
 
 async function leaseChecks(url: string, token: string, id: string): Promise<void> {
@@ -1977,6 +2035,7 @@ async function concurrencyFlow(): Promise<void> {
     await noInterleavingChecks(serve.url, serve.token, page, site.origin);
     await disconnectChecks(serve.url, serve.token, page);
     await leaseChecks(serve.url, serve.token, page);
+    await leaseOnSessionCloseChecks(serve.url, serve.token, page, "keep");
     await preemptionChecks(serve.url, serve.token, page);
     await launch(owner, page);
     await relaunchRefCheck(owner, page, site.origin, IS_CAMOUFOX ? "Camoufox" : "CloakBrowser");
@@ -1992,6 +2051,20 @@ async function concurrencyFlow(): Promise<void> {
     const exit = await serve.exited;
     expect(exit === 0, `exit code ${exit}:\n${serve.output()}`);
     await assertNoLeftovers("shutdown during a launch");
+
+    const releasing = await startServe(["--lease-on-session-close", "release"]);
+    try {
+      const client = await httpClient(releasing.url, releasing.token);
+      await launch(client, page);
+      await call(client, "navigate", { profile_id: page, url: `${site.origin}/events` });
+      await leaseOnSessionCloseChecks(releasing.url, releasing.token, page, "release");
+      await call(client, "close_profile", { profile_id: page });
+      await client.close();
+      sendConsoleCtrl(releasing.child.pid!, "CTRL_BREAK");
+      await releasing.exited;
+    } finally {
+      if (releasing.child.exitCode === null) releasing.child.kill();
+    }
   } finally {
     if (serve.child.exitCode === null) serve.child.kill();
     await site.close();
