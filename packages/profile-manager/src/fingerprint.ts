@@ -48,6 +48,39 @@ interface WebGlPair {
   renderer: string;
 }
 
+/*
+ * Linux WebGL pairs are stored as Chrome on Linux reports them, which is what
+ * CloakBrowser expects: ANGLE runs on the desktop GL driver, so the unmasked
+ * vendor is "Google Inc. (<GL_VENDOR>)" and the renderer is
+ * "ANGLE (<GL_VENDOR>, <GL_RENDERER>, OpenGL <GL_VERSION>)". CloakBrowser hands
+ * a string of that shape to the page unchanged. A bare GL string is not safe:
+ * CloakBrowser passes "Mesa" / "Mesa Intel(R) ..." through raw (a vendor no
+ * Chrome reports), and wraps a bare "NVIDIA ..." renderer itself, appending its
+ * own "/PCIe/SSE2", so "…RTX 4070/PCIe/SSE2" became "…/PCIe/SSE2/PCIe/SSE2".
+ *
+ * The NVIDIA driver string is CloakBrowser's own (its seed-generated Linux GPUs
+ * all read "OpenGL 4.5.0 NVIDIA 565.77"), which is also what pages already saw
+ * for these personas before the stored strings were fixed.
+ */
+const LINUX_NVIDIA_GL_VERSION = "OpenGL 4.5.0 NVIDIA 565.77";
+const LINUX_MESA_GL_VERSION = "OpenGL 4.6 (Core Profile) Mesa 24.0.9";
+
+/** A proprietary-driver NVIDIA GPU as Chrome on Linux reports it. */
+function linuxNvidia(model: string): WebGlPair {
+  return {
+    vendor: "Google Inc. (NVIDIA Corporation)",
+    renderer: `ANGLE (NVIDIA Corporation, ${model}/PCIe/SSE2, ${LINUX_NVIDIA_GL_VERSION})`,
+  };
+}
+
+/** A Mesa-driver GPU as Chrome on Linux reports it. `glVendor` is Mesa's GL_VENDOR. */
+function linuxMesa(glVendor: "Intel" | "AMD", glRenderer: string): WebGlPair {
+  return {
+    vendor: `Google Inc. (${glVendor})`,
+    renderer: `ANGLE (${glVendor}, ${glRenderer}, ${LINUX_MESA_GL_VERSION})`,
+  };
+}
+
 interface DeviceSpec {
   family: DeviceFamily;
   /** Human-readable label for UI dropdowns */
@@ -699,9 +732,8 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: COMMON_DESKTOP_SCREENS,
     dpr: 1,
     webgl: [
-      { vendor: "Mesa", renderer: "Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2)" },
-      { vendor: "Mesa", renderer: "Mesa Intel(R) Graphics (RPL-P)" },
-      { vendor: "Intel", renderer: "Intel(R) Iris(R) Xe Graphics (0x0000A7A0)" },
+      linuxMesa("Intel", "Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2)"),
+      linuxMesa("Intel", "Mesa Intel(R) Graphics (RPL-P)"),
     ],
     hardwareConcurrency: [4, 8, 12],
     deviceMemory: [8, 16],
@@ -718,9 +750,9 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: COMMON_DESKTOP_SCREENS,
     dpr: 1,
     webgl: [
-      { vendor: "Mesa", renderer: "AMD Radeon Graphics (radeonsi, rembrandt, LLVM 17.0.6, DRM 3.57, 6.8.0)" },
-      { vendor: "Mesa", renderer: "AMD Radeon 780M (radeonsi, phoenix, LLVM 17.0.6, DRM 3.57, 6.8.0)" },
-      { vendor: "AMD", renderer: "AMD Radeon RX 7600M XT (radeonsi, navi33, LLVM 17.0.6, DRM 3.57, 6.8.0)" },
+      linuxMesa("AMD", "AMD Radeon Graphics (radeonsi, rembrandt, LLVM 17.0.6, DRM 3.57, 6.8.0)"),
+      linuxMesa("AMD", "AMD Radeon 780M (radeonsi, phoenix, LLVM 17.0.6, DRM 3.57, 6.8.0)"),
+      linuxMesa("AMD", "AMD Radeon RX 7600M XT (radeonsi, navi33, LLVM 17.0.6, DRM 3.57, 6.8.0)"),
     ],
     hardwareConcurrency: [6, 8, 12, 16],
     deviceMemory: [8, 16, 32],
@@ -737,9 +769,8 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: COMMON_DESKTOP_SCREENS,
     dpr: 1,
     webgl: [
-      { vendor: "NVIDIA Corporation", renderer: "NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2" },
-      { vendor: "NVIDIA Corporation", renderer: "NVIDIA GeForce RTX 4050 Laptop GPU/PCIe/SSE2" },
-      { vendor: "Mesa", renderer: "NV178" },
+      linuxNvidia("NVIDIA GeForce RTX 4060 Laptop GPU"),
+      linuxNvidia("NVIDIA GeForce RTX 4050 Laptop GPU"),
     ],
     hardwareConcurrency: [8, 12, 16],
     deviceMemory: [8, 16, 32],
@@ -756,10 +787,10 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: [...COMMON_DESKTOP_SCREENS, { width: 3840, height: 2160, label: "3840 × 2160 (4K)" }],
     dpr: 1,
     webgl: [
-      { vendor: "Mesa", renderer: "Mesa Intel(R) UHD Graphics 770 (RPL-S)" },
-      { vendor: "Mesa", renderer: "Mesa Intel(R) Graphics (ADL GT2)" },
-      { vendor: "Mesa", renderer: "Mesa Intel(R) Arc(tm) A750 Graphics (DG2)" },
-      { vendor: "Intel", renderer: "Intel(R) Arc(TM) A770 Graphics (0x000056A0)" },
+      linuxMesa("Intel", "Mesa Intel(R) UHD Graphics 770 (RPL-S)"),
+      linuxMesa("Intel", "Mesa Intel(R) Graphics (ADL GT2)"),
+      linuxMesa("Intel", "Mesa Intel(R) Arc(tm) A750 Graphics (DG2)"),
+      linuxMesa("Intel", "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)"),
     ],
     hardwareConcurrency: [4, 8, 12, 16],
     deviceMemory: [8, 16, 32],
@@ -776,10 +807,10 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: [...COMMON_DESKTOP_SCREENS, { width: 3840, height: 2160, label: "3840 × 2160 (4K)" }],
     dpr: 1,
     webgl: [
-      { vendor: "Mesa", renderer: "AMD Radeon RX 7800 XT (radeonsi, navi32, LLVM 17.0.6, DRM 3.57, 6.6.0)" },
-      { vendor: "Mesa", renderer: "AMD Radeon Graphics (radeonsi, renoir, LLVM 17.0.6, DRM 3.57, 6.6.0)" },
-      { vendor: "Mesa", renderer: "AMD Radeon RX 6700 XT (radeonsi, navi22, LLVM 17.0.6, DRM 3.57, 6.6.0)" },
-      { vendor: "AMD", renderer: "AMD Radeon RX 7900 XTX (radeonsi, navi31, LLVM 17.0.6, DRM 3.57, 6.6.0)" },
+      linuxMesa("AMD", "AMD Radeon RX 7800 XT (radeonsi, navi32, LLVM 17.0.6, DRM 3.57, 6.6.0)"),
+      linuxMesa("AMD", "AMD Radeon Graphics (radeonsi, renoir, LLVM 17.0.6, DRM 3.57, 6.6.0)"),
+      linuxMesa("AMD", "AMD Radeon RX 6700 XT (radeonsi, navi22, LLVM 17.0.6, DRM 3.57, 6.6.0)"),
+      linuxMesa("AMD", "AMD Radeon RX 7900 XTX (radeonsi, navi31, LLVM 17.0.6, DRM 3.57, 6.6.0)"),
     ],
     hardwareConcurrency: [6, 8, 12, 16, 24],
     deviceMemory: [8, 16, 32, 64],
@@ -796,10 +827,9 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: [...COMMON_DESKTOP_SCREENS, { width: 3840, height: 2160, label: "3840 × 2160 (4K)" }],
     dpr: 1,
     webgl: [
-      { vendor: "NVIDIA Corporation", renderer: "NVIDIA GeForce RTX 4070/PCIe/SSE2" },
-      { vendor: "NVIDIA Corporation", renderer: "NVIDIA GeForce RTX 3080/PCIe/SSE2" },
-      { vendor: "Mesa", renderer: "NVIDIA GeForce RTX 4070/PCIe/SSE2" },
-      { vendor: "Mesa", renderer: "NV137" },
+      linuxNvidia("NVIDIA GeForce RTX 4070"),
+      linuxNvidia("NVIDIA GeForce RTX 3080"),
+      linuxNvidia("NVIDIA GeForce RTX 3060"),
     ],
     hardwareConcurrency: [8, 12, 16, 24],
     deviceMemory: [16, 32, 64],
@@ -840,10 +870,55 @@ function resolveWebgl(
   preferred: WebGlPair | undefined,
   rand?: () => number,
 ): WebGlPair {
-  if (preferred && device.webgl.some((w) => webglMatches(w, preferred))) {
-    return preferred;
+  const current = preferred ? (migrateLegacyWebgl(device, preferred) ?? preferred) : undefined;
+  if (current && device.webgl.some((w) => webglMatches(w, current))) {
+    return current;
   }
   return rand ? pick(device.webgl, rand) : device.webgl[0]!;
+}
+
+/** Bare GL renderers older catalogs used where Mesa's own string differs. */
+const LEGACY_INTEL_RENDERERS: Readonly<Record<string, string>> = {
+  "Intel(R) Iris(R) Xe Graphics (0x0000A7A0)": "Mesa Intel(R) Graphics (RPL-P)",
+  "Intel(R) Arc(TM) A770 Graphics (0x000056A0)": "Mesa Intel(R) Arc(tm) A770 Graphics (DG2)",
+};
+
+/**
+ * The current form of a Linux WebGL pair stored by an older catalog, or null
+ * when the pair needs no change. Older catalogs stored bare GL strings, which
+ * CloakBrowser shows raw or, for NVIDIA, wraps with a second "/PCIe/SSE2" (see
+ * linuxNvidia). The same GPU is kept: an NVIDIA pair keeps its model and the
+ * driver string pages already saw, a Mesa pair keeps its GL renderer. Only the
+ * nouveau entries ("Mesa" / "NV178", "NV137": a chip id no Chrome-on-Linux
+ * population shows, NV178 being no real chip) can't be kept; they take the
+ * family's first GPU.
+ */
+function migrateLegacyWebgl(device: DeviceSpec, pair: WebGlPair): WebGlPair | null {
+  if (!device.family.startsWith("linux-")) return null;
+  // A malformed stored pair is left as it is: this runs when the database opens.
+  if (typeof pair.renderer !== "string" || typeof pair.vendor !== "string") return null;
+  if (pair.renderer.startsWith("ANGLE (")) return null;
+  const nvidia = /^(NVIDIA .+?)\/PCIe\/SSE2$/.exec(pair.renderer);
+  if (nvidia) return linuxNvidia(nvidia[1]!);
+  if (/^NV[0-9A-F]+$/.test(pair.renderer)) return device.webgl[0]!;
+  const intel = LEGACY_INTEL_RENDERERS[pair.renderer];
+  if (intel) return linuxMesa("Intel", intel);
+  if (pair.renderer.startsWith("Mesa Intel(R) ")) return linuxMesa("Intel", pair.renderer);
+  if (/^AMD .*\(radeonsi, /.test(pair.renderer)) return linuxMesa("AMD", pair.renderer);
+  return null;
+}
+
+/**
+ * Bring a stored fingerprint up to the current catalog's WebGL form. Returns
+ * the same object when nothing changes, so callers can tell whether to save.
+ * Used when a saved or imported profile is read; generation and reconcile
+ * already produce the current form.
+ */
+export function migrateFingerprint(fp: FingerprintConfig): FingerprintConfig {
+  const device = DEVICES.find((d) => d.family === fp.device);
+  if (!device || !fp.webgl) return fp;
+  const webgl = migrateLegacyWebgl(device, fp.webgl);
+  return webgl ? { ...fp, webgl: { vendor: webgl.vendor, renderer: webgl.renderer } } : fp;
 }
 
 /**

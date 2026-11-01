@@ -1345,6 +1345,10 @@ function buildCloakBrowserFingerprintArgs(profileId: ProfileId, fp: FingerprintC
   // auto-generation. Browserscan flags "WebGL exception" when CloakBrowser's
   // seed-derived GPU pool produces inconsistent values for the current
   // platform — pinning them to fp.webgl forces coherence with the persona.
+  // The strings must already be in the form Chrome reports ("Google Inc. (X)" /
+  // "ANGLE (X, ...)"): CloakBrowser passes those through, shows any other string
+  // raw, and wraps a bare "NVIDIA ..." renderer itself, doubling "/PCIe/SSE2".
+  // The catalog and migrateFingerprint (profile-manager) keep them that way.
   if (fp.webgl?.vendor) args.push(`--fingerprint-gpu-vendor=${fp.webgl.vendor}`);
   if (fp.webgl?.renderer) args.push(`--fingerprint-gpu-renderer=${fp.webgl.renderer}`);
   // Brand + version from Client Hints — keeps Sec-CH-UA + UA-string + UA-CH

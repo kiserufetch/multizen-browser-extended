@@ -20,6 +20,7 @@ export {
   CHROME_VERSION_MAJOR,
   reducedUserAgent,
   deviceMemoryApiValue,
+  migrateFingerprint,
   type DeviceCatalogEntry,
   type LocaleCatalogEntry,
   type GenerateFingerprintOptions,
