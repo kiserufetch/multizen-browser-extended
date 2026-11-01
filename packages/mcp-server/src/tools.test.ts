@@ -547,25 +547,14 @@ test("set_dialog_policy, list_dialogs and handle_dialog reach the driver", async
 
 // ── leases and handoff status ────────────────────────────────────────────────
 
-test("lease tools refuse with a typed error instead of pretending", async () => {
+test("a lease works on a profile that isn't running", async () => {
   const { client } = await connect({ running: false });
-  const calls: Array<[string, Record<string, unknown>]> = [
-    ["acquire_profile", {}],
-    ["renew_profile", { lease_id: "l" }],
-    ["release_profile", {}],
-  ];
-  for (const [name, args] of calls) {
-    const error = await assertCode(
-      client,
-      name,
-      { profile_id: "p", ...args },
-      "UNSUPPORTED_ON_ENGINE",
-    );
-    assert.equal(error.retryable, false);
-    assert.match(String(error.message), new RegExp(name));
-    await assertCode(client, name, { profile_id: "ghost", ...args }, "PROFILE_NOT_FOUND");
-  }
-  await assertCode(client, "renew_profile", { profile_id: "p" }, "INVALID_INPUT");
+  const { parsed } = await call(client, "acquire_profile", { profile_id: "p" });
+  assert.equal(parsed.ttl_ms, 300_000);
+  assert.deepEqual(
+    (await call(client, "release_profile", { profile_id: "p", lease_id: parsed.lease_id })).parsed,
+    { released: true },
+  );
   await client.close();
 });
 

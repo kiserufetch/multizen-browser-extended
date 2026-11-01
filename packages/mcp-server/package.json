@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/standalone.ts --mock",
-    "test": "node --import tsx --test src/HttpTransport.test.ts src/cdpTools.test.ts src/profileTools.test.ts src/standalone.test.ts src/errorMapping.test.ts src/toolPolicy.test.ts src/tools.test.ts src/activityLog.test.ts src/toolsList.test.ts src/testLists.test.ts",
+    "test": "node --import tsx --test src/HttpTransport.test.ts src/cdpTools.test.ts src/profileTools.test.ts src/standalone.test.ts src/errorMapping.test.ts src/toolPolicy.test.ts src/tools.test.ts src/activityLog.test.ts src/toolsList.test.ts src/testLists.test.ts src/ProfileMutex.test.ts src/LeaseRegistry.test.ts src/concurrency.test.ts",
     "smoke:fingerprint": "tsx scripts/smoke-fingerprint-seed.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

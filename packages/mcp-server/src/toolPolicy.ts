@@ -22,6 +22,10 @@ export interface ToolPolicy {
   humanGate: HumanGate;
   /** The argument holding a URL the browser will open. */
   urlArg?: string;
+  /** Ends the profile for everyone queued: they are told so rather than left to wait. */
+  preempts?: boolean;
+  /** Checks a lease itself, because a holder that reconnected has to get through. */
+  ownLeaseCheck?: boolean;
 }
 
 function hints(
@@ -58,7 +62,8 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
   list_fingerprint_options: { group: "read", annotations: LOCAL_READ, scope: "none", ...unlocked },
   extract: { group: "read", annotations: PAGE_READ, ...pageRead, humanGate: "allow-unless-sensitive" },
   screenshot: { group: "read", annotations: PAGE_READ, ...pageRead, humanGate: "allow-unless-sensitive" },
-  list_tabs: { group: "read", annotations: LOCAL_READ, ...pageRead },
+  // The browser answers this, not the page, so it can't get stuck and needn't queue.
+  list_tabs: { group: "read", annotations: LOCAL_READ, scope: "profile", ...unlocked },
   probe_fingerprint: { group: "read", annotations: PAGE_READ, ...pageRead },
   list_downloads: { group: "read", annotations: LOCAL_READ, scope: "profile", ...unlocked },
   // Answers the dialog an operation may be stuck behind, so it can't queue behind it.
@@ -68,7 +73,7 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
   // act
   launch_profile: { group: "act", annotations: hints(false, false, true, true), ...pageWrite },
   // Bypasses the queue and, during a handoff, ends it as aborted.
-  close_profile: { group: "act", annotations: hints(false, true, true, false), scope: "profile", ...unlocked },
+  close_profile: { group: "act", annotations: hints(false, true, true, false), scope: "profile", ...unlocked, preempts: true },
   navigate: { group: "act", annotations: hints(false, false, false, true), ...pageWrite, urlArg: "url" },
   click: { group: "act", annotations: PAGE_ACTION, ...pageWrite },
   type: { group: "act", annotations: PAGE_ACTION, ...pageWrite },
@@ -95,13 +100,14 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
   request_human: { group: "act", annotations: LOCAL_CHANGE, scope: "profile", ...unlocked },
   wait_for_human: { group: "act", annotations: LOCAL_READ, scope: "profile", ...unlocked },
   // Lease TTL keeps running during a handoff, so renewal has to keep working.
-  acquire_profile: { group: "act", annotations: hints(false, false, false, false), scope: "profile", ...unlocked },
-  renew_profile: { group: "act", annotations: hints(false, false, false, false), scope: "profile", ...unlocked },
-  release_profile: { group: "act", annotations: LOCAL_CHANGE, scope: "profile", ...unlocked },
+  acquire_profile: { group: "act", annotations: hints(false, false, false, false), scope: "profile", ...unlocked, ownLeaseCheck: true },
+  renew_profile: { group: "act", annotations: hints(false, false, false, false), scope: "profile", ...unlocked, ownLeaseCheck: true },
+  release_profile: { group: "act", annotations: LOCAL_CHANGE, scope: "profile", ...unlocked, ownLeaseCheck: true },
 
   // profile-admin
   create_profile: { group: "profile-admin", annotations: hints(false, false, false, false), scope: "none", ...unlocked },
-  update_profile: { group: "profile-admin", annotations: hints(false, true, true, false), ...pageWrite },
+  // Only the database: a live browser keeps what it launched with, so nothing to queue behind.
+  update_profile: { group: "profile-admin", annotations: hints(false, true, true, false), ...pageWrite, lock: "none" },
   delete_profile: { group: "profile-admin", annotations: hints(false, true, true, false), ...pageWrite },
 
   // raw
@@ -115,6 +121,11 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
 /** Own entries only: a tool name is caller input, and `constructor` is a name too. */
 export function policyFor(tool: string): ToolPolicy | null {
   return Object.hasOwn(TOOL_POLICIES, tool) ? TOOL_POLICIES[tool]! : null;
+}
+
+/** A lease keeps others from changing a profile. Reading it disturbs nobody. */
+export function leaseBinds(policy: ToolPolicy): boolean {
+  return !policy.annotations.readOnlyHint && !policy.ownLeaseCheck;
 }
 
 export function policedToolNames(): string[] {

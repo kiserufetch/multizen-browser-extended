@@ -277,3 +277,133 @@ test("only the handoff panel's capture and input still refuse on this engine", a
     await assert.rejects(driver.listDialogs(id), (e: MultizenError) => e.code === "PROFILE_NOT_RUNNING");
   });
 });
+
+// ── one launch at a time ─────────────────────────────────────────────────────
+
+/** doLaunch replaced by one that ends when told, with the wrapper around it real. */
+function slowLaunch(driver: ChromiumBrowserDriver): { calls: () => number; finish: () => void } {
+  let calls = 0;
+  let finish = (): void => {};
+  (driver as unknown as { doLaunch: unknown }).doLaunch = async (id: ProfileId) => {
+    calls += 1;
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    graftRunning(driver, id, { abortOperations: () => {}, closeBrowser: async () => {}, close: async () => {} });
+    (driver as unknown as { running: Map<ProfileId, Record<string, unknown>> }).running.get(id)!.child = {
+      exitCode: 0,
+      killed: false,
+      once: () => {},
+      kill: () => {},
+    };
+    return { id, cdpEndpoint: "http://127.0.0.1:1", pid: 0, startedAt: "now" };
+  };
+  return { calls: () => calls, finish: () => finish() };
+}
+
+const turn = async (): Promise<void> => {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+};
+
+test("two parallel launches run doLaunch once; a later one answers from what runs", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    const slow = slowLaunch(driver);
+    const launches = [driver.launch(id), driver.launch(id)];
+    await turn();
+    assert.equal(slow.calls(), 1);
+    slow.finish();
+    const [a, b] = await Promise.all(launches);
+    assert.equal(a, b);
+    assert.equal(driver.isRunning(id), true);
+    await driver.launch(id);
+    assert.equal(slow.calls(), 1, "launching a running profile stays idempotent");
+    await driver.close(id);
+  });
+});
+
+test("a failed launch doesn't stick: the next one tries again", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    let calls = 0;
+    (driver as unknown as { doLaunch: unknown }).doLaunch = async () => {
+      calls += 1;
+      throw new Error("no browser");
+    };
+    await assert.rejects(driver.launch(id), /no browser/);
+    await assert.rejects(driver.launch(id), /no browser/);
+    assert.equal(calls, 2);
+  });
+});
+
+test("close during a launch waits for it, and closes what came up", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    const slow = slowLaunch(driver);
+    const launching = driver.launch(id);
+    await turn();
+    let closed = false;
+    const closing = driver.close(id).then(() => {
+      closed = true;
+    });
+    await turn();
+    assert.equal(closed, false);
+    slow.finish();
+    await launching;
+    await closing;
+    assert.equal(driver.isRunning(id), false);
+  });
+});
+
+test("closeAll during a launch: what the launch brings up is closed, and it fails", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    const slow = slowLaunch(driver);
+    const launching = driver.launch(id);
+    await turn();
+    const closingAll = driver.closeAll();
+    await turn();
+    slow.finish();
+    await assert.rejects(launching, (e: MultizenError) => e.code === "LAUNCH_FAILED");
+    await closingAll;
+    assert.equal(driver.isRunning(id), false);
+  });
+});
+
+test("closeAll during a launch stops waiting for a browser coming up, at once", async () => {
+  await withProfile(async (pm, id) => {
+    // Node exits at once on Chromium's flags, so no real browser comes up, and until its
+    // budget runs out the launch would only end when something ends it.
+    const driver = driverFor(pm, process.execPath, { readinessBudgetMs: 6_000 });
+    const launching = driver.launch(id);
+    const failure = assert.rejects(launching, (e: MultizenError) => e.code === "LAUNCH_FAILED");
+    while (!(driver as unknown as { launching: Map<ProfileId, { killStarting?: unknown }> }).launching.get(id)?.killStarting) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const startedAt = Date.now();
+    await driver.closeAll();
+    await failure;
+    assert.ok(Date.now() - startedAt < 4_000, `took ${Date.now() - startedAt} ms`);
+    assert.equal(driver.isRunning(id), false);
+  });
+});
+
+test("closing ends a call stuck on the browser right away", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    let aborted = 0;
+    graftRunning(driver, id, {
+      abortOperations: () => void aborted++,
+      closeBrowser: async () => {},
+      close: async () => {},
+    });
+    (driver as unknown as { running: Map<ProfileId, Record<string, unknown>> }).running.get(id)!.child = {
+      exitCode: 0,
+      killed: false,
+      once: () => {},
+      kill: () => {},
+    };
+    await driver.close(id);
+    assert.equal(aborted, 1);
+  });
+});

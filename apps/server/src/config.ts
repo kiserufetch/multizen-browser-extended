@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import type { BrowserEngine } from "@multizen/types";
@@ -17,6 +17,10 @@ export interface ServerConfig {
   defaultEngine?: BrowserEngine;
   /** A directory upload_file may read from, besides each profile's uploads dir. */
   uploadsRoot?: string;
+  /** Browsers at once, over both engines. */
+  maxBrowsers: number;
+  /** How long a launch waits for a free slot before BROWSER_LIMIT_REACHED. Default: the router's. */
+  browserQueueTimeoutMs?: number;
 }
 
 export type Env = Record<string, string | undefined>;
@@ -83,6 +87,32 @@ export function dataDirPathWarning(dataDir: string, platform: NodeJS.Platform): 
   );
 }
 
+const GIB = 1024 ** 3;
+/** Left for the system and this server. */
+const MEMORY_RESERVE_BYTES = GIB;
+/** A busy page and its browser take about this much. */
+const MEMORY_PER_BROWSER_BYTES = GIB;
+
+/** What a container's limit leaves, where there is one: totalmem reports the whole host. */
+function usableMemoryBytes(): number {
+  const constrained = process.constrainedMemory();
+  const total = totalmem();
+  return constrained > 0 && constrained < total ? constrained : total;
+}
+
+/** Past this a machine thrashes and every browser on it gets slow, so it isn't unlimited. */
+export function defaultMaxBrowsers(memoryBytes: number = usableMemoryBytes()): number {
+  return Math.max(1, Math.floor((memoryBytes - MEMORY_RESERVE_BYTES) / MEMORY_PER_BROWSER_BYTES));
+}
+
+function parsePositiveInt(flag: string, value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new UsageError(`${flag} must be a positive whole number, got "${value}"`);
+  }
+  return n;
+}
+
 function parseEngine(value: string | undefined): BrowserEngine | undefined {
   if (value === undefined) return undefined;
   if (!isBrowserEngine(value)) throw new UsageError(`Unknown engine "${value}"`);
@@ -141,6 +171,25 @@ function resolveDefaultEngine(flags: ParsedFlags, env: Env): BrowserEngine | und
   return parseEngine(flags.flag("default-engine") ?? env.MULTIZEN_DEFAULT_ENGINE);
 }
 
+const BROWSER_LIMIT_OPTIONS: NonNullable<ParseArgsConfig["options"]> = {
+  "max-browsers": { type: "string" },
+  "browser-queue-timeout-ms": { type: "string" },
+};
+
+function browserLimitFields(
+  flags: ParsedFlags,
+  env: Env,
+): Pick<ServerConfig, "maxBrowsers" | "browserQueueTimeoutMs"> {
+  const max = flags.flag("max-browsers") ?? env.MULTIZEN_MAX_BROWSERS;
+  const wait = flags.flag("browser-queue-timeout-ms") ?? env.MULTIZEN_BROWSER_QUEUE_TIMEOUT_MS;
+  return {
+    maxBrowsers: max === undefined ? defaultMaxBrowsers() : parsePositiveInt("--max-browsers", max),
+    ...(wait !== undefined
+      ? { browserQueueTimeoutMs: parsePositiveInt("--browser-queue-timeout-ms", wait) }
+      : {}),
+  };
+}
+
 function uploadsRootField(flags: ParsedFlags, env: Env): { uploadsRoot?: string } {
   const uploadsRoot = flags.flag("uploads-root") ?? env.MULTIZEN_UPLOADS_ROOT;
   return uploadsRoot ? { uploadsRoot: resolve(uploadsRoot) } : {};
@@ -157,6 +206,7 @@ export function parseServeConfig(
     port: { type: "string" },
     "no-auth": { type: "boolean" },
     "uploads-root": { type: "string" },
+    ...BROWSER_LIMIT_OPTIONS,
   });
   rejectPositionals(flags.positionals);
   return {
@@ -166,11 +216,15 @@ export function parseServeConfig(
     noAuth: flags.isSet("no-auth") || env.MULTIZEN_NO_AUTH === "1",
     defaultEngine: resolveDefaultEngine(flags, env),
     ...uploadsRootField(flags, env),
+    ...browserLimitFields(flags, env),
   };
 }
 
 export type StdioConfig =
-  | { kind: "local"; dataDir: string; defaultEngine?: BrowserEngine; uploadsRoot?: string }
+  | ({ kind: "local"; dataDir: string; defaultEngine?: BrowserEngine; uploadsRoot?: string } & Pick<
+      ServerConfig,
+      "maxBrowsers" | "browserQueueTimeoutMs"
+    >)
   | { kind: "connect"; url: string; tokenFile?: string };
 
 export function parseStdioConfig(
@@ -183,6 +237,7 @@ export function parseStdioConfig(
     connect: { type: "string" },
     "token-file": { type: "string" },
     "uploads-root": { type: "string" },
+    ...BROWSER_LIMIT_OPTIONS,
   });
   rejectPositionals(flags.positionals);
 
@@ -195,12 +250,17 @@ export function parseStdioConfig(
       dataDir: resolveDataDir(flags, env, facts),
       defaultEngine: resolveDefaultEngine(flags, env),
       ...uploadsRootField(flags, env),
+      ...browserLimitFields(flags, env),
     };
   }
 
-  if (flags.isSet("data-dir") || flags.isSet("default-engine") || flags.isSet("uploads-root")) {
+  if (
+    ["data-dir", "default-engine", "uploads-root", "max-browsers", "browser-queue-timeout-ms"].some(
+      (flag) => flags.isSet(flag),
+    )
+  ) {
     throw new UsageError(
-      "--connect runs no browsers: --data-dir, --default-engine and --uploads-root don't apply",
+      "--connect runs no browsers: --data-dir, --default-engine, --uploads-root, --max-browsers and --browser-queue-timeout-ms don't apply",
     );
   }
   let url: URL;

@@ -107,6 +107,11 @@ export interface RunningInfo {
   startedAt: string;
 }
 
+export interface LaunchOptions {
+  /** Gives up the wait for a free browser slot. A browser already starting still starts. */
+  signal?: AbortSignal;
+}
+
 /**
  * BrowserDriver is the surface that the MCP server delegates real
  * browser work to. The desktop app implements it on top of patched
@@ -114,7 +119,7 @@ export interface RunningInfo {
  * MCP server can be exercised without a browser.
  */
 export interface BrowserDriver {
-  launch(profileId: ProfileId): Promise<LaunchedProfile>;
+  launch(profileId: ProfileId, opts?: LaunchOptions): Promise<LaunchedProfile>;
   close(profileId: ProfileId): Promise<void>;
   isRunning(profileId: ProfileId): boolean;
   navigate(profileId: ProfileId, url: string): Promise<{ url: string }>;

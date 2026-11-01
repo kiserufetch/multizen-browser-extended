@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 
 import { MultizenError } from "@multizen/types";
 
-import { CdpSession, InputNotDeliveredError, type TargetSender } from "./CdpSession.js";
+import { CdpSession, InputNotDeliveredError, randomRefBase, type TargetSender } from "./CdpSession.js";
 import { describeNamedKey, parseChord } from "./keyboard.js";
 import { TargetRegistry } from "./targetRegistry.js";
 import type { AccessibilityNode } from "./types.js";
@@ -119,8 +119,11 @@ function quad(x: number, y: number, w: number, h: number): number[] {
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 15));
 
 /** A session through the real connect(), on the fake instead of a socket. */
-function newSession(browser: FakeBrowser, opts: { platform?: "macos" } = {}): CdpSession {
-  const s = new CdpSession({ port: 0, ...opts });
+function newSession(
+  browser: FakeBrowser,
+  opts: { platform?: "macos"; operationDeadlineMs?: number; refBase?: number } = {},
+): CdpSession {
+  const s = new CdpSession({ port: 0, refBase: 0, ...opts });
   (s as unknown as { openBrowserSocket: () => Promise<unknown> }).openBrowserSocket = async () =>
     browser;
   return s;
@@ -1222,4 +1225,241 @@ test("an idle page never outranks one in use, and takes the active slot only whe
   assert.equal(r.active(), "used");
   r.remove("used");
   assert.equal(r.active(), "popup");
+});
+
+// ── refs across browser runs ─────────────────────────────────────────────────
+
+function pageWithButton(b: FakeBrowser): void {
+  b.handlers.set("Accessibility.getFullAXTree", () =>
+    axTree({ id: "1", role: "button", name: "Go", backend: 42 }),
+  );
+}
+
+test("refs start at a random base per session, keeping the eN shape", async () => {
+  const bases = new Set<number>();
+  for (let i = 0; i < 5; i++) {
+    const b = new FakeBrowser();
+    b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+      if (!sid) b.attachPage("A", "S-A");
+      return {};
+    });
+    pageWithButton(b);
+    const s = new CdpSession({ port: 0 });
+    (s as unknown as { openBrowserSocket: () => Promise<unknown> }).openBrowserSocket = async () => b;
+    await s.connect();
+    const { result } = await s.extract();
+    const ref = refNamed(result.accessibilityTree ?? [], "Go");
+    assert.match(ref, /^e\d+$/);
+    const n = Number(ref.slice(1));
+    assert.ok(n > 1_000 && n <= 900_001, ref);
+    bases.add(n);
+  }
+  assert.ok(bases.size > 1, "five runs all numbered the same");
+  for (let i = 0; i < 200; i++) {
+    const base = randomRefBase();
+    assert.ok(base >= 1_000 && base < 900_000 && Number.isInteger(base), String(base));
+  }
+});
+
+test("an explicit base numbers from there", async () => {
+  const { b, s } = await connected(["A"]);
+  void b;
+  void s;
+  const browser = new FakeBrowser();
+  browser.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) browser.attachPage("A", "S-A");
+    return {};
+  });
+  pageWithButton(browser);
+  const session = newSession(browser, { refBase: 7_000 });
+  await session.connect();
+  const { result } = await session.extract();
+  assert.equal(refNamed(result.accessibilityTree ?? [], "Go"), "e7001");
+});
+
+test("a ref from an earlier run is unknown, not some other element; this run's gone ref is stale", async () => {
+  const browser = new FakeBrowser();
+  browser.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) browser.attachPage("A", "S-A");
+    return {};
+  });
+  pageWithButton(browser);
+  const session = newSession(browser, { refBase: 7_000 });
+  await session.connect();
+  const { result } = await session.extract();
+  const ref = refNamed(result.accessibilityTree ?? [], "Go");
+
+  // What the previous run called e7 was never issued here.
+  await assertMultizenCode(session.clickRef("e7"), "ELEMENT_NOT_FOUND");
+  await assertMultizenCode(session.clickRef("e7000"), "ELEMENT_NOT_FOUND");
+  await assertMultizenCode(session.clickRef("e7002"), "ELEMENT_NOT_FOUND");
+
+  browser.event("Page.frameNavigated", { frame: { id: "F-S-A" } }, "S-A");
+  await assertMultizenCode(session.clickRef(ref), "STALE_REF");
+});
+
+// ── operations ───────────────────────────────────────────────────────────────
+
+test("a verb that hangs ends at its deadline, whichever command it is on", async () => {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) b.attachPage("A", "S-A");
+    return {};
+  });
+  const s = newSession(b, { operationDeadlineMs: 30 });
+  await s.connect();
+  b.hang.add("Runtime.evaluate");
+  const startedAt = Date.now();
+  const e = await assertMultizenCode(s.click("#a"), "TIMEOUT");
+  assert.equal(e.retryable, true);
+  assert.match(e.message, /click did not finish within 30 ms/);
+  assert.ok(Date.now() - startedAt < 5_000);
+});
+
+test("a verb given up on sends nothing more: its input can't land in the next operation", async () => {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) b.attachPage("A", "S-A");
+    return {};
+  });
+  let release = (): void => {};
+  b.handlers.set("Page.createIsolatedWorld", async () => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { executionContextId: 77 };
+  });
+  b.handlers.set("Runtime.evaluate", () => ({ result: { value: { ok: true, x: 1, y: 2 } } }));
+  const s = newSession(b, { operationDeadlineMs: 40 });
+  await s.connect();
+  await assertMultizenCode(s.click("#a"), "TIMEOUT");
+  const before = b.log.length;
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.deepEqual(b.log.slice(before), [], "the abandoned click kept going");
+  assert.equal(b.calls("Input.dispatchMouseEvent").length, 0);
+});
+
+test("a verb that types gets more time per key, a slow keyboard not being a stuck page", async () => {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) b.attachPage("A", "S-A");
+    return {};
+  });
+  b.handlers.set("Runtime.evaluate", (p) =>
+    String(p.expression).includes("focus") ? { result: { value: true } } : { result: { value: "{}" } },
+  );
+  const s = newSession(b, { operationDeadlineMs: 1 });
+  await s.connect();
+  b.hang.add("Input.dispatchKeyEvent");
+  const startedAt = Date.now();
+  await assertMultizenCode(s.type("#a", "12345"), "TIMEOUT");
+  assert.ok(Date.now() - startedAt >= 450, `gave up after ${Date.now() - startedAt} ms`);
+});
+
+test("cdpSend keeps its own timeout, and zero still opts out of a deadline", async () => {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) b.attachPage("A", "S-A");
+    return {};
+  });
+  let release = (): void => {};
+  b.handlers.set("X.slow", async () => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { done: true };
+  });
+  const s = newSession(b, { operationDeadlineMs: 20 });
+  await s.connect();
+  const unbounded = s.cdpSend("X.slow", {}, undefined, { safe: false, timeoutMs: 0 });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  release();
+  assert.deepEqual(await unbounded, { done: true });
+  await assertMultizenCode(
+    s.cdpSend("X.slow", {}, undefined, { safe: false, timeoutMs: 30 }) as Promise<unknown>,
+    "TIMEOUT",
+  );
+  release();
+});
+
+test("close and a lost browser end what is running at once, and connect's own commands are unaffected", async () => {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) b.attachPage("A", "S-A");
+    return {};
+  });
+  const s = newSession(b);
+  await s.connect();
+  b.hang.add("Page.captureScreenshot");
+
+  const stuck = s.screenshot();
+  await settle();
+  const startedAt = Date.now();
+  s.abortOperations();
+  await assertMultizenCode(stuck, "PROFILE_NOT_RUNNING");
+  assert.ok(Date.now() - startedAt < 1_000);
+
+  // Commands still go out afterwards: the browser's own close has to.
+  b.hang.delete("Page.captureScreenshot");
+  await assert.doesNotReject(s.screenshot());
+
+  b.hang.add("Page.captureScreenshot");
+  const onClose = s.screenshot();
+  await settle();
+  await s.close();
+  await assertMultizenCode(onClose, "PROFILE_NOT_RUNNING");
+});
+
+test("the browser going away ends what is running on it", async () => {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) b.attachPage("A", "S-A");
+    return {};
+  });
+  const s = newSession(b);
+  await s.connect();
+  b.hang.add("Page.captureScreenshot");
+  const stuck = s.screenshot();
+  await settle();
+  b.emit("disconnect");
+  await assertMultizenCode(stuck, "PROFILE_NOT_RUNNING");
+  await assert.rejects(s.screenshot(), /browser exited/);
+});
+
+test("a dialog's click still finishes its release after the operation has answered", async () => {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) b.attachPage("A", "S-A");
+    return {};
+  });
+  b.handlers.set("Runtime.evaluate", (p) => {
+    const expression = String(p.expression);
+    if (expression.includes("visibilityState")) {
+      return {
+        result: {
+          value: JSON.stringify({ pressed: true, released: true, keys: 0, hidden: false, painted: true }),
+        },
+      };
+    }
+    return { result: { value: { ok: true, x: 5, y: 6 } } };
+  });
+  // The press opens the dialog. The hold before the release lasts at least 40 ms, so the
+  // release goes out past a deadline of 38: the click has answered by then, and what it
+  // left to finish is not a verb that was given up on.
+  b.handlers.set("Input.dispatchMouseEvent", (p) => {
+    if (p.type === "mousePressed") {
+      b.event("Page.javascriptDialogOpening", { type: "alert", message: "m" }, "S-A");
+    }
+    return {};
+  });
+  const s = newSession(b, { operationDeadlineMs: 38 });
+  await s.connect();
+  await s.setDialogPolicy({ mode: "manual" });
+
+  assert.deepEqual(await s.click("#a"), { ok: true });
+  assert.equal(b.calls("Input.dispatchMouseEvent").length, 2, "still holding the button");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const types = b.calls("Input.dispatchMouseEvent").map((c) => c.params.type);
+  assert.deepEqual(types, ["mouseMoved", "mousePressed", "mouseReleased"]);
 });

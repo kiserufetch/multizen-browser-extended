@@ -7,8 +7,28 @@ import type { KeyChord } from "@multizen/cdp-driver";
  * their document goes: its counter starts over with each document, so `e5` of the
  * next page is a different element. Refs here are numbered by {@link TabRefs}, never
  * reused, and remember the document they came from, so an old one fails as stale
- * instead of reaching something new.
+ * instead of reaching something new. A browser run starts numbering at its own base,
+ * so a ref from the run before doesn't name anything in this one either.
  */
+
+/** What extract hands back at most: the other engine's node budget, about a node a line. */
+export const MAX_SNAPSHOT_LINES = 5_000;
+/** One line can be any length: a text node is its whole text. */
+export const MAX_SNAPSHOT_CHARS = 1024 * 1024;
+
+/**
+ * Cuts text at a line, so what is left of a snapshot still parses and every ref in it is
+ * whole. A single line over the limit is cut inside it, by whichever limit comes first.
+ */
+export function capLines(whole: string): { text: string; truncated: boolean } {
+  const lines = whole.split("\n");
+  let text = lines.length > MAX_SNAPSHOT_LINES ? lines.slice(0, MAX_SNAPSHOT_LINES).join("\n") : whole;
+  if (text.length > MAX_SNAPSHOT_CHARS) {
+    const lastBreak = text.lastIndexOf("\n", MAX_SNAPSHOT_CHARS);
+    text = lastBreak > 0 ? text.slice(0, lastBreak) : text.slice(0, MAX_SNAPSHOT_CHARS);
+  }
+  return { text, truncated: text.length < whole.length };
+}
 
 const SNAPSHOT_REF = /\[ref=((?:f\d+)?e\d+)\]/y;
 
@@ -94,9 +114,15 @@ export interface RefEntry {
  */
 export class TabRefs {
   private entries = new Map<string, RefEntry>();
-  private issued = 0;
+  private issued: number;
 
-  constructor(private readonly tabId: string) {}
+  /** `base`: this table's refs are the numbers above it. */
+  constructor(
+    private readonly tabId: string,
+    private readonly base: number,
+  ) {
+    this.issued = base;
+  }
 
   /**
    * The snapshot under public refs. `documents` maps a frame (see {@link frameOfRef}) to
@@ -119,7 +145,7 @@ export class TabRefs {
     const entry = this.entries.get(ref);
     if (entry) return entry;
     const n = Number(/\.e(\d+)$/.exec(ref)?.[1]);
-    return n >= 1 && n <= this.issued ? "stale" : "unknown";
+    return n > this.base && n <= this.issued ? "stale" : "unknown";
   }
 }
 

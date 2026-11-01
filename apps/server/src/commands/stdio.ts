@@ -60,7 +60,7 @@ async function runLocal(
     profileManager: runtime.profileManager,
     browserDriver: runtime.driver,
     activityLog: runtime.activityLog,
-    handoff: runtime.shared.handoff,
+    shared: runtime.shared,
     serverVersion: SERVER_VERSION,
     getDefaultEngine: runtime.getDefaultEngine,
     uploadsRoot: config.uploadsRoot,

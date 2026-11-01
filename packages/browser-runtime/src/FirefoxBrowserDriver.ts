@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { rm, stat } from "node:fs/promises";
@@ -11,7 +12,7 @@ import {
   type Page,
 } from "playwright-core";
 import { launchOptions } from "camoufox-js";
-import { parseChord, TargetRegistry, type KeyPlatform } from "@multizen/cdp-driver";
+import { parseChord, randomRefBase, TargetRegistry, type KeyPlatform } from "@multizen/cdp-driver";
 import type { BrowserDriver } from "@multizen/types";
 import type {
   CapturedFrame,
@@ -31,7 +32,14 @@ import { DEFAULT_DIALOG_ANSWERS, MultizenError, PROFILE_DOWNLOADS_DIR } from "@m
 import type { ProfileManager } from "@multizen/profile-manager";
 import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
 import { osForDevice } from "./firefoxFingerprint.ts";
-import { frameOfRef, playwrightChord, snapshotRefs, TabRefs, tabOfRef } from "./firefoxRefs.ts";
+import {
+  capLines,
+  frameOfRef,
+  playwrightChord,
+  snapshotRefs,
+  TabRefs,
+  tabOfRef,
+} from "./firefoxRefs.ts";
 import { resolveProxyLaunchGeo } from "./launchGeo";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { sanitizeStartUrl } from "./startPage";
@@ -66,6 +74,16 @@ const SELECT_OPTION_TIMEOUT_MS = 3_000;
 const FILE_CHOOSER_TIMEOUT_MS = 5_000;
 const DOCUMENT_READ_TIMEOUT_MS = 5_000;
 const WHEEL_AFTER_MOVE_MS = 150;
+/**
+ * Ceiling for one verb, first call to last. Playwright's actions have their own timeouts,
+ * but evaluate, title, keyboard and the like have none, and whoever holds the profile
+ * while one hangs holds up everyone behind.
+ */
+const OPERATION_DEADLINE_MS = 60_000;
+/** Typing is paced like a person's, so a verb that types gets this much more per key. */
+const OPERATION_MS_PER_KEY = 100;
+/** After this a close gives up on Firefox answering: the slot must not stay taken forever. */
+const CLOSE_DEADLINE_MS = 15_000;
 /** How long closing waits for a finished download to be copied out. */
 const DOWNLOAD_DRAIN_MS = 3_000;
 /** Under the downloads dir: Playwright's working copies, which it deletes on close. A
@@ -77,6 +95,37 @@ const PLAYWRIGHT_DOWNLOADS_DIR = ".playwright";
  * with it can only confuse refs into its own elements.
  */
 const DOCUMENT_ID = "performance.timeOrigin";
+
+/** The verbs that run as an operation, and how long each may take. */
+const typing = (textArg: number) => (args: unknown[], deadlineMs: number) =>
+  deadlineMs + [...String(args[textArg])].length * OPERATION_MS_PER_KEY;
+const flat = (_args: unknown[], deadlineMs: number): number => deadlineMs;
+const OPERATION_BUDGETS: Readonly<Record<string, (args: unknown[], deadlineMs: number) => number>> = {
+  navigate: flat,
+  click: flat,
+  type: flat,
+  clickRef: flat,
+  typeRef: typing(2),
+  extract: flat,
+  screenshot: flat,
+  evaluateJs: flat,
+  getCookies: flat,
+  setCookies: flat,
+  newTab: flat,
+  activateTab: flat,
+  closeTab: flat,
+  performAction: flat,
+  setDialogPolicy: flat,
+  handleDialog: flat,
+};
+
+/** Set once a verb was given up on: its next input stays unsent. */
+const currentOperation = new AsyncLocalStorage<{ failure: unknown }>();
+
+function assertNotGivenUp(): void {
+  const op = currentOperation.getStore();
+  if (op?.failure) throw op.failure;
+}
 
 interface OpenFirefoxDialog extends OpenDialog {
   pageId: string;
@@ -115,6 +164,10 @@ interface RunningFirefox {
   dialogWatchers: Set<{ pageId: string; fire: () => void }>;
   /** Downloads on their way out of Playwright's directory, which closing empties. */
   savingDownloads: Set<Promise<void>>;
+  /** Ends each verb in flight, so nothing waits out a deadline on a gone browser. */
+  operations: Set<(e: unknown) => void>;
+  /** This run's refs are numbered from here. */
+  refBase: number;
   /** Polls for zero open windows and closes the context when the user shuts the
    *  last window (macOS keeps the browser alive otherwise). Set after launch. */
   windowWatcher?: NodeJS.Timeout;
@@ -138,6 +191,12 @@ export interface FirefoxBrowserDriverOptions {
   launchExtras?: Partial<NonNullable<Parameters<typeof firefox.launchPersistentContext>[1]>>;
   /** Firefox prefs on top of camoufox's own, which `launchExtras` would replace whole. */
   extraPrefs?: Readonly<Record<string, string | number | boolean>>;
+  /** Refs are numbered from here. Default: random per browser run. */
+  refBase?: number;
+  /** Replaces {@link OPERATION_DEADLINE_MS}. */
+  operationDeadlineMs?: number;
+  /** Replaces {@link CLOSE_DEADLINE_MS}. */
+  closeDeadlineMs?: number;
 }
 
 type PersistentContextOptions = NonNullable<Parameters<typeof firefox.launchPersistentContext>[1]>;
@@ -211,11 +270,34 @@ function minimalChildEnv(): Record<string, string> {
 
 export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver {
   private readonly running = new Map<ProfileId, RunningFirefox>();
+  private readonly launching = new Map<ProfileId, Promise<LaunchedProfile>>();
   private readonly profileManager: ProfileManager;
   private readonly browserDataDir: (profile: Profile) => string;
   private readonly buildFingerprintConfig?: (profile: Profile) => Record<string, unknown>;
   private readonly launchExtras: FirefoxBrowserDriverOptions["launchExtras"];
   private readonly extraPrefs: FirefoxBrowserDriverOptions["extraPrefs"];
+  private readonly refBase: number | undefined;
+  private readonly operationDeadlineMs: number;
+  private readonly closeDeadlineMs: number;
+
+  /**
+   * Bounds every verb in one place, rather than in each body, so nothing an agent
+   * reaches runs without a deadline.
+   */
+  static {
+    const proto = FirefoxBrowserDriver.prototype as unknown as Record<
+      string,
+      (...args: unknown[]) => Promise<unknown>
+    >;
+    for (const [verb, budget] of Object.entries(OPERATION_BUDGETS)) {
+      const run = proto[verb]!;
+      proto[verb] = function (this: FirefoxBrowserDriver, ...args: unknown[]): Promise<unknown> {
+        return this.operation(args[0] as ProfileId, verb, budget(args, this.operationDeadlineMs), () =>
+          run.apply(this, args),
+        );
+      };
+    }
+  }
 
   constructor(opts: FirefoxBrowserDriverOptions) {
     super();
@@ -224,6 +306,9 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     this.buildFingerprintConfig = opts.buildFingerprintConfig;
     this.launchExtras = opts.launchExtras;
     this.extraPrefs = opts.extraPrefs;
+    this.refBase = opts.refBase;
+    this.operationDeadlineMs = opts.operationDeadlineMs ?? OPERATION_DEADLINE_MS;
+    this.closeDeadlineMs = opts.closeDeadlineMs ?? CLOSE_DEADLINE_MS;
   }
 
   override on<K extends keyof FirefoxDriverEvents>(event: K, listener: FirefoxDriverEvents[K]): this {
@@ -237,12 +322,73 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     return super.emit(event, ...args);
   }
 
+  /**
+   * One verb's whole run. It rejects at its deadline or when the browser goes, whatever
+   * call is outstanding. Playwright can't take a call back, but the verb's later input
+   * stays unsent: the caller is about to let another verb start on this page.
+   */
+  private operation<T>(
+    profileId: ProfileId,
+    name: string,
+    budgetMs: number,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const r = this.running.get(profileId);
+    if (!r) return work();
+    const op: { failure: unknown } = { failure: null };
+    return new Promise<T>((resolve, reject) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        r.operations.delete(fail);
+      };
+      const fail = (e: unknown): void => {
+        op.failure = e;
+        finish();
+        reject(e);
+      };
+      const timer = setTimeout(
+        () =>
+          fail(
+            new MultizenError("TIMEOUT", `${name} did not finish within ${budgetMs} ms.`, {
+              hint: "The page or browser may be stuck. close_profile ends it at once.",
+            }),
+          ),
+        budgetMs,
+      );
+      timer.unref?.();
+      r.operations.add(fail);
+      currentOperation.run(op, async () => work()).then(
+        (value) => {
+          finish();
+          resolve(value);
+        },
+        (e: unknown) => {
+          finish();
+          reject(e);
+        },
+      );
+    });
+  }
+
+  private failOperations(r: RunningFirefox): void {
+    const closed = new MultizenError("PROFILE_NOT_RUNNING", "The browser was closed during this call.");
+    for (const fail of [...r.operations]) fail(closed);
+  }
+
+  /** Idempotent: a running profile answers as it is, and parallel calls share one launch. */
   async launch(profileId: ProfileId): Promise<LaunchedProfile> {
     const existing = this.running.get(profileId);
     if (existing) {
       return { id: profileId, cdpEndpoint: "", pid: existing.pid, startedAt: existing.startedAt };
     }
+    const underway = this.launching.get(profileId);
+    if (underway) return underway;
+    const launch = this.doLaunch(profileId).finally(() => this.launching.delete(profileId));
+    this.launching.set(profileId, launch);
+    return launch;
+  }
 
+  private async doLaunch(profileId: ProfileId): Promise<LaunchedProfile> {
     const profile = this.profileManager.get(profileId);
     if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
     this.profileManager.markOpened(profileId);
@@ -372,6 +518,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       dialogSeq: 0,
       dialogWatchers: new Set(),
       savingDownloads: new Set(),
+      operations: new Set(),
+      refBase: this.refBase ?? randomRefBase(),
     };
     for (const p of context.pages()) {
       record.targets.upsert({ targetId: this.trackPage(record, profileId, p), type: "page" });
@@ -383,17 +531,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     context.on("page", (p: Page) => {
       record.targets.addIdle({ targetId: this.trackPage(record, profileId, p), type: "page" });
     });
-    context.on("close", () => {
-      if (record.windowWatcher) clearInterval(record.windowWatcher);
-      if (hasProxyBridge) stopBridgeForProfile(profileId);
-      const wasByRequest = record.closingByRequest;
-      this.running.delete(profileId);
-      this.emit("running-changed", {
-        kind: "closed",
-        profileId,
-        reason: wasByRequest ? "user-close" : "external-exit",
-      });
-    });
+    context.on("close", () => this.onContextClosed(profileId, record));
 
     // macOS keeps Firefox alive after its last window closes (standard app
     // lifecycle), so closing the window never closes the persistent context —
@@ -422,13 +560,27 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     return record;
   }
 
+  /** Once per browser: a close that gave up on Firefox can still hear from it later. */
+  private onContextClosed(profileId: ProfileId, r: RunningFirefox): void {
+    if (this.running.get(profileId) !== r) return;
+    if (r.windowWatcher) clearInterval(r.windowWatcher);
+    if (r.hasProxyBridge) stopBridgeForProfile(profileId);
+    this.running.delete(profileId);
+    this.failOperations(r);
+    this.emit("running-changed", {
+      kind: "closed",
+      profileId,
+      reason: r.closingByRequest ? "user-close" : "external-exit",
+    });
+  }
+
   /** Every tab gets its id and its listeners once. Returns the id. */
   private trackPage(r: RunningFirefox, profileId: ProfileId, page: Page): string {
     const known = r.pageIds.get(page);
     if (known) return known;
     const pageId = String(r.nextPageId++);
     r.pageIds.set(page, pageId);
-    r.tabRefs.set(pageId, new TabRefs(pageId));
+    r.tabRefs.set(pageId, new TabRefs(pageId, r.refBase));
     page.on("dialog", (dialog: Dialog) => this.onDialog(r, pageId, dialog));
     page.on("download", (download: Download) => this.onDownload(r, profileId, download));
     page.on("close", () => this.onPageClosed(r, pageId, page));
@@ -450,10 +602,14 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     if (wasActive && r.targets.active()) r.activeNeedsRaise = true;
   }
 
+  /** During a launch this means the browser that launch brings up, so it waits for it. */
   async close(profileId: ProfileId): Promise<void> {
+    await this.launching.get(profileId)?.catch(() => {});
     const r = this.running.get(profileId);
     if (!r) return;
     r.closingByRequest = true;
+    // A call stuck on this browser ends now, not when its deadline comes.
+    this.failOperations(r);
     // A finished download may still be being copied out; one still running is
     // canceled by the close.
     if (r.savingDownloads.size > 0) {
@@ -461,7 +617,18 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     }
     // The "close" handler clears the map entry, stops the bridge, and emits the
     // running-changed "closed" event.
-    await r.context.close().catch(() => {});
+    let timer: NodeJS.Timeout | undefined;
+    const gaveUp = new Promise<true>((resolve) => {
+      timer = setTimeout(() => resolve(true), this.closeDeadlineMs);
+    });
+    const closed = r.context.close().catch(() => {}).then(() => false as const);
+    const stuck = await Promise.race([closed, gaveUp]);
+    clearTimeout(timer);
+    if (stuck) {
+      console.warn(`[multizen] Camoufox did not close within ${this.closeDeadlineMs} ms; giving up on it`);
+      this.onContextClosed(profileId, r);
+      return;
+    }
     await Promise.allSettled(r.savingDownloads);
   }
 
@@ -610,6 +777,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     el: ResolvedElement,
     work: () => Promise<unknown>,
   ): Promise<void> {
+    assertNotGivenUp();
     this.assertNoDialog(r, el.pageId);
     await this.untilDialog(
       r,
@@ -795,6 +963,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       (async () => {
         for (const ch of chars) {
           if (progress.stopped) return;
+          assertNotGivenUp();
           progress.sent++;
           await el.page.keyboard.type(ch, { delay: randIn(12, 45) });
           await delay(randIn(8, 30));
@@ -814,15 +983,19 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     const r = this.require(profileId);
     const { page, pageId } = await this.foregroundTab(r);
     return this.pageOp(r, pageId, async () => {
-      const snapshot = await page.ariaSnapshot({ mode: "ai", timeout: ACTION_TIMEOUT_MS });
-      const documents = await documentsOf(page, snapshotRefs(snapshot));
+      const raw = await page.ariaSnapshot({ mode: "ai", timeout: ACTION_TIMEOUT_MS });
+      // Refs past the cut are never issued, so there's nothing to resolve them against.
+      const snapshot = capLines(raw);
+      const documents = await documentsOf(page, snapshotRefs(snapshot.text));
       const refs = r.tabRefs.get(pageId);
       if (!refs) throw tabNotFound(pageId);
+      const text = capLines(String(await page.evaluate("document.body ? document.body.innerText : ''")));
       const result = {
         url: page.url(),
         title: await page.title(),
-        text: await page.evaluate("document.body ? document.body.innerText : ''"),
-        ariaSnapshot: refs.publish(snapshot, documents),
+        text: text.text,
+        ariaSnapshot: refs.publish(snapshot.text, documents),
+        ...(snapshot.truncated || text.truncated ? { truncated: true } : {}),
       };
       return { result };
     });
@@ -955,6 +1128,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     } else {
       tab = await this.foregroundTab(r);
     }
+    assertNotGivenUp();
     this.assertNoDialog(r, tab.pageId);
     // A glyph off the US layout has no physical key, on either engine: it is inserted.
     const press =
@@ -1095,9 +1269,10 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     throw notAvailableYet("dispatchInput");
   }
 
+  /** Closing waits for a launch under way, whose browser would outlive this process. */
   async closeAll(): Promise<void> {
-    const ids = [...this.running.keys()];
-    await Promise.all(ids.map((id) => this.close(id)));
+    const ids = new Set([...this.running.keys(), ...this.launching.keys()]);
+    await Promise.all([...ids].map((id) => this.close(id)));
   }
 }
 

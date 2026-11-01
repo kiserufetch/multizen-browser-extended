@@ -1,4 +1,4 @@
-import { ActivityLog, InMemoryHumanHandoff } from "@multizen/mcp-server";
+import { ActivityLog, createSharedMcpState, type SharedMcpState } from "@multizen/mcp-server";
 import { ProfileManager } from "@multizen/profile-manager";
 import { defaultSettingsPath, SettingsStore } from "@multizen/settings-store";
 import type { BrowserEngine, ChromiumStatus, ProfileId } from "@multizen/types";
@@ -149,7 +149,7 @@ export interface ServerRuntime {
   driver: EngineRouter;
   activityLog: ActivityLog;
   /** State every MCP session shares. */
-  shared: { handoff: InMemoryHumanHandoff };
+  shared: SharedMcpState;
   getDefaultEngine: () => BrowserEngine;
   /**
    * Starts fetching the default engine in the background, so a first run's
@@ -168,7 +168,7 @@ export interface ServerRuntime {
  * and the companion extension. The caller must already hold the data dir's lock.
  */
 export async function buildRuntime(
-  cfg: Pick<ServerConfig, "dataDir" | "defaultEngine">,
+  cfg: Pick<ServerConfig, "dataDir" | "defaultEngine" | "maxBrowsers" | "browserQueueTimeoutMs">,
 ): Promise<ServerRuntime> {
   const { extensionStoreRoot } = dataPaths(cfg.dataDir);
   const settings = new SettingsStore(defaultSettingsPath(cfg.dataDir));
@@ -202,6 +202,8 @@ export async function buildRuntime(
     chromiumDriver,
     firefoxOptions: { ...SERVER_FIREFOX_OPTIONS, extraPrefs: serverFirefoxPrefs(process.platform) },
     engineNotReady: "reject",
+    maxBrowsers: cfg.maxBrowsers,
+    browserQueueTimeoutMs: cfg.browserQueueTimeoutMs,
   });
   driver.on("running-changed", (change) => log.info("profile state", { ...change }));
 
@@ -246,7 +248,7 @@ export async function buildRuntime(
     engineRegistry,
     driver,
     activityLog,
-    shared: { handoff: new InMemoryHumanHandoff() },
+    shared: createSharedMcpState(),
     getDefaultEngine,
     startEngineBootstrap,
     close,

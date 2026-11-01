@@ -19,12 +19,14 @@ import type {
   DriverAction,
   HumanInputEvent,
   LaunchedProfile,
+  LaunchOptions,
   OpenDialog,
   ProfileId,
   RunningInfo,
 } from "@multizen/types";
 import type { BrowserDriver } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
+import { BROWSER_QUEUE_TIMEOUT_MS, BrowserLimiter, launchCalledOff } from "./browserLimiter.ts";
 import type { EngineRegistry } from "./engineRegistry.ts";
 import { isChromiumEngine } from "./engineRegistry.ts";
 import {
@@ -69,6 +71,17 @@ export interface EngineRouterOptions {
    * MCP client's timeout, and the install carries on in the background.
    */
   engineNotReady?: "wait" | "reject";
+  /** Browsers at once, over both engines. Default: no limit, as on the desktop. */
+  maxBrowsers?: number;
+  /** How long a launch waits for a free slot. Then BROWSER_LIMIT_REACHED. */
+  browserQueueTimeoutMs?: number;
+}
+
+/** A launch under way. Everyone asking for this profile meanwhile shares it. */
+interface InFlightLaunch {
+  promise: Promise<LaunchedProfile>;
+  /** Calls off the waits before a browser starts. One already starting finishes starting. */
+  callOff: AbortController;
 }
 
 /**
@@ -88,8 +101,15 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   private readonly firefoxOptions: EngineRouterOptions["firefoxOptions"];
   private readonly engineNotReady: NonNullable<EngineRouterOptions["engineNotReady"]>;
   private firefoxDriver: FirefoxBrowserDriver | null = null;
+  private firefoxLoading: Promise<FirefoxBrowserDriver> | null = null;
   /** profileId → the driver it launched on (bound at launch, cleared on close). */
   private readonly bindings = new Map<ProfileId, BrowserDriver>();
+  private readonly inFlight = new Map<ProfileId, InFlightLaunch>();
+  private readonly closing = new Map<ProfileId, Promise<void>>();
+  private readonly limiter: BrowserLimiter;
+  private readonly browserQueueTimeoutMs: number;
+  /** closeAll has begun: whatever a launch brings up from now on is closed at once. */
+  private shuttingDown = false;
 
   constructor(opts: EngineRouterOptions) {
     super();
@@ -99,6 +119,8 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     this.chromiumDriver = opts.chromiumDriver;
     this.firefoxOptions = opts.firefoxOptions;
     this.engineNotReady = opts.engineNotReady ?? "wait";
+    this.limiter = new BrowserLimiter(opts.maxBrowsers ?? Infinity);
+    this.browserQueueTimeoutMs = opts.browserQueueTimeoutMs ?? BROWSER_QUEUE_TIMEOUT_MS;
     this.chromiumDriver.on("running-changed", (c) => this.onSubEvent(c));
   }
 
@@ -116,6 +138,7 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   private onSubEvent(change: RunningStateChange): void {
     if (change.kind === "closed") {
       this.bindings.delete(change.profileId);
+      this.limiter.release(change.profileId);
       this.clearUploadInbox(change.profileId);
     }
     this.emit("running-changed", change);
@@ -148,8 +171,9 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   }
 
   /** Lazily construct the Firefox driver on first Camoufox launch. */
-  private async firefox(): Promise<BrowserDriver> {
-    if (!this.firefoxDriver) {
+  private firefox(): Promise<BrowserDriver> {
+    // The promise, not its result: two launches can both arrive during the import.
+    this.firefoxLoading ??= (async () => {
       const { FirefoxBrowserDriver } = await import("./FirefoxBrowserDriver.ts");
       // The camoufox binary is downloaded + located by CamoufoxBootstrap
       // (via CAMOUFOX_INSTALL_DIR); the driver lets camoufox-js resolve it, so
@@ -161,8 +185,12 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
         buildFingerprintConfig: (profile) => camoufoxConfigForProfile(profile),
       });
       this.firefoxDriver.on("running-changed", (c) => this.onSubEvent(c));
-    }
-    return this.firefoxDriver;
+      return this.firefoxDriver;
+    })().catch((e: unknown) => {
+      this.firefoxLoading = null;
+      throw e;
+    });
+    return this.firefoxLoading;
   }
 
   private async driverForEngine(engine: BrowserEngine): Promise<BrowserDriver> {
@@ -203,28 +231,86 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     await ensuring;
   }
 
-  async launch(profileId: ProfileId): Promise<LaunchedProfile> {
+  async launch(profileId: ProfileId, opts: LaunchOptions = {}): Promise<LaunchedProfile> {
+    // Its browser still holds the data dir, which a new one would fail on.
+    await this.closing.get(profileId)?.catch(() => {});
+    if (this.shuttingDown) {
+      throw new MultizenError("LAUNCH_FAILED", "The server is shutting down.");
+    }
     const bound = this.bindings.get(profileId);
     if (bound) return bound.launch(profileId); // idempotent — already running
+    const underway = this.inFlight.get(profileId);
+    if (underway) return underway.promise;
 
-    const engine = this.engineFor(profileId);
-    // Binary-gate the launch on this engine (idempotent; the Chromium driver
-    // also self-gates, the Firefox driver relies on this).
-    await this.ensureEngine(engine);
-
-    const driver = await this.driverForEngine(engine);
-    const result = await driver.launch(profileId).catch((e: unknown) => {
-      throw typedLaunchError(e);
+    const callOff = new AbortController();
+    const promise = this.startLaunch(profileId, callOff.signal, opts.signal).finally(() => {
+      this.inFlight.delete(profileId);
     });
-    this.bindings.set(profileId, driver);
-    return result;
+    this.inFlight.set(profileId, { promise, callOff });
+    return promise;
   }
 
+  private async startLaunch(
+    profileId: ProfileId,
+    callOff: AbortSignal,
+    client: AbortSignal | undefined,
+  ): Promise<LaunchedProfile> {
+    const engine = this.engineFor(profileId);
+    // Binary-gate the launch on this engine (idempotent; the Chromium driver
+    // also self-gates, the Firefox driver relies on this). A close doesn't sit through
+    // a download. A client that stops waiting does let it finish, as it always could.
+    const calledOff = new Promise<never>((_, reject) => {
+      callOff.addEventListener("abort", () => reject(launchCalledOff(profileId)), { once: true });
+    });
+    await Promise.race([this.ensureEngine(engine), calledOff]);
+
+    await this.limiter.acquire(profileId, {
+      timeoutMs: this.browserQueueTimeoutMs,
+      signal: client ? AbortSignal.any([client, callOff]) : callOff,
+    });
+    try {
+      const driver = await this.driverForEngine(engine);
+      const result = await driver.launch(profileId).catch((e: unknown) => {
+        throw typedLaunchError(e);
+      });
+      // A browser that died this early reported its end before this binding could exist.
+      if (!driver.isRunning(profileId)) {
+        throw new MultizenError("LAUNCH_FAILED", "The browser exited right after it started.");
+      }
+      this.bindings.set(profileId, driver);
+      if (this.shuttingDown) {
+        await this.closeBound(profileId, driver);
+        throw new MultizenError("LAUNCH_FAILED", "The server is shutting down.");
+      }
+      return result;
+    } catch (e) {
+      this.limiter.release(profileId);
+      throw e;
+    }
+  }
+
+  /** During a launch this means the browser that launch brings up, so it waits for it. */
   async close(profileId: ProfileId): Promise<void> {
+    const underway = this.inFlight.get(profileId);
+    if (underway) {
+      underway.callOff.abort();
+      await underway.promise.catch(() => {});
+    }
+    await this.closing.get(profileId)?.catch(() => {});
     const driver = this.bindings.get(profileId);
     if (!driver) return;
-    await driver.close(profileId);
-    this.bindings.delete(profileId);
+    await this.closeBound(profileId, driver);
+  }
+
+  /** The browser's slot frees here even if the driver had no event to report. */
+  private async closeBound(profileId: ProfileId, driver: BrowserDriver): Promise<void> {
+    const closing = driver.close(profileId).finally(() => {
+      this.closing.delete(profileId);
+      this.bindings.delete(profileId);
+      this.limiter.release(profileId);
+    });
+    this.closing.set(profileId, closing);
+    await closing;
   }
 
   isRunning(profileId: ProfileId): boolean {
@@ -336,11 +422,15 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
 
   /** `opts` shortens the Chromium shutdown on the quit path (see before-quit). */
   async closeAll(opts: { gracefulMs?: number; reap?: boolean } = {}): Promise<void> {
+    this.shuttingDown = true;
+    const launches = [...this.inFlight.values()];
+    for (const launch of launches) launch.callOff.abort();
     // Together, not in sequence: the before-quit watchdog bounds the whole call,
     // so a slow engine must not starve the other one of its shutdown.
     await Promise.all([
       this.chromiumDriver.closeAll(opts),
       this.firefoxDriver ? this.firefoxDriver.closeAll() : undefined,
+      ...launches.map((launch) => launch.promise.catch(() => {})),
     ]);
     this.bindings.clear();
   }

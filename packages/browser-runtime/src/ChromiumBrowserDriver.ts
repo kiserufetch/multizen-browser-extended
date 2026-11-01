@@ -100,6 +100,19 @@ interface RunningProcess {
   downloadsArmed?: Promise<void>;
 }
 
+/** A launch under way, which everyone asking for this profile meanwhile shares. */
+interface LaunchInProgress {
+  promise: Promise<LaunchedProfile>;
+  /** Shutting down: nobody wants this browser any more. */
+  aborted: boolean;
+  /** Set while a browser is coming up: stops waiting for it, and so kills it. */
+  killStarting?: () => void;
+}
+
+function launchAborted(): MultizenError {
+  return new MultizenError("LAUNCH_FAILED", "The launch was abandoned: the server is shutting down.");
+}
+
 export interface ChromiumBrowserDriverOptions {
   host: RuntimeHost;
   profileManager: ProfileManager;
@@ -176,6 +189,7 @@ interface DriverEvents {
  */
 export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver {
   private readonly running = new Map<ProfileId, RunningProcess>();
+  private readonly launching = new Map<ProfileId, LaunchInProgress>();
   private nextPort = 9222;
   private readonly host: RuntimeHost;
   private readonly profileManager: ProfileManager;
@@ -222,6 +236,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return super.emit(event, ...args);
   }
 
+  /** Idempotent: a running profile answers as it is, and parallel calls share one launch. */
   async launch(profileId: ProfileId): Promise<LaunchedProfile> {
     const existing = this.running.get(profileId);
     if (existing) {
@@ -232,7 +247,22 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         startedAt: existing.startedAt,
       };
     }
+    const underway = this.launching.get(profileId);
+    if (underway) return underway.promise;
 
+    const launch = { aborted: false } as LaunchInProgress;
+    launch.promise = this.doLaunch(profileId, launch)
+      .then(async (launched) => {
+        if (!launch.aborted) return launched;
+        await this.shutdownProfile(profileId, "user-close");
+        throw launchAborted();
+      })
+      .finally(() => this.launching.delete(profileId));
+    this.launching.set(profileId, launch);
+    return launch.promise;
+  }
+
+  private async doLaunch(profileId: ProfileId, launch: LaunchInProgress): Promise<LaunchedProfile> {
     const profile = this.profileManager.get(profileId);
     if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
 
@@ -573,6 +603,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     const attemptSpawn = async (
       useNoSandbox: boolean,
     ): Promise<{ child: ChildProcess; session: CdpSession }> => {
+      if (launch.aborted) throw launchAborted();
       const spawnArgs = useNoSandbox ? ["--no-sandbox", ...args] : args;
       const child = spawn(chromiumPath, spawnArgs, {
         // Unix: make the child a process-group leader so we can group-kill the
@@ -638,6 +669,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       const crashSignal = new Promise<never>((_, reject) => {
         crashReject = reject;
       });
+      // The catch below is what kills it.
+      launch.killStarting = () => crashReject?.(launchAborted());
       try {
         await Promise.race([
           waitForCdpSessionReady(port, session, this.readinessBudgetMs),
@@ -801,7 +834,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     const r = record;
     this.running.set(profileId, record);
 
-    child.on("exit", () => {
+    const onExit = (): void => {
       const wasTracked = this.running.has(profileId);
       clearInterval(record.windowWatcher);
       void session.close().catch(() => {});
@@ -813,7 +846,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         // our own kill() from the windowWatcher when the last window closed.
         this.emit("running-changed", { kind: "closed", profileId, reason: "external-exit" });
       }
-    });
+    };
+    child.on("exit", onExit);
+    // It may have died during the bootstrap above, with nothing here listening yet.
+    if (child.exitCode !== null || child.signalCode !== null) onExit();
 
     if (this.armDownloadsAtLaunch) {
       await this.armDownloads(profileId, record).catch((e: unknown) => {
@@ -821,11 +857,16 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       });
     }
 
+    if (this.running.get(profileId) !== record) {
+      throw new Error("Chromium exited right after it started");
+    }
     this.emit("running-changed", { kind: "launched", profileId });
     return { id: profileId, cdpEndpoint, pid, startedAt };
   }
 
+  /** During a launch this means the browser that launch brings up, so it waits for it. */
   async close(profileId: ProfileId): Promise<void> {
+    await this.launching.get(profileId)?.promise.catch(() => {});
     await this.shutdownProfile(profileId, "user-close");
   }
 
@@ -845,6 +886,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     if (!r) return;
     this.running.delete(profileId);
     clearInterval(r.windowWatcher);
+    // A call stuck on this browser ends now, not when its deadline comes.
+    r.session.abortOperations();
     // Shut Chromium down BEFORE the socks5 bridge. The bridge's server.close()
     // waits for its accepted sockets to end; a still-running Chromium holds
     // those proxied connections open, so closing the bridge first can deadlock
@@ -1034,9 +1077,18 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     throw notAvailableYet("dispatchInput");
   }
 
+  /** A launch under way is abandoned, or its browser would outlive this process. */
   async closeAll(opts: { gracefulMs?: number; reap?: boolean } = {}): Promise<void> {
+    const launches = [...this.launching.values()];
+    for (const launch of launches) {
+      launch.aborted = true;
+      launch.killStarting?.();
+    }
     const ids = [...this.running.keys()];
-    await Promise.all(ids.map((id) => this.shutdownProfile(id, "user-close", opts)));
+    await Promise.all([
+      ...ids.map((id) => this.shutdownProfile(id, "user-close", opts)),
+      ...launches.map((launch) => launch.promise.catch(() => {})),
+    ]);
   }
 
   private requireSession(profileId: ProfileId): CdpSession {

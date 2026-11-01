@@ -6,11 +6,14 @@
  *   corepack yarn workspace @multizen/server build
  *   corepack yarn workspace @multizen/server exec tsx scripts/e2e.ts \
  *     --data-dir %TEMP%\mzts2 --engine-version-dir <dir with chrome.exe> \
- *     [--engine cloakbrowser|camoufox] [--flows http,sigint,stdio,tabs] [--keep]
+ *     [--engine cloakbrowser|camoufox] [--flows http,sigint,stdio,tabs,concurrency] [--keep]
+ *     [--camoufox-install <dir>]
  *
  * --engine-version-dir links an installed engine into the temp data dir through a
  * junction on the version directory only, so nothing the server does to its own
  * engine cache can reach the original. Without it the engine is downloaded.
+ * --camoufox-install does the same for an installed Camoufox, and adds the concurrency
+ * flow's checks across both engines.
  *
  * Checks, in order: tools/list carries all four annotation hints on every tool, and
  * a typed error reports its code and retryable. An HTTP client creates a profile,
@@ -23,6 +26,11 @@
  * EOF exits 0 and leaves no process behind. The tabs flow runs real input against
  * local pages in a main frame, a same-process iframe, a cross-origin iframe and one
  * nested in that, and asserts each page's own handler reported back to the fixture.
+ * The concurrency flow, not run by default, starts a server with --max-browsers 2: three
+ * launches at once, a timeout with no slot free, a browser killed by its PID, two clients
+ * clicking one page with the page logging event order, queued clicks of clients that
+ * leave, a lease across a reconnect, close_profile on a stuck page, a ref from before a
+ * relaunch, and shutdown with a launch under way.
  *
  * --engine camoufox runs the same flows on Camoufox, minus what is CDP's or CloakBrowser's:
  * there are no OOPIF targets, cdp_send refuses, its pid is unknown (so nothing is killed
@@ -38,6 +46,7 @@ import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
@@ -45,6 +54,7 @@ const { values } = parseArgs({
   options: {
     "data-dir": { type: "string" },
     "engine-version-dir": { type: "string" },
+    "camoufox-install": { type: "string" },
     engine: { type: "string" },
     flows: { type: "string" },
     keep: { type: "boolean" },
@@ -75,18 +85,22 @@ function expect(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`FAILED: ${message}`);
 }
 
+function junction(link: string, target: string): void {
+  if (existsSync(link)) return;
+  const res = spawnSync("cmd", ["/c", "mklink", "/J", link, target], { encoding: "utf8" });
+  expect(res.status === 0, `mklink failed: ${res.stdout}${res.stderr}`);
+}
+
 function prepareDataDir(): void {
   mkdirSync(DATA_DIR, { recursive: true });
+  const camoufox = values["camoufox-install"];
+  if (camoufox) junction(join(DATA_DIR, "camoufox"), resolve(camoufox));
   const versionDir = values["engine-version-dir"];
   if (!versionDir) return;
   const version = basename(versionDir);
   const cache = join(DATA_DIR, "chromium", "cloakbrowser");
-  const link = join(cache, version);
   mkdirSync(cache, { recursive: true });
-  if (!existsSync(link)) {
-    const res = spawnSync("cmd", ["/c", "mklink", "/J", link, versionDir], { encoding: "utf8" });
-    expect(res.status === 0, `mklink failed: ${res.stdout}${res.stderr}`);
-  }
+  junction(join(cache, version), versionDir);
   writeFileSync(
     join(cache, "current.json"),
     JSON.stringify({ version, binaryRelative: "chrome.exe" }),
@@ -96,12 +110,14 @@ function prepareDataDir(): void {
 /** Removes the junction itself first, so the deletion can't follow it. */
 function cleanDataDir(): void {
   const versionDir = values["engine-version-dir"];
-  if (versionDir) {
-    const link = join(DATA_DIR, "chromium", "cloakbrowser", basename(versionDir));
-    if (existsSync(link)) {
-      const res = spawnSync("cmd", ["/c", "rmdir", link], { encoding: "utf8" });
-      expect(res.status === 0, `rmdir of the junction failed: ${res.stderr}`);
-    }
+  const links = [
+    ...(versionDir ? [join(DATA_DIR, "chromium", "cloakbrowser", basename(versionDir))] : []),
+    ...(values["camoufox-install"] ? [join(DATA_DIR, "camoufox")] : []),
+  ];
+  for (const link of links) {
+    if (!existsSync(link)) continue;
+    const res = spawnSync("cmd", ["/c", "rmdir", link], { encoding: "utf8" });
+    expect(res.status === 0, `rmdir of the junction failed: ${res.stderr}`);
   }
   rmSync(DATA_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 }
@@ -183,9 +199,17 @@ async function waitFor(check: () => boolean, what: string, timeoutMs = 60_000): 
   throw new Error(`FAILED: timed out waiting for ${what}`);
 }
 
-async function startServe(): Promise<Running & { url: string; token: string }> {
+async function startServe(extra: string[] = []): Promise<Running & { url: string; token: string }> {
   const port = await freePort();
-  const running = startServer(["serve", "--data-dir", DATA_DIR, "--port", String(port), ...ENGINE_FLAGS]);
+  const running = startServer([
+    "serve",
+    "--data-dir",
+    DATA_DIR,
+    "--port",
+    String(port),
+    ...ENGINE_FLAGS,
+    ...extra,
+  ]);
   await waitFor(() => running.output().includes('"listening"'), `serve to listen:\n${running.output()}`);
   const token = readFileSync(join(DATA_DIR, "owner-token"), "utf8");
   expect(!running.output().includes(token), "the token value appeared in the logs");
@@ -1381,6 +1405,436 @@ async function tabsFlow(): Promise<void> {
   }
 }
 
+// ── concurrency ──────────────────────────────────────────────────────────────
+
+/**
+ * Two large buttons and a text field, and a page-side log of each trusted event in the
+ * order the page got them: what proves two agents' input did not interleave.
+ */
+const EVENTS_HTML = `<!doctype html>
+<html><head><title>MZ Events</title></head>
+<body style="margin:0">
+  <button id="left" style="position:absolute;left:40px;top:40px;width:200px;height:120px">left</button>
+  <button id="right" style="position:absolute;left:400px;top:40px;width:200px;height:120px">right</button>
+  <input id="field" style="position:absolute;left:40px;top:220px;width:300px">
+  <script>
+    window.__log = [];
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "keydown"]) {
+      addEventListener(type, (e) => {
+        if (e.isTrusted) window.__log.push(type + ":" + (e.target.id || e.target.tagName));
+      }, true);
+    }
+  </script>
+</body></html>`;
+
+const MANY_ELEMENTS_HTML = `<!doctype html>
+<html><head><title>MZ Many</title></head><body>
+  <script>
+    for (let i = 0; i < 6000; i++) {
+      const b = document.createElement("button");
+      b.textContent = "b" + i;
+      document.body.appendChild(b);
+    }
+  </script>
+</body></html>`;
+
+async function startEventsSite(): Promise<{ origin: string; close(): Promise<void> }> {
+  const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+    const html = req.url === "/events" ? EVENTS_HTML : req.url === "/many" ? MANY_ELEMENTS_HTML : null;
+    if (html) res.writeHead(200, { "content-type": "text/html" }).end(html);
+    else res.writeHead(404).end();
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const { port } = server.address() as AddressInfo;
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    close: () =>
+      new Promise((done) => {
+        server.closeAllConnections();
+        server.close(() => done());
+      }),
+  };
+}
+
+async function eventLog(client: Client, id: string): Promise<string[]> {
+  const read = await call(client, "evaluate_js", {
+    profile_id: id,
+    expression: "JSON.stringify(window.__log)",
+  });
+  return JSON.parse(String((read.result as { value?: unknown }).value)) as string[];
+}
+
+/** Keeps the renderer busy, which is what a stuck page looks like from here. */
+function busyPage(ms: number): string {
+  return `(() => { const end = Date.now() + ${ms}; while (Date.now() < end); return "done"; })()`;
+}
+
+function errorOf(result: ToolResult): Record<string, unknown> {
+  expect(result.isError, `expected an error: ${result.content[0]?.text}`);
+  return (JSON.parse(result.content[0]?.text ?? "{}") as { error: Record<string, unknown> }).error;
+}
+
+/** Spends at most what the caller still wants to wait, for what must be gone by then. */
+async function isSettledWithin(pending: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<false>((done) => {
+    timer = setTimeout(() => done(false), ms);
+  });
+  const settled = await Promise.race([pending.then(() => true as const, () => true as const), late]);
+  clearTimeout(timer);
+  return settled;
+}
+
+async function waitUntilStopped(client: Client, id: string, budgetMs: number): Promise<number> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < budgetMs) {
+    const listed = (await call(client, "list_profiles")) as unknown as {
+      profiles: Array<{ id: string; isRunning: boolean }>;
+    };
+    if (!listed.profiles.find((p) => p.id === id)?.isRunning) return Date.now() - startedAt;
+    await new Promise((done) => setTimeout(done, 100));
+  }
+  throw new Error(`FAILED: ${id} still reads as running after ${budgetMs} ms`);
+}
+
+const SLOT_WAIT_MS = 12_000;
+
+/** Three at once with two slots; a kill frees one; the third times out with none free. */
+async function limitChecks(owner: Client, ids: string[]): Promise<void> {
+  const [a, b, c, d] = ids as [string, string, string, string];
+  const startedAt = Date.now();
+  const settled = new Map<string, number>();
+  const launches = new Map(
+    [a, b, c].map((id) => [
+      id,
+      rawCall(owner, "launch_profile", { profile_id: id }).then((result) => {
+        settled.set(id, Date.now() - startedAt);
+        return result;
+      }),
+    ]),
+  );
+  await waitFor(() => settled.size === 2, "two of three launches to finish", 60_000);
+  const [firstUp, secondUp] = [...settled.keys()] as [string, string];
+  const waiter = [a, b, c].find((id) => !settled.has(id))!;
+  await new Promise((done) => setTimeout(done, 1_500));
+  expect(!settled.has(waiter), "the third browser started past the limit");
+  pass("3 launches at once with --max-browsers 2", `2 up in ${Math.max(...settled.values())} ms, the third waits`);
+
+  const closedAt = Date.now();
+  await call(owner, "close_profile", { profile_id: firstUp });
+  const third = await launches.get(waiter)!;
+  expect(!third.isError, `the third launch failed: ${third.content[0]?.text}`);
+  pass("the third starts once one closes", `${Date.now() - closedAt} ms after the close`);
+  for (const id of [firstUp, secondUp]) {
+    const up = await launches.get(id)!;
+    expect(!up.isError, `a launch failed: ${up.content[0]?.text}`);
+  }
+
+  // Both slots taken, none closing: it times out.
+  const refusedAt = Date.now();
+  const refused = errorOf(await rawCall(owner, "launch_profile", { profile_id: d }));
+  const waited = Date.now() - refusedAt;
+  expect(refused.code === "BROWSER_LIMIT_REACHED", `limit: ${JSON.stringify(refused)}`);
+  expect(refused.retryable === true, `limit: ${JSON.stringify(refused)}`);
+  expect(waited >= SLOT_WAIT_MS - 500, `refused after only ${waited} ms`);
+  pass("with none free it times out", `BROWSER_LIMIT_REACHED, retryable, after ${waited} ms`);
+
+  // A kill from outside, by the PID this client was told: the slot comes back.
+  const victim = secondUp;
+  const running = (await call(owner, "launch_profile", { profile_id: victim })) as { pid?: number };
+  expect(typeof running.pid === "number" && running.pid > 0, `no pid: ${JSON.stringify(running)}`);
+  const killed = spawnSync("taskkill", ["/PID", String(running.pid), "/T", "/F"], { encoding: "utf8" });
+  expect(killed.status === 0, `taskkill: ${killed.stdout}${killed.stderr}`);
+  const noticedIn = await waitUntilStopped(owner, victim, 10_000);
+  const afterKill = await rawCall(owner, "launch_profile", { profile_id: d });
+  expect(!afterKill.isError, `after the kill: ${afterKill.content[0]?.text}`);
+  pass("killing a browser by its PID frees a slot", `noticed in ${noticedIn} ms, the next launch got it`);
+
+  await call(owner, "close_profile", { profile_id: waiter });
+  await call(owner, "close_profile", { profile_id: d });
+}
+
+/** Two clients on one page. The page's own log says whether their input interleaved. */
+async function noInterleavingChecks(url: string, token: string, id: string, origin: string): Promise<void> {
+  const left = await httpClient(url, token);
+  const right = await httpClient(url, token);
+  await launch(left, id);
+  await call(left, "navigate", { profile_id: id, url: `${origin}/events` });
+
+  const CLICKS = 6;
+  const spans: Array<[number, number]> = [];
+  const clicker = async (client: Client, selector: string): Promise<void> => {
+    for (let i = 0; i < CLICKS; i++) {
+      const startedAt = Date.now();
+      await call(client, "click", { profile_id: id, selector });
+      spans.push([startedAt, Date.now()]);
+    }
+  };
+  await Promise.all([clicker(left, "#left"), clicker(right, "#right")]);
+  const overlapping = spans.filter(([s, e]) =>
+    spans.some(([s2, e2]) => s2 !== s && s2 < e && s < e2),
+  ).length;
+  expect(overlapping > 0, "the clicks never ran at the same time, so this proved nothing");
+
+  const log = await eventLog(left, id);
+  const groups: string[][] = [];
+  for (let i = 0; i < log.length; i += 5) groups.push(log.slice(i, i + 5));
+  expect(groups.length === 2 * CLICKS, `${log.length} events: ${log.join(" ")}`);
+  for (const group of groups) {
+    const target = group[0]!.split(":")[1]!;
+    const expected = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].map(
+      (type) => `${type}:${target}`,
+    );
+    expect(group.join() === expected.join(), `interleaved events: ${log.join(" ")}`);
+  }
+  const sides = groups.map((g) => (g[0]!.endsWith("left") ? "L" : "R")).join("");
+  pass("two clients clicking one page don't interleave", `${overlapping} calls in flight together, page saw ${sides}`);
+
+  await call(left, "evaluate_js", { profile_id: id, expression: "window.__log.length = 0" });
+  await Promise.all([
+    call(left, "type", { profile_id: id, selector: "#field", text: "interleave" }),
+    call(right, "click", { profile_id: id, selector: "#right" }),
+  ]);
+  const typed = (await eventLog(left, id)).map((e) => e.split(":")[0]!);
+  const keys = typed.map((t) => (t === "keydown" ? "k" : "m")).join("");
+  expect(/^(m*k{10}m*)$/.test(keys), `a click cut into the typing: ${typed.join(" ")}`);
+  pass("a click can't cut into typing from another client", keys);
+
+  await left.close();
+  await right.close();
+}
+
+/** A queued click whose client goes away must not fire when the profile comes free. */
+async function disconnectChecks(url: string, token: string, id: string): Promise<void> {
+  const holder = await httpClient(url, token);
+  const clicks = async (): Promise<number> =>
+    (await eventLog(holder, id)).filter((e) => e.startsWith("click")).length;
+
+  const holdFor = (ms: number): Promise<ToolResult> =>
+    rawCall(holder, "evaluate_js", { profile_id: id, expression: busyPage(ms) });
+  const queueClick = (client: Client, signal?: AbortSignal): Promise<unknown> =>
+    client
+      .callTool(
+        { name: "click", arguments: { profile_id: id, selector: "#left" } },
+        undefined,
+        signal ? { signal, timeout: 120_000 } : { timeout: 120_000 },
+      )
+      .catch(() => {});
+
+  // A cancelled call: the SDK sends notifications/cancelled.
+  let before = await clicks();
+  let holding = holdFor(2_000);
+  await new Promise((done) => setTimeout(done, 300));
+  const cancelling = await httpClient(url, token);
+  const cancel = new AbortController();
+  void queueClick(cancelling, cancel.signal);
+  await new Promise((done) => setTimeout(done, 300));
+  cancel.abort();
+  await holding;
+  await new Promise((done) => setTimeout(done, 800));
+  expect((await clicks()) === before, "a cancelled queued click fired");
+  await cancelling.close();
+  pass("a cancelled queued click never fires");
+
+  // A session ended with DELETE.
+  before = await clicks();
+  holding = holdFor(2_000);
+  await new Promise((done) => setTimeout(done, 300));
+  const transport = new StreamableHTTPClientTransport(new URL(url), {
+    requestInit: { headers: { authorization: `Bearer ${token}` } },
+  });
+  const ending = new Client({ name: "e2e-ending", version: "1.0.0" });
+  await ending.connect(transport);
+  void queueClick(ending);
+  await new Promise((done) => setTimeout(done, 300));
+  await transport.terminateSession();
+  await ending.close();
+  await holding;
+  await new Promise((done) => setTimeout(done, 800));
+  expect((await clicks()) === before, "the queued click of a terminated session fired");
+  pass("a session's end drops its queued click");
+
+  // Legacy SSE: the stream closing is the session closing.
+  before = await clicks();
+  holding = holdFor(2_000);
+  await new Promise((done) => setTimeout(done, 300));
+  const sse = new Client({ name: "e2e-sse", version: "1.0.0" });
+  await sse.connect(
+    new SSEClientTransport(new URL("/sse", url), {
+      requestInit: { headers: { authorization: `Bearer ${token}` } },
+    }),
+  );
+  void queueClick(sse);
+  await new Promise((done) => setTimeout(done, 300));
+  await sse.close();
+  await holding;
+  await new Promise((done) => setTimeout(done, 800));
+  expect((await clicks()) === before, "the queued click of a dropped SSE client fired");
+  pass("a dropped SSE client loses its queued click");
+
+  await holder.close();
+}
+
+/** A stuck page: close_profile goes past the queue and the holder fails at once. */
+async function preemptionChecks(url: string, token: string, id: string): Promise<void> {
+  const holder = await httpClient(url, token);
+  const queued = await httpClient(url, token);
+  const closer = await httpClient(url, token);
+  const stuck = rawCall(holder, "evaluate_js", { profile_id: id, expression: busyPage(25_000) });
+  await new Promise((done) => setTimeout(done, 500));
+  const waiting = rawCall(queued, "click", { profile_id: id, selector: "#left" });
+  await new Promise((done) => setTimeout(done, 300));
+
+  const startedAt = Date.now();
+  const closing = call(closer, "close_profile", { profile_id: id });
+  const waiterError = errorOf(await waiting);
+  const waiterMs = Date.now() - startedAt;
+  const holderError = errorOf(await stuck);
+  const holderMs = Date.now() - startedAt;
+  await closing;
+  const closeMs = Date.now() - startedAt;
+  expect(waiterError.code === "PROFILE_NOT_RUNNING", `waiter: ${JSON.stringify(waiterError)}`);
+  expect(holderError.code === "PROFILE_NOT_RUNNING", `holder: ${JSON.stringify(holderError)}`);
+  expect(holderMs < 3_000, `the holder took ${holderMs} ms to fail`);
+  expect(closeMs < 15_000, `the close took ${closeMs} ms`);
+  pass(
+    "close_profile preempts a stuck page",
+    `waiter failed in ${waiterMs} ms, holder in ${holderMs} ms, closed in ${closeMs} ms`,
+  );
+  await holder.close();
+  await queued.close();
+  await closer.close();
+}
+
+async function leaseChecks(url: string, token: string, id: string): Promise<void> {
+  const holder = await httpClient(url, token);
+  const other = await httpClient(url, token);
+  const lease = await call(holder, "acquire_profile", { profile_id: id, ttl_ms: 60_000 });
+  const leaseId = String(lease.lease_id);
+  expect(/^lease_/.test(leaseId), JSON.stringify(lease));
+
+  const blocked = errorOf(await rawCall(other, "click", { profile_id: id, selector: "#left" }));
+  expect(blocked.code === "PROFILE_LEASED", JSON.stringify(blocked));
+  await call(other, "extract", { profile_id: id });
+  await call(other, "list_tabs", { profile_id: id });
+  await call(holder, "click", { profile_id: id, selector: "#left" });
+  pass("a lease blocks another session's click, not its reads", String(blocked.code));
+
+  await holder.close();
+  const back = await httpClient(url, token);
+  const before = errorOf(await rawCall(back, "click", { profile_id: id, selector: "#left" }));
+  expect(before.code === "PROFILE_LEASED", JSON.stringify(before));
+  const reattached = await call(back, "acquire_profile", { profile_id: id, lease_id: leaseId });
+  expect(reattached.lease_id === leaseId, JSON.stringify(reattached));
+  await call(back, "click", { profile_id: id, selector: "#left" });
+  const bad = errorOf(await rawCall(other, "renew_profile", { profile_id: id, lease_id: "nope" }));
+  expect(bad.code === "LEASE_INVALID", JSON.stringify(bad));
+  pass("a lease outlives its session, and a reconnect reattaches with its id");
+
+  const forced = await call(other, "release_profile", { profile_id: id, force: true });
+  expect(forced.released === true, JSON.stringify(forced));
+  await call(other, "click", { profile_id: id, selector: "#left" });
+  pass("force-release by a token with the operator group");
+
+  await back.close();
+  await other.close();
+}
+
+/** An old ref held across a relaunch fails instead of naming something else. */
+async function relaunchRefCheck(client: Client, id: string, origin: string, what: string): Promise<void> {
+  await call(client, "navigate", { profile_id: id, url: `${origin}/events` });
+  const extracted = (await call(client, "extract", { profile_id: id })) as unknown as { result: Extracted };
+  const tree = treeOf(extracted.result);
+  const ref = refOf(tree, "left");
+  await call(client, "close_profile", { profile_id: id });
+  await launch(client, id);
+  await call(client, "navigate", { profile_id: id, url: `${origin}/events` });
+  const again = (await call(client, "extract", { profile_id: id })) as unknown as { result: Extracted };
+  const fresh = refOf(treeOf(again.result), "left");
+  expect(fresh !== ref, `the same ref ${ref} after a relaunch`);
+  const old = errorOf(await rawCall(client, "click_ref", { profile_id: id, ref }));
+  expect(old.code === "ELEMENT_NOT_FOUND", `an old ref: ${JSON.stringify(old)}`);
+  pass(`${what}: a ref from before a relaunch fails, it doesn't reach anything`, `${ref} then ${fresh}`);
+}
+
+/** Both engines share the limit, on real browsers. Camoufox's extract keeps to its cap. */
+async function bothEnginesChecks(client: Client, origin: string): Promise<void> {
+  const profile = async (name: string, engine: string): Promise<string> =>
+    String((await call(client, "create_profile", { name, engine })).id);
+  const cloak = await profile("cloak", "cloakbrowser");
+  const fox = await profile("fox", "camoufox");
+  const third = await profile("cloak-3", "cloakbrowser");
+  await launch(client, cloak);
+  await launch(client, fox);
+
+  const refused = errorOf(await rawCall(client, "launch_profile", { profile_id: third }));
+  expect(refused.code === "BROWSER_LIMIT_REACHED", JSON.stringify(refused));
+  pass("CloakBrowser and Camoufox count against one limit", String(refused.code));
+
+  await call(client, "navigate", { profile_id: fox, url: `${origin}/many` });
+  const huge = (await call(client, "extract", { profile_id: fox })) as unknown as {
+    result: { ariaSnapshot: string; truncated?: boolean };
+  };
+  const lines = huge.result.ariaSnapshot.split("\n").length;
+  expect(huge.result.truncated === true, "no truncation flag on a 6000 element page");
+  expect(lines === 5_000, `${lines} lines`);
+  pass("Camoufox extract caps a huge page and says so", `${lines} of about 6000 lines, truncated: true`);
+  await relaunchRefCheck(client, fox, origin, "Camoufox");
+
+  const closedAt = Date.now();
+  await call(client, "close_profile", { profile_id: fox });
+  await launch(client, third);
+  pass("a Camoufox browser's slot goes to a CloakBrowser profile", `${Date.now() - closedAt} ms`);
+
+  await call(client, "close_profile", { profile_id: cloak });
+  await call(client, "close_profile", { profile_id: third });
+}
+
+async function concurrencyFlow(): Promise<void> {
+  expect(!IS_CAMOUFOX, "this flow kills a browser by its PID, which Camoufox doesn't report");
+  const site = await startEventsSite();
+  const serve = await startServe([
+    "--max-browsers",
+    "2",
+    "--browser-queue-timeout-ms",
+    String(SLOT_WAIT_MS),
+  ]);
+  try {
+    const owner = await httpClient(serve.url, serve.token);
+    const ids: string[] = [];
+    for (const name of ["a", "b", "c", "d"]) {
+      ids.push(String((await call(owner, "create_profile", { name: `c-${name}`, ...ENGINE_ARGS })).id));
+    }
+    // A first launch alone: an engine that still has to install must not skew the timings.
+    await launch(owner, ids[0]!);
+    await call(owner, "close_profile", { profile_id: ids[0]! });
+
+    await limitChecks(owner, ids);
+    const page = ids[0]!;
+    await noInterleavingChecks(serve.url, serve.token, page, site.origin);
+    await disconnectChecks(serve.url, serve.token, page);
+    await leaseChecks(serve.url, serve.token, page);
+    await preemptionChecks(serve.url, serve.token, page);
+    await launch(owner, page);
+    await relaunchRefCheck(owner, page, site.origin, "CloakBrowser");
+    await call(owner, "close_profile", { profile_id: page });
+    if (values["camoufox-install"]) {
+      await bothEnginesChecks(owner, site.origin);
+    }
+
+    // Shutdown with a launch under way: the late browser must not be left running.
+    void rawCall(owner, "launch_profile", { profile_id: page }).catch(() => {});
+    await new Promise((done) => setTimeout(done, 400));
+    sendConsoleCtrl(serve.child.pid!, "CTRL_BREAK");
+    const exit = await serve.exited;
+    expect(exit === 0, `exit code ${exit}:\n${serve.output()}`);
+    await assertNoLeftovers("shutdown during a launch");
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+    await site.close();
+  }
+}
+
 async function main(): Promise<void> {
   prepareDataDir();
   const fixture = await startFixture();
@@ -1391,6 +1845,7 @@ async function main(): Promise<void> {
     }
     if (FLOWS.includes("stdio")) await stdioFlow(fixture);
     if (FLOWS.includes("tabs")) await tabsFlow();
+    if (FLOWS.includes("concurrency")) await concurrencyFlow();
   } finally {
     await fixture.close();
     if (!values.keep) cleanDataDir();

@@ -17,6 +17,7 @@ import {
 import {
   HttpTransport,
   createMultizenMcpServer,
+  createSharedMcpState,
   ActivityLog,
   InMemoryHumanHandoff,
   type ActivityEvent,
@@ -105,6 +106,8 @@ let activityLog: ActivityLog;
 /** Shared across every per-session MCP server so a human handoff requested on
  *  one connection can be resumed from the app regardless of session. */
 const humanHandoff = new InMemoryHumanHandoff();
+/** One profile mutex and lease table for all sessions, each of which gets its own server. */
+const sharedMcpState = createSharedMcpState({ handoff: humanHandoff });
 let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
 let mcpAuthToken: string | null = null;
@@ -435,7 +438,7 @@ app.whenReady().then(async () => {
             profileManager,
             browserDriver,
             activityLog,
-            handoff: humanHandoff,
+            shared: sharedMcpState,
             serverVersion: app.getVersion(),
             getDefaultEngine: () => cachedSettings?.browserEngine ?? "cloakbrowser",
           }).server,

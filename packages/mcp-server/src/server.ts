@@ -31,7 +31,8 @@ import {
   toToolError,
   type ToolErrorFields,
 } from "./errorMapping.js";
-import { InMemoryHumanHandoff, type HumanHandoff } from "./handoff.js";
+import type { HumanHandoff } from "./handoff.js";
+import { createSharedMcpState, type SharedMcpState } from "./sharedState.js";
 import { runGated, visibleTools } from "./toolGate.js";
 import { EXTENSION_DEFS, EXTENSION_HANDLERS, type ToolContext } from "./tools/index.js";
 
@@ -45,6 +46,9 @@ export interface MultizenMcpServerOptions {
   /** Human-handoff coordinator (CAPTCHA/2FA pause-resume). Defaults to an
    *  in-memory one; the desktop app passes one wired to its UI. */
   handoff?: HumanHandoff;
+  /** What every session of this process shares: the profile mutex and the leases. A
+   *  transport with several sessions must pass one. Defaults to a private one. */
+  shared?: SharedMcpState;
   /** App version reported to clients in the MCP `initialize` result. The
    *  desktop main passes `app.getVersion()`; falls back to a constant. */
   serverVersion?: string;
@@ -273,7 +277,8 @@ const MULTIZEN_MCP_INSTRUCTIONS = [
 export function createMultizenMcpServer(opts: MultizenMcpServerOptions): MultizenMcpServer {
   const { profileManager, browserDriver } = opts;
   const activityLog = opts.activityLog ?? new ActivityLog();
-  const handoff = opts.handoff ?? new InMemoryHumanHandoff();
+  const shared = opts.shared ?? createSharedMcpState({ handoff: opts.handoff });
+  const handoff = opts.handoff ?? shared.handoff;
   const getDefaultEngine = opts.getDefaultEngine ?? (() => resolveEngine(undefined, undefined));
 
   const server = new Server(
@@ -295,6 +300,13 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
     ),
   }));
 
+  // The SDK aborts extra.signal for every call in flight when the transport closes, which
+  // already empties the queue of this session. This is the session's end as such.
+  let lastSessionId: string | undefined;
+  server.onclose = () => {
+    if (lastSessionId !== undefined) shared.mutex.dropSession(lastSessionId);
+  };
+
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const name = req.params.name;
     const args = req.params.arguments ?? {};
@@ -303,15 +315,23 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
 
     try {
       const principal = principalFrom(extra, opts.principal);
-      const result = await runGated(name, args, { principal }, () =>
-        dispatch(name, args, {
-          profileManager,
-          browserDriver,
-          handoff,
-          getDefaultEngine,
-          uploadsRoot: opts.uploadsRoot,
-          maxInlineFileBytes: opts.maxInlineFileBytes,
-        }),
+      const sessionId = extra.sessionId ?? "local";
+      lastSessionId = sessionId;
+      const result = await runGated(
+        name,
+        args,
+        { principal, sessionId, signal: extra.signal, shared, driver: browserDriver },
+        (driver) =>
+          dispatch(name, args, {
+            profileManager,
+            browserDriver: driver,
+            handoff,
+            leases: shared.leases,
+            caller: { principal, sessionId },
+            getDefaultEngine,
+            uploadsRoot: opts.uploadsRoot,
+            maxInlineFileBytes: opts.maxInlineFileBytes,
+          }),
       );
       const image = asImageResult(result);
       if (image) {

@@ -5,15 +5,19 @@ const USAGE = `multizen-server: MultiZen's MCP server with real browsers, no des
 Usage:
   multizen-server serve [--host 127.0.0.1] [--port 7777] [--data-dir <dir>]
                         [--default-engine cloakbrowser|camoufox] [--no-auth] [--uploads-root <dir>]
+                        [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
   multizen-server stdio [--data-dir <dir>] [--default-engine cloakbrowser|camoufox]
-                        [--uploads-root <dir>]
+                        [--uploads-root <dir>] [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
   multizen-server stdio --connect <url> [--token-file <path>]
   multizen-server profile export <profile-id> [--out <file.mzar>] [--passphrase-file <path>] [--data-dir <dir>]
   multizen-server profile import <file.mzar> [--passphrase-file <path>] [--data-dir <dir>]
                         [--default-engine cloakbrowser|camoufox]
 
 Environment: MULTIZEN_DATA_DIR, MULTIZEN_HOST, MULTIZEN_PORT, MULTIZEN_DEFAULT_ENGINE,
-MULTIZEN_NO_AUTH=1, MULTIZEN_UPLOADS_ROOT, MULTIZEN_ARCHIVE_PASSPHRASE.
+MULTIZEN_NO_AUTH=1, MULTIZEN_UPLOADS_ROOT, MULTIZEN_MAX_BROWSERS,
+MULTIZEN_BROWSER_QUEUE_TIMEOUT_MS, MULTIZEN_ARCHIVE_PASSPHRASE.
+
+--max-browsers counts both engines and defaults to what the machine's memory allows.
 
 Logs are JSON lines on stdout (on stderr for stdio, whose stdout carries the protocol).
 serve keeps its bearer token in <data-dir>/owner-token.

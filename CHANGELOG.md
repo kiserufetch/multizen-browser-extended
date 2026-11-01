@@ -19,6 +19,11 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   because they would otherwise be deleted when the browser closes.
 - **`click_ref` and `type_ref` on Camoufox.** Its `extract` now also returns
   `ariaSnapshot`, text with iframes nested in it and refs like `p3.e7`.
+- **MCP `acquire_profile`, `renew_profile` and `release_profile`**: an optional
+  exclusive lease on a profile. Other sessions can read it but get `PROFILE_LEASED`
+  on anything that changes it. A lease lasts 5 minutes by default and at most an hour,
+  survives a dropped connection (reattach with its `lease_id`), and a token with the
+  `operator` group can force-release it. With no lease nothing changes.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.
@@ -41,9 +46,26 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   click a different element.
 - `navigate` fails with `NAVIGATION_FAILED` when the load fails. It used to report
   success on a connection error page. On Camoufox it was a generic error.
+- **Tool calls on one profile now run one at a time**, in arrival order, across all
+  MCP sessions, so two agents can't interleave their clicks and keys on a page. A call
+  waits up to 30 s, with up to 16 in line, then gets a retryable `TIMEOUT`. `list_tabs`,
+  `list_dialogs`, `handle_dialog`, `request_human`, `wait_for_human` and the like don't
+  queue, `wait_*` holds the profile per poll only, and a client that cancels or
+  disconnects loses its place in line.
+- `close_profile` goes past that queue: whoever waited gets `PROFILE_NOT_RUNNING` at
+  once, and so does a call stuck on the page.
+- A single page tool call stops at 60 s with a retryable `TIMEOUT`, plus a little per
+  key when typing, on both engines.
+- Refs start at a different number each time a browser starts, so a ref kept across a
+  relaunch fails with `ELEMENT_NOT_FOUND` instead of naming another element.
+- On Camoufox, `extract` stops at 5000 lines of `ariaSnapshot` and 1 MB of text and
+  sets `truncated: true`.
 
 ### Fixed
 
+- A profile launched twice at once starts one browser, and closing a profile while it
+  launches closes what the launch brings up. Quitting during a launch no longer leaves
+  that browser running.
 - The New Profile sheet preselects the default engine from Settings instead of
   always CloakBrowser. Unless you pick another engine, the profile gets the
   current default.

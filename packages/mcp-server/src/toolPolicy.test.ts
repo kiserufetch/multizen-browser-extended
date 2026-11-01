@@ -16,8 +16,9 @@ import {
 } from "./auth/principal.js";
 import { MockBrowserDriver } from "./MockBrowserDriver.js";
 import { createMultizenMcpServer, TOOL_DEFINITIONS } from "./server.js";
+import { createSharedMcpState } from "./sharedState.js";
 import { runGated, visibleTools } from "./toolGate.js";
-import { policedToolNames, policyFor } from "./toolPolicy.js";
+import { leaseBinds, policedToolNames, policyFor } from "./toolPolicy.js";
 import { EXTENSION_DEFS } from "./tools/index.js";
 
 const ALL_DEFINED = [...TOOL_DEFINITIONS, ...EXTENSION_DEFS].map((d) => d.name);
@@ -165,8 +166,37 @@ test("lock classes: a wait polls, and nothing a stuck operation needs ever queue
   for (const name of ["close_profile", "handle_dialog", "request_human", "wait_for_human"]) {
     assert.equal(policyFor(name)!.lock, "none", name);
   }
+  // The browser or the database answers these, not a page that may be stuck.
+  for (const name of ["list_tabs", "update_profile", "list_dialogs", "acquire_profile"]) {
+    assert.equal(policyFor(name)!.lock, "none", name);
+  }
+  assert.equal(policyFor("close_profile")!.preempts, true);
   assert.equal(policyFor("navigate")!.urlArg, "url");
   assert.equal(policyFor("new_tab")!.urlArg, "url");
+});
+
+test("a lease binds what changes a profile, not reads, and not the lease tools themselves", () => {
+  const free = policedToolNames().filter((name) => !leaseBinds(policyFor(name)!));
+  assert.deepEqual(free.sort(), [
+    "acquire_profile",
+    "extract",
+    "get_cookies",
+    "get_download",
+    "get_human_status",
+    "list_dialogs",
+    "list_downloads",
+    "list_fingerprint_options",
+    "list_profiles",
+    "list_tabs",
+    "probe_fingerprint",
+    "release_profile",
+    "renew_profile",
+    "screenshot",
+    "wait_for_human",
+    "wait_for_load",
+    "wait_for_navigation",
+    "wait_for_selector",
+  ]);
 });
 
 test("the activity log allowlist covers every tool", () => {
@@ -181,9 +211,19 @@ test("a tool with no policy is invisible and refused, even to a full principal",
 
   let ran = false;
   await assert.rejects(
-    runGated(unlisted.name, {}, { principal: FULL_PRINCIPAL }, async () => {
-      ran = true;
-    }),
+    runGated(
+      unlisted.name,
+      {},
+      {
+        principal: FULL_PRINCIPAL,
+        sessionId: "s",
+        shared: createSharedMcpState(),
+        driver: new MockBrowserDriver(),
+      },
+      async () => {
+        ran = true;
+      },
+    ),
     { code: "FORBIDDEN" },
   );
   assert.equal(ran, false);

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { EventEmitter } from "node:events";
 import CDP from "chrome-remote-interface";
 import {
@@ -73,6 +74,18 @@ export interface CdpSessionOptions {
   engine?: string;
   /** The persona's platform: on macos, `ControlOrMeta` in a key chord means Command. */
   platform?: KeyPlatform;
+  /** Refs are numbered from here. Default: {@link randomRefBase}. */
+  refBase?: number;
+  /** Replaces {@link OPERATION_DEADLINE_MS}. */
+  operationDeadlineMs?: number;
+}
+
+/**
+ * Where a browser run starts numbering its refs. Each run numbers afresh, so with a
+ * fixed start an `e7` kept across a relaunch would silently name some other element.
+ */
+export function randomRefBase(): number {
+  return 1_000 + Math.floor(Math.random() * 899_000);
 }
 
 /**
@@ -104,6 +117,62 @@ const CLOAK_RISKY_ENABLE_DOMAINS = new Set(["Runtime", "Network"]);
  * Callers can override per call via `opts.timeoutMs` (0 disables).
  */
 const DEFAULT_CDP_TIMEOUT_MS = 30_000;
+
+/**
+ * Ceiling for one verb, first command to last. The verbs below are made of many
+ * commands, each bounded on its own, and a mouse command on a hidden page alone can
+ * take about 5 s. Whoever holds the profile while this runs holds up everyone behind.
+ */
+const OPERATION_DEADLINE_MS = 60_000;
+/** Typing is paced like a person's, so a verb that types gets this much more per key. */
+const OPERATION_MS_PER_KEY = 100;
+
+/** The verbs that run as an operation, and how long each may take. */
+const typing = (textArg: number) => (args: unknown[], deadlineMs: number) =>
+  deadlineMs + [...String(args[textArg])].length * OPERATION_MS_PER_KEY;
+const flat = (_args: unknown[], deadlineMs: number): number => deadlineMs;
+const OPERATION_BUDGETS: Readonly<Record<string, (args: unknown[], deadlineMs: number) => number>> = {
+  navigate: (args, deadlineMs) =>
+    Math.max(deadlineMs, 2 * ((args[1] as { timeoutMs?: number } | undefined)?.timeoutMs ?? 0)),
+  click: flat,
+  type: typing(1),
+  clickRef: flat,
+  typeRef: typing(1),
+  pressKey: flat,
+  hover: flat,
+  scroll: flat,
+  selectOption: flat,
+  uploadFile: flat,
+  bringToFront: flat,
+  snapshot: flat,
+  extract: flat,
+  screenshot: flat,
+  evaluate: flat,
+  evaluateJs: flat,
+  listTabs: flat,
+  newTab: flat,
+  activateTab: flat,
+  closeTab: flat,
+  setDialogPolicy: flat,
+  handleDialog: flat,
+  enableDownloads: flat,
+  // Its own timeout says otherwise when given. Zero opts out, as it does per command.
+  cdpSend: (args, deadlineMs) => {
+    const timeoutMs = (args[3] as { timeoutMs?: number } | undefined)?.timeoutMs;
+    if (timeoutMs === undefined) return deadlineMs;
+    return timeoutMs > 0 ? Math.max(deadlineMs, timeoutMs) : Infinity;
+  },
+};
+
+interface Operation {
+  deadline: number;
+  /** Why it was given up on. What it would still have sent stays unsent. */
+  failure: Error | null;
+  /** Past its answer. A dialog can leave its last commands waiting: those may still go. */
+  settled: boolean;
+}
+
+const currentOperation = new AsyncLocalStorage<Operation>();
 
 /**
  * How long a new target may spend on its setup before it is resumed anyway. It is
@@ -414,7 +483,9 @@ export class CdpSession {
   private readonly refs = new Map<string, RefEntry>();
   /** `${sessionId}:${backendNodeId}` → ref, so a snapshot can reuse live refs. */
   private readonly refByNode = new Map<string, string>();
-  private refSeq = 0;
+  /** Refs this run issued are the numbers above this one, up to `refSeq`. */
+  private readonly refBase: number;
+  private refSeq: number;
   /** Per session: snapshots in flight holding Accessibility enabled there. */
   private readonly axUsers = new Map<string, number>();
 
@@ -429,9 +500,86 @@ export class CdpSession {
    *  then fail loud with a clear message instead of hanging on a dead socket or
    *  returning stale state. */
   private disconnected = false;
+  /** Ends each operation in flight, so nothing waits out a deadline on a dead browser. */
+  private readonly operations = new Set<(e: Error) => void>();
+
+  /**
+   * Bounds every verb here in one place, rather than in each body: nothing an agent
+   * reaches then runs without a deadline, and a verb gives up its later commands too.
+   */
+  static {
+    const proto = CdpSession.prototype as unknown as Record<
+      string,
+      (...args: unknown[]) => Promise<unknown>
+    >;
+    for (const [verb, budget] of Object.entries(OPERATION_BUDGETS)) {
+      const run = proto[verb]!;
+      proto[verb] = function (this: CdpSession, ...args: unknown[]): Promise<unknown> {
+        const deadlineMs = this.opts.operationDeadlineMs ?? OPERATION_DEADLINE_MS;
+        return this.operation(verb, budget(args, deadlineMs), () => run.apply(this, args));
+      };
+    }
+  }
 
   constructor(opts: CdpSessionOptions) {
     this.opts = opts;
+    this.refBase = opts.refBase ?? randomRefBase();
+    this.refSeq = this.refBase;
+  }
+
+  /**
+   * One verb's whole run. It rejects at its deadline or when the browser goes, whatever
+   * command is outstanding, and its remaining commands don't go out: the caller is about
+   * to let another operation start on this page. A verb inside a verb is the same one.
+   */
+  private operation<T>(name: string, budgetMs: number, work: () => Promise<T>): Promise<T> {
+    if (currentOperation.getStore()) return work();
+    const op: Operation = { deadline: Date.now() + budgetMs, failure: null, settled: false };
+    return new Promise<T>((resolve, reject) => {
+      const finish = (): void => {
+        op.settled = true;
+        clearTimeout(timer);
+        this.operations.delete(fail);
+      };
+      const fail = (e: Error): void => {
+        op.failure = e;
+        finish();
+        reject(e);
+      };
+      const timer = Number.isFinite(budgetMs)
+        ? setTimeout(
+            () =>
+              fail(
+                new MultizenError("TIMEOUT", `${name} did not finish within ${budgetMs} ms.`, {
+                  hint: "The page or browser may be stuck. close_profile ends it at once.",
+                }),
+              ),
+            budgetMs,
+          )
+        : undefined;
+      timer?.unref?.();
+      this.operations.add(fail);
+      currentOperation.run(op, async () => work()).then(
+        (value) => {
+          finish();
+          resolve(value);
+        },
+        (e: unknown) => {
+          finish();
+          reject(e);
+        },
+      );
+    });
+  }
+
+  /**
+   * Fails what is running now, for a caller about to close the browser: a stuck call
+   * can't hold up whoever needs the profile next. Commands still answer afterwards, so
+   * Browser.close goes through. Later operations run as usual until the session closes.
+   */
+  abortOperations(): void {
+    const closed = new MultizenError("PROFILE_NOT_RUNNING", "The browser was closed during this call.");
+    for (const fail of [...this.operations]) fail(closed);
   }
 
   /**
@@ -460,6 +608,7 @@ export class CdpSession {
       // socket.
       client.on("disconnect", () => {
         this.disconnected = true;
+        this.abortOperations();
       });
       this.listenForTargets(client);
       await sendTo(client, "Target.setDiscoverTargets", { discover: true });
@@ -714,6 +863,7 @@ export class CdpSession {
   }
 
   async close(): Promise<void> {
+    this.abortOperations();
     for (const t of this.teardowns.splice(0)) {
       try {
         t();
@@ -900,14 +1050,17 @@ export class CdpSession {
     return this.client;
   }
 
-  /** A command on one session, bounded like cdpSend's. */
+  /** A command on one session, bounded like cdpSend's and by what its operation has left. */
   private send<T = unknown>(
     method: string,
     params?: Record<string, unknown>,
     sessionId?: string,
-    timeoutMs?: number,
+    timeoutMs: number = DEFAULT_CDP_TIMEOUT_MS,
   ): Promise<T> {
-    return sendTo<T>(this.require(), method, params, sessionId, timeoutMs);
+    const op = currentOperation.getStore();
+    if (op?.failure) return Promise.reject(op.failure);
+    const bound = op && !op.settled ? Math.min(timeoutMs, op.deadline - Date.now()) : timeoutMs;
+    return sendTo<T>(this.require(), method, params, sessionId, bound);
   }
 
   /** The active tab, for verbs that act on the page. */
@@ -949,6 +1102,8 @@ export class CdpSession {
     sessionId?: string,
     opts: { safe?: boolean; timeoutMs?: number } = {},
   ): Promise<unknown> {
+    const given = currentOperation.getStore()?.failure;
+    if (given) throw given;
     const client = this.require();
     const routed =
       sessionId ??
@@ -1666,7 +1821,7 @@ export class CdpSession {
     const entry = this.refs.get(ref);
     if (!entry) {
       const n = /^e(\d+)$/.exec(ref);
-      if (n && Number(n[1]) >= 1 && Number(n[1]) <= this.refSeq) throw staleRef(ref);
+      if (n && Number(n[1]) > this.refBase && Number(n[1]) <= this.refSeq) throw staleRef(ref);
       throw new MultizenError("ELEMENT_NOT_FOUND", `Unknown element ref "${ref}".`, {
         hint: "Call extract and use the refs it gives.",
       });

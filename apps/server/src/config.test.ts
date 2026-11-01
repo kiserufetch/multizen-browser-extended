@@ -5,6 +5,7 @@ import {
   dataDirPathWarning,
   dataPaths,
   defaultDataDir,
+  defaultMaxBrowsers,
   parseProfileCommand,
   parseServeConfig,
   parseStdioConfig,
@@ -120,8 +121,65 @@ for (const [name, argv, pattern] of [
   });
 }
 
+const GIB = 1024 ** 3;
+
+test("the browser limit defaults from memory, a gigabyte each after a gigabyte kept back", () => {
+  assert.equal(defaultMaxBrowsers(GIB / 2), 1);
+  assert.equal(defaultMaxBrowsers(2 * GIB), 1);
+  assert.equal(defaultMaxBrowsers(4 * GIB), 3);
+  assert.equal(defaultMaxBrowsers(16 * GIB), 15);
+  assert.ok(defaultMaxBrowsers() >= 1);
+});
+
+test("the browser limit comes from the flag, then the environment, then memory", () => {
+  const env = { MULTIZEN_MAX_BROWSERS: "4", MULTIZEN_BROWSER_QUEUE_TIMEOUT_MS: "5000" };
+  const fromEnv = parseServeConfig([], env, LINUX);
+  assert.equal(fromEnv.maxBrowsers, 4);
+  assert.equal(fromEnv.browserQueueTimeoutMs, 5000);
+
+  const fromFlags = parseServeConfig(
+    ["--max-browsers", "2", "--browser-queue-timeout-ms", "100"],
+    env,
+    LINUX,
+  );
+  assert.equal(fromFlags.maxBrowsers, 2);
+  assert.equal(fromFlags.browserQueueTimeoutMs, 100);
+
+  const fromMemory = parseServeConfig([], {}, LINUX);
+  assert.equal(fromMemory.maxBrowsers, defaultMaxBrowsers());
+  assert.equal(fromMemory.browserQueueTimeoutMs, undefined, "the router's default then");
+
+  const stdio = parseStdioConfig(["--max-browsers", "3"], {}, LINUX);
+  assert.equal(stdio.kind === "local" && stdio.maxBrowsers, 3);
+});
+
+for (const [flag, value] of [
+  ["--max-browsers", "0"],
+  ["--max-browsers", "-1"],
+  ["--max-browsers", "1.5"],
+  ["--max-browsers", "many"],
+  ["--browser-queue-timeout-ms", "0"],
+  ["--browser-queue-timeout-ms", "soon"],
+] as Array<[string, string]>) {
+  test(`serve rejects ${flag} ${value}`, () => {
+    assert.throws(() => parseServeConfig([`${flag}=${value}`], {}, LINUX), (e: unknown) => {
+      assert.ok(e instanceof UsageError);
+      assert.match(e.message, new RegExp(flag));
+      return true;
+    });
+  });
+}
+
+test("--connect runs no browsers, so it takes no browser limit", () => {
+  assert.throws(
+    () => parseStdioConfig(["--connect", "http://127.0.0.1:1", "--max-browsers", "2"], {}, LINUX),
+    /don't apply/,
+  );
+});
+
 test("stdio: local by default, --connect switches to the relay", () => {
-  assert.deepEqual(parseStdioConfig(["--data-dir", "d"], {}, LINUX), {
+  assert.deepEqual(parseStdioConfig(["--data-dir", "d", "--max-browsers", "2"], {}, LINUX), {
+    maxBrowsers: 2,
     kind: "local",
     dataDir: resolve("d"),
     defaultEngine: undefined,

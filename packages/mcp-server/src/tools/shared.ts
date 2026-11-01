@@ -1,7 +1,9 @@
 import { z } from "zod";
 import type { ProfileManager } from "@multizen/profile-manager";
 import type { BrowserDriver } from "@multizen/types";
+import type { Principal } from "../auth/principal.js";
 import type { HumanHandoff } from "../handoff.js";
+import type { LeaseRegistry } from "../LeaseRegistry.js";
 
 /** Largest file `upload_file` takes as base64 and `get_download` returns inline. */
 export const DEFAULT_MAX_INLINE_FILE_BYTES = 16 * 1024 * 1024;
@@ -11,6 +13,9 @@ export interface ToolContext {
   profileManager: ProfileManager;
   browserDriver: BrowserDriver;
   handoff: HumanHandoff;
+  leases: LeaseRegistry;
+  /** Who is making this call. */
+  caller: { principal: Principal; sessionId: string };
   /** A directory `upload_file` may read from, besides the profile's own uploads dir. */
   uploadsRoot?: string;
   maxInlineFileBytes?: number;

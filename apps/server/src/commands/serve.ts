@@ -75,7 +75,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
         profileManager: runtime.profileManager,
         browserDriver: runtime.driver,
         activityLog: runtime.activityLog,
-        handoff: runtime.shared.handoff,
+        shared: runtime.shared,
         serverVersion: SERVER_VERSION,
         getDefaultEngine: runtime.getDefaultEngine,
         uploadsRoot: config.uploadsRoot,
@@ -90,6 +90,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     dataDir: config.dataDir,
     auth: authToken ? "owner-token" : "none",
     defaultEngine: runtime.getDefaultEngine(),
+    maxBrowsers: config.maxBrowsers,
     version: SERVER_VERSION,
   });
 }

@@ -215,6 +215,7 @@ function rig(t: TestContext, platform = "windows"): Rig {
       get: (id: ProfileId) => (id === ID ? { id, dataDir: dir } : null),
     } as never,
     browserDataDir: () => "unused",
+    refBase: 0,
   });
   (driver as unknown as { adopt: (...a: unknown[]) => unknown }).adopt(ID, context, false, platform);
   t.after(async () => {
@@ -810,4 +811,273 @@ test("an action found ready that never happens points at a covered window", asyn
   assert.equal(failed.code, "TIMEOUT");
   assert.match(failed.message, /did not take the action: performing click action$/);
   assert.match(failed.hint ?? "", /covered/);
+});
+
+// ── concurrency ──────────────────────────────────────────────────────────────
+
+function launchRig(t: TestContext, launches: { count: number; release: () => void }): FirefoxBrowserDriver {
+  const dir = mkdtempSync(join(tmpdir(), "mz-ff-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const driver = new FirefoxBrowserDriver({
+    profileManager: {
+      get: (id: ProfileId) => (id === ID ? { id, dataDir: dir } : null),
+    } as never,
+    browserDataDir: () => "unused",
+    refBase: 0,
+  });
+  (driver as unknown as { doLaunch: unknown }).doLaunch = async (id: ProfileId) => {
+    launches.count += 1;
+    await new Promise<void>((resolve) => {
+      launches.release = resolve;
+    });
+    const context = new FakeContext(new FakePage());
+    t.after(() => context.close());
+    (driver as unknown as { adopt: (...a: unknown[]) => unknown }).adopt(id, context, false, "windows");
+    return { id, cdpEndpoint: "", pid: 0, startedAt: "now" };
+  };
+  return driver;
+}
+
+const turn = async (): Promise<void> => {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+};
+
+test("two parallel launches run doLaunch once; launching a running profile answers as it is", async (t) => {
+  const launches = { count: 0, release: () => {} };
+  const driver = launchRig(t, launches);
+  const both = [driver.launch(ID), driver.launch(ID)];
+  await turn();
+  assert.equal(launches.count, 1);
+  launches.release();
+  await Promise.all(both);
+  assert.equal(driver.isRunning(ID), true);
+  await driver.launch(ID);
+  assert.equal(launches.count, 1);
+});
+
+test("close during a launch waits for it and closes what came up", async (t) => {
+  const launches = { count: 0, release: () => {} };
+  const driver = launchRig(t, launches);
+  const launching = driver.launch(ID);
+  await turn();
+  let closed = false;
+  const closing = driver.close(ID).then(() => {
+    closed = true;
+  });
+  await turn();
+  assert.equal(closed, false);
+  launches.release();
+  await launching;
+  await closing;
+  assert.equal(driver.isRunning(ID), false);
+});
+
+test("closeAll covers a launch under way", async (t) => {
+  const launches = { count: 0, release: () => {} };
+  const driver = launchRig(t, launches);
+  const launching = driver.launch(ID);
+  await turn();
+  const closingAll = driver.closeAll();
+  await turn();
+  launches.release();
+  await launching;
+  await closingAll;
+  assert.equal(driver.isRunning(ID), false);
+});
+
+/** A rig whose verbs give up quickly. */
+function hurriedRig(t: TestContext, opts: { operationDeadlineMs?: number; closeDeadlineMs?: number }): Rig {
+  const dir = mkdtempSync(join(tmpdir(), "mz-ff-"));
+  const page = new FakePage();
+  const context = new FakeContext(page);
+  const driver = new FirefoxBrowserDriver({
+    profileManager: { get: (id: ProfileId) => (id === ID ? { id, dataDir: dir } : null) } as never,
+    browserDataDir: () => "unused",
+    refBase: 0,
+    ...opts,
+  });
+  (driver as unknown as { adopt: (...a: unknown[]) => unknown }).adopt(ID, context, false, "windows");
+  t.after(async () => {
+    await context.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  return { driver, context, page, dir };
+}
+
+const hangs = (): Promise<never> => new Promise(() => {});
+
+test("a verb on a stuck page ends at its deadline", async (t) => {
+  const { driver, page } = hurriedRig(t, { operationDeadlineMs: 30 });
+  page.evaluate = hangs;
+  const startedAt = Date.now();
+  await assert.rejects(driver.evaluateJs(ID, "1"), (e: MultizenError) => {
+    assert.equal(e.code, "TIMEOUT");
+    assert.equal(e.retryable, true);
+    assert.match(e.message, /evaluateJs did not finish within 30 ms/);
+    return true;
+  });
+  assert.ok(Date.now() - startedAt < 5_000);
+});
+
+test("every verb is bounded, the unbounded Playwright calls included", async (t) => {
+  const { driver, page, context } = hurriedRig(t, { operationDeadlineMs: 20 });
+  withButton(page);
+  await extract(driver);
+  page.bringToFront = hangs;
+  page.title = hangs;
+  page.evaluate = hangs;
+  page.screenshot = hangs;
+  page.goto = hangs;
+  page.keyboard.press = hangs;
+  page.close = hangs;
+  context.newPage = hangs;
+  (context as unknown as { cookies: unknown }).cookies = hangs;
+  (context as unknown as { addCookies: unknown }).addCookies = hangs;
+  const isTimeout = hasCode("TIMEOUT");
+  await assert.rejects(driver.navigate(ID, "http://x/"), isTimeout);
+  await assert.rejects(driver.extract(ID), isTimeout);
+  await assert.rejects(driver.screenshot(ID), isTimeout);
+  await assert.rejects(driver.evaluateJs(ID, "1"), isTimeout);
+  await assert.rejects(driver.getCookies(ID), isTimeout);
+  await assert.rejects(driver.setCookies(ID, []), isTimeout);
+  await assert.rejects(driver.newTab(ID), isTimeout);
+  await assert.rejects(driver.activateTab(ID, "1"), isTimeout);
+  await assert.rejects(driver.closeTab(ID, "1"), isTimeout);
+  await assert.rejects(driver.performAction(ID, { type: "press_key", key: "Enter" }), isTimeout);
+});
+
+test("a verb given up on sends no more input, though Playwright's call can't be taken back", async (t) => {
+  const { driver, page } = hurriedRig(t, { operationDeadlineMs: 60 });
+  withButton(page);
+  await extract(driver);
+  let release = (): void => {};
+  page.failures.set(
+    "click",
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  await assert.rejects(driver.typeRef(ID, "p1.e1", "secret"), hasCode("TIMEOUT"));
+  page.failures.delete("click");
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(page.calls.filter((c) => c.startsWith("key ")).length, 0);
+});
+
+test("a verb that types gets more time per key", async (t) => {
+  const { driver, page } = hurriedRig(t, { operationDeadlineMs: 150 });
+  withButton(page);
+  await extract(driver);
+  (driver as unknown as { operationDeadlineMs: number }).operationDeadlineMs = 1;
+  page.keyboard.type = hangs;
+  const startedAt = Date.now();
+  await assert.rejects(driver.typeRef(ID, "p1.e1", "12345"), hasCode("TIMEOUT"));
+  assert.ok(Date.now() - startedAt >= 450, `gave up after ${Date.now() - startedAt} ms`);
+});
+
+test("close ends a call stuck on the browser right away", async (t) => {
+  const { driver, page } = rig(t);
+  page.evaluate = hangs;
+  const stuck = driver.evaluateJs(ID, "1");
+  await new Promise((resolve) => setImmediate(resolve));
+  const startedAt = Date.now();
+  await driver.close(ID);
+  await assert.rejects(stuck, hasCode("PROFILE_NOT_RUNNING"));
+  assert.ok(Date.now() - startedAt < 5_000);
+});
+
+test("a browser that goes by itself ends the calls on it too", async (t) => {
+  const { driver, page, context } = rig(t);
+  page.evaluate = hangs;
+  const stuck = driver.evaluateJs(ID, "1");
+  await new Promise((resolve) => setImmediate(resolve));
+  context.emit("close");
+  await assert.rejects(stuck, hasCode("PROFILE_NOT_RUNNING"));
+});
+
+test("a browser that won't close is given up on, once, as closed", async (t) => {
+  const { driver, context } = hurriedRig(t, { closeDeadlineMs: 20 });
+  const realClose = context.close.bind(context);
+  context.close = hangs;
+  const changes: Array<{ kind: string; reason?: string }> = [];
+  driver.on("running-changed", (c) => changes.push(c));
+  await driver.close(ID);
+  assert.equal(driver.isRunning(ID), false);
+  assert.deepEqual(changes, [{ kind: "closed", profileId: ID, reason: "user-close" }]);
+  // And if Firefox does answer later, nothing is reported twice.
+  context.close = realClose;
+  context.emit("close");
+  assert.equal(changes.length, 1);
+});
+
+// ── refs across browser runs, and extract's size ─────────────────────────────
+
+test("refs are numbered from a base of their own per browser run", async (t) => {
+  const runs: string[] = [];
+  for (const dirName of ["a", "b"]) {
+    const page = new FakePage();
+    const context = new FakeContext(page);
+    const driver = new FirefoxBrowserDriver({
+      profileManager: { get: () => ({ id: ID, dataDir: dirName }) } as never,
+      browserDataDir: () => "unused",
+    });
+    (driver as unknown as { adopt: (...a: unknown[]) => unknown }).adopt(ID, context, false, "windows");
+    t.after(() => context.close());
+    withButton(page);
+    const snapshot = await extract(driver);
+    const n = Number(/\[ref=p1\.e(\d+)\]/.exec(snapshot)?.[1]);
+    assert.ok(n > 1_000 && n <= 900_000, snapshot);
+    runs.push(snapshot);
+  }
+  assert.notEqual(runs[0], runs[1]);
+});
+
+test("an old ref in a new run is not an element: it fails instead of hitting another one", async (t) => {
+  const page = new FakePage();
+  const context = new FakeContext(page);
+  const driver = new FirefoxBrowserDriver({
+    profileManager: { get: () => ({ id: ID, dataDir: "unused" }) } as never,
+    browserDataDir: () => "unused",
+    refBase: 5_000,
+  });
+  (driver as unknown as { adopt: (...a: unknown[]) => unknown }).adopt(ID, context, false, "windows");
+  t.after(() => context.close());
+  withButton(page);
+  assert.match(await extract(driver), /\[ref=p1\.e5001\]/);
+  await assert.rejects(driver.clickRef(ID, "p1.e7"), hasCode("ELEMENT_NOT_FOUND"));
+  await driver.clickRef(ID, "p1.e5001");
+  page.documentId = "doc-2";
+  await assert.rejects(driver.clickRef(ID, "p1.e5001"), hasCode("STALE_REF"));
+});
+
+test("extract caps a huge page and says so; a normal page has no flag", async (t) => {
+  const { driver, page } = rig(t);
+  withButton(page);
+  const { result: normal } = (await driver.extract(ID)) as { result: Record<string, unknown> };
+  assert.equal("truncated" in normal, false);
+
+  const lines = Array.from({ length: 6_000 }, (_, i) => `- button "b${i}" [ref=e${i + 1}]`);
+  page.snapshot = lines.join("\n");
+  page.elements = new Set(lines.map((_, i) => `e${i + 1}`));
+  const { result } = (await driver.extract(ID)) as {
+    result: { ariaSnapshot: string; truncated?: boolean };
+  };
+  assert.equal(result.truncated, true);
+  const kept = result.ariaSnapshot.split("\n");
+  assert.equal(kept.length, 5_000);
+  assert.match(kept.at(-1)!, /"b4999" \[ref=p1\.e\d+\]$/);
+  await assert.rejects(driver.clickRef(ID, "p1.e99999"), hasCode("ELEMENT_NOT_FOUND"));
+});
+
+test("extract caps the page text too", async (t) => {
+  const { driver, page } = rig(t);
+  withButton(page);
+  const huge = "x".repeat(3 * 1024 * 1024);
+  page.evaluate = async () => huge;
+  const { result } = (await driver.extract(ID)) as {
+    result: { text: string; truncated?: boolean };
+  };
+  assert.equal(result.truncated, true);
+  assert.equal(result.text.length, 1024 * 1024);
 });

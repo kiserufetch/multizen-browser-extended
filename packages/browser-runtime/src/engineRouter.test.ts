@@ -258,3 +258,418 @@ test("closing a profile clears its upload inbox and nothing else", async () => {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+// ── launches under way ───────────────────────────────────────────────────────
+
+/** A driver whose launches finish when the test says, as a real browser takes its time. */
+class SlowDriver extends EventEmitter {
+  launches: ProfileId[] = [];
+  closes: ProfileId[] = [];
+  readonly running = new Set<ProfileId>();
+  private readonly pending = new Map<ProfileId, { finish: () => void; fail: (e: Error) => void }>();
+
+  async launch(profileId: ProfileId): Promise<LaunchedProfile> {
+    this.launches.push(profileId);
+    await new Promise<void>((resolve, reject) => {
+      this.pending.set(profileId, { finish: resolve, fail: reject });
+    });
+    this.running.add(profileId);
+    return { id: profileId, cdpEndpoint: "", pid: 1, startedAt: "now" };
+  }
+  finish(profileId: ProfileId): void {
+    this.pending.get(profileId)?.finish();
+  }
+  fail(profileId: ProfileId, message: string): void {
+    this.pending.get(profileId)?.fail(new Error(message));
+  }
+  /** The browser died: the event every driver reports it with. */
+  exit(profileId: ProfileId): void {
+    this.running.delete(profileId);
+    this.emit("running-changed", { kind: "closed", profileId, reason: "external-exit" });
+  }
+  async close(profileId: ProfileId): Promise<void> {
+    this.closes.push(profileId);
+    if (this.running.delete(profileId)) {
+      this.emit("running-changed", { kind: "closed", profileId, reason: "user-close" });
+    }
+  }
+  isRunning(profileId: ProfileId): boolean {
+    return this.running.has(profileId);
+  }
+  async closeAll(): Promise<void> {
+    await Promise.all([...this.running].map((id) => this.close(id)));
+  }
+}
+
+function limitedRouter(
+  driver: SlowDriver,
+  opts: Partial<EngineRouterOptions> = {},
+): EngineRouter {
+  return new EngineRouter({
+    profileManager: {
+      get: (id: ProfileId) =>
+        ({ id, engine: id.startsWith("fox") ? "camoufox" : "cloakbrowser", dataDir: "unused" }) as Profile,
+    } as unknown as ProfileManager,
+    engineRegistry: { get: () => new FakeBootstrap(true) } as unknown as EngineRegistry,
+    getDefaultEngine: (): BrowserEngine => "cloakbrowser",
+    chromiumDriver: driver as unknown as ChromiumBrowserDriver,
+    ...opts,
+  });
+}
+
+/** The real router on a second stand-in engine, as if Camoufox had been loaded. */
+function withFakeFirefox(r: EngineRouter, firefox: SlowDriver): void {
+  const internals = r as unknown as {
+    firefoxLoading: Promise<unknown>;
+    firefoxDriver: unknown;
+    onSubEvent: (change: unknown) => void;
+  };
+  internals.firefoxDriver = firefox;
+  internals.firefoxLoading = Promise.resolve(firefox);
+  firefox.on("running-changed", (c) => internals.onSubEvent(c));
+}
+
+const turn = async (): Promise<void> => {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+};
+
+test("parallel launches of a profile share one launch and one result", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver);
+  const launches = [r.launch("p"), r.launch("p"), r.launch("p")];
+  await turn();
+  assert.deepEqual(driver.launches, ["p"]);
+  driver.finish("p");
+  const [a, b, c] = await Promise.all(launches);
+  assert.equal(a, b);
+  assert.equal(b, c);
+  assert.equal(r.isRunning("p"), true);
+});
+
+test("close during a launch waits for it and closes what it brought up", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver);
+  const launching = r.launch("p");
+  await turn();
+  let closed = false;
+  const closing = r.close("p").then(() => {
+    closed = true;
+  });
+  await turn();
+  assert.equal(closed, false, "nothing to close until the launch is through");
+  driver.finish("p");
+  await launching;
+  await closing;
+  assert.deepEqual(driver.closes, ["p"]);
+  assert.equal(r.isRunning("p"), false);
+});
+
+test("close during a failing launch has nothing to do", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver);
+  const launching = r.launch("p");
+  await turn();
+  const closing = r.close("p");
+  driver.fail("p", "no browser");
+  await assert.rejects(launching, (e) => code(e) === "LAUNCH_FAILED");
+  await closing;
+  assert.deepEqual(driver.closes, []);
+});
+
+test("a launch after a close waits until the browser let go of its data dir", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver);
+  const launching = r.launch("p");
+  await turn();
+  driver.finish("p");
+  await launching;
+  let release = (): void => {};
+  driver.close = async (profileId) => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    driver.running.delete(profileId);
+    driver.emit("running-changed", { kind: "closed", profileId, reason: "user-close" });
+  };
+  const closing = r.close("p");
+  await turn();
+  const relaunching = r.launch("p");
+  await turn();
+  assert.deepEqual(driver.launches, ["p"], "no second browser on the same data dir yet");
+  release();
+  await closing;
+  await turn();
+  assert.deepEqual(driver.launches, ["p", "p"]);
+  driver.finish("p");
+  await relaunching;
+});
+
+test("closeAll: a launch finishing after it had begun is closed and fails", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver);
+  const launching = r.launch("p");
+  await turn();
+  const closingAll = r.closeAll();
+  await turn();
+  driver.finish("p");
+  await assert.rejects(launching, (e) => code(e) === "LAUNCH_FAILED");
+  await closingAll;
+  assert.deepEqual(driver.closes, ["p"]);
+  assert.equal(driver.running.size, 0);
+});
+
+test("closeAll covers launches: it doesn't return before they have settled", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver);
+  const launching = r.launch("p");
+  await turn();
+  let done = false;
+  const closingAll = r.closeAll().then(() => {
+    done = true;
+  });
+  await turn();
+  assert.equal(done, false);
+  driver.fail("p", "gone");
+  await assert.rejects(launching);
+  await closingAll;
+});
+
+test("once shutting down, a new launch is refused and starts nothing", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver);
+  await r.closeAll();
+  await assert.rejects(r.launch("p"), (e) => code(e) === "LAUNCH_FAILED");
+  assert.deepEqual(driver.launches, []);
+});
+
+test("closeAll calls off a launch still waiting for a slot", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 1 });
+  const first = r.launch("a");
+  await turn();
+  driver.finish("a");
+  await first;
+  const waiting = r.launch("b");
+  await turn();
+  await r.closeAll();
+  await assert.rejects(waiting, (e) => code(e) === "LAUNCH_FAILED");
+  assert.deepEqual(driver.launches, ["a"]);
+});
+
+test("a browser that died the moment it came up isn't bound and gives its slot back", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 1, browserQueueTimeoutMs: 20 });
+  const launching = r.launch("a");
+  await turn();
+  driver.running.delete("a");
+  driver.finish("a");
+  driver.isRunning = () => false;
+  await assert.rejects(launching, /exited right after/);
+  assert.equal(r.isRunning("a"), false);
+  driver.isRunning = (id) => driver.running.has(id);
+  const next = r.launch("b");
+  await turn();
+  driver.finish("b");
+  await next;
+});
+
+// ── the browser limit ────────────────────────────────────────────────────────
+
+test("the third profile waits at limit 2, then gets BROWSER_LIMIT_REACHED", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 2, browserQueueTimeoutMs: 40 });
+  const launches = [r.launch("a"), r.launch("b")];
+  await turn();
+  driver.finish("a");
+  driver.finish("b");
+  await Promise.all(launches);
+
+  const startedAt = Date.now();
+  const error = await r.launch("c").then(
+    () => assert.fail("expected a rejection"),
+    (e: unknown) => e as MultizenError,
+  );
+  assert.equal(code(error), "BROWSER_LIMIT_REACHED");
+  assert.equal(error.retryable, true);
+  assert.ok(Date.now() - startedAt >= 35);
+  assert.deepEqual(driver.launches, ["a", "b"], "no browser started for it");
+  assert.equal(r.isRunning("c"), false);
+});
+
+test("the third profile starts as soon as one closes", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 2 });
+  const launches = [r.launch("a"), r.launch("b")];
+  await turn();
+  driver.finish("a");
+  driver.finish("b");
+  await Promise.all(launches);
+
+  const third = r.launch("c");
+  await turn();
+  assert.deepEqual(driver.launches, ["a", "b"]);
+  await r.close("a");
+  await turn();
+  assert.deepEqual(driver.launches, ["a", "b", "c"]);
+  driver.finish("c");
+  await third;
+});
+
+test("starting counts: a browser coming up takes its slot before it is up", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 1, browserQueueTimeoutMs: 20 });
+  const starting = r.launch("a");
+  await turn();
+  await assert.rejects(r.launch("b"), (e) => code(e) === "BROWSER_LIMIT_REACHED");
+  driver.finish("a");
+  await starting;
+});
+
+test("a failed launch gives its slot back", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 1 });
+  const failing = r.launch("a");
+  const waiting = r.launch("b");
+  await turn();
+  assert.deepEqual(driver.launches, ["a"]);
+  driver.fail("a", "no browser");
+  await assert.rejects(failing);
+  await turn();
+  assert.deepEqual(driver.launches, ["a", "b"]);
+  driver.finish("b");
+  await waiting;
+});
+
+test("a killed browser gives its slot back", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 1 });
+  const first = r.launch("a");
+  await turn();
+  driver.finish("a");
+  await first;
+  const waiting = r.launch("b");
+  await turn();
+  driver.exit("a");
+  await turn();
+  assert.deepEqual(driver.launches, ["a", "b"]);
+  driver.finish("b");
+  await waiting;
+  assert.equal(r.isRunning("a"), false);
+});
+
+test("slots free once: a close and the driver's own event don't count twice", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 2, browserQueueTimeoutMs: 20 });
+  const launches = [r.launch("a"), r.launch("b")];
+  await turn();
+  driver.finish("a");
+  driver.finish("b");
+  await Promise.all(launches);
+  await r.close("a"); // emits "closed" and returns: two reports of one end
+  driver.exit("a"); // and a late third
+  const c = r.launch("c");
+  await turn();
+  driver.finish("c");
+  await c;
+  await assert.rejects(r.launch("d"), (e) => code(e) === "BROWSER_LIMIT_REACHED");
+});
+
+test("both engines are counted together", async () => {
+  const chromium = new SlowDriver();
+  const firefox = new SlowDriver();
+  const r = limitedRouter(chromium, { maxBrowsers: 2, browserQueueTimeoutMs: 20 });
+  withFakeFirefox(r, firefox);
+  const launches = [r.launch("cloak1"), r.launch("fox1")];
+  await turn();
+  chromium.finish("cloak1");
+  firefox.finish("fox1");
+  await Promise.all(launches);
+
+  await assert.rejects(r.launch("cloak2"), (e) => code(e) === "BROWSER_LIMIT_REACHED");
+  await assert.rejects(r.launch("fox2"), (e) => code(e) === "BROWSER_LIMIT_REACHED");
+
+  // A Camoufox browser's slot goes to a CloakBrowser profile.
+  firefox.exit("fox1");
+  const next = r.launch("cloak2");
+  await turn();
+  chromium.finish("cloak2");
+  await next;
+  assert.deepEqual(chromium.launches, ["cloak1", "cloak2"]);
+});
+
+test("a launch can leave the queue for a slot; the driver is never asked", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 1 });
+  const first = r.launch("a");
+  await turn();
+  driver.finish("a");
+  await first;
+  const client = new AbortController();
+  const waiting = r.launch("b", { signal: client.signal });
+  await turn();
+  client.abort();
+  await assert.rejects(waiting, (e) => code(e) === "LAUNCH_FAILED");
+  assert.deepEqual(driver.launches, ["a"]);
+  assert.equal(r.isRunning("b"), false);
+});
+
+test("close calls off a launch still waiting for a slot, and it takes none", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver, { maxBrowsers: 1, browserQueueTimeoutMs: 20 });
+  const first = r.launch("a");
+  await turn();
+  driver.finish("a");
+  await first;
+  const waiting = r.launch("b");
+  await turn();
+  await r.close("b");
+  await assert.rejects(waiting, (e) => code(e) === "LAUNCH_FAILED");
+  assert.deepEqual(driver.launches, ["a"]);
+});
+
+test("close during an engine download doesn't sit through it, and no browser comes of the launch", async () => {
+  const bootstrap = new FakeBootstrap(false);
+  const driver = new FakeDriver();
+  const r = router(bootstrap, driver);
+  const launching = r.launch("p");
+  await turn();
+  await r.close("p");
+  await assert.rejects(launching, (e) => code(e) === "LAUNCH_FAILED");
+  bootstrap.finishInstall();
+  await turn();
+  assert.equal(driver.launches, 0);
+});
+
+test("a client that stops waiting during an engine download doesn't call the launch off", async () => {
+  const bootstrap = new FakeBootstrap(false);
+  const driver = new FakeDriver();
+  const r = router(bootstrap, driver);
+  const client = new AbortController();
+  const launching = r.launch("p", { signal: client.signal });
+  await turn();
+  client.abort();
+  await turn();
+  (bootstrap as unknown as { installed: boolean }).installed = true;
+  bootstrap.finishInstall();
+  await launching;
+  assert.equal(driver.launches, 1);
+});
+
+test("no limit by default, as on the desktop", async () => {
+  const driver = new SlowDriver();
+  const r = limitedRouter(driver);
+  const ids = Array.from({ length: 50 }, (_, i) => `p${i}`);
+  const launches = ids.map((id) => r.launch(id));
+  await turn();
+  assert.equal(driver.launches.length, 50);
+  ids.forEach((id) => driver.finish(id));
+  await Promise.all(launches);
+});
+
+test("two launches during the Firefox import load one driver", async () => {
+  const r = limitedRouter(new SlowDriver());
+  const internals = r as unknown as { firefox: () => Promise<unknown> };
+  const [a, b] = await Promise.all([internals.firefox(), internals.firefox()]);
+  assert.equal(a, b);
+  assert.ok(a);
+});

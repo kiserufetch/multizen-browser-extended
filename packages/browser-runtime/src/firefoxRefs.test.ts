@@ -2,8 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseChord } from "@multizen/cdp-driver";
 import {
+  capLines,
   frameOfRef,
   mapSnapshotRefs,
+  MAX_SNAPSHOT_CHARS,
+  MAX_SNAPSHOT_LINES,
   playwrightChord,
   snapshotRefs,
   tabOfRef,
@@ -83,7 +86,7 @@ const docs = (main: string, frame = "doc-f"): Map<string, string> =>
   ]);
 
 test("publish names refs by tab, in order, frames included", () => {
-  const refs = new TabRefs("3");
+  const refs = new TabRefs("3", 0);
   const out = refs.publish('- button "a" [ref=e1]\n- button "b" [ref=f1e4]', docs("d1"));
   assert.equal(out, '- button "a" [ref=p3.e1]\n- button "b" [ref=p3.e2]');
   assert.deepEqual(refs.lookup("p3.e1"), { inner: "e1", document: "d1" });
@@ -91,14 +94,14 @@ test("publish names refs by tab, in order, frames included", () => {
 });
 
 test("the same element in the same document keeps its ref", () => {
-  const refs = new TabRefs("1");
+  const refs = new TabRefs("1", 0);
   refs.publish('- button "a" [ref=e1]\n- button "b" [ref=e2]', docs("d1"));
   const again = refs.publish('- button "b" [ref=e2]\n- button "c" [ref=e9]', docs("d1"));
   assert.equal(again, '- button "b" [ref=p1.e2]\n- button "c" [ref=p1.e3]');
 });
 
 test("a new document never reuses a ref, though Playwright's numbers start over", () => {
-  const refs = new TabRefs("1");
+  const refs = new TabRefs("1", 0);
   refs.publish('- button "a" [ref=e1]', docs("d1"));
   const next = refs.publish('- button "a" [ref=e1]', docs("d2"));
   assert.equal(next, '- button "a" [ref=p1.e2]');
@@ -106,7 +109,7 @@ test("a new document never reuses a ref, though Playwright's numbers start over"
 });
 
 test("a frame's navigation retires only that frame's refs", () => {
-  const refs = new TabRefs("1");
+  const refs = new TabRefs("1", 0);
   const line = '- button "a" [ref=e1]\n- button "b" [ref=f1e1]';
   refs.publish(line, docs("d1", "f-old"));
   const next = refs.publish(line, docs("d1", "f-new"));
@@ -114,7 +117,7 @@ test("a frame's navigation retires only that frame's refs", () => {
 });
 
 test("an element gone from the latest snapshot is stale; a number never issued is unknown", () => {
-  const refs = new TabRefs("1");
+  const refs = new TabRefs("1", 0);
   refs.publish('- button "a" [ref=e1]\n- button "b" [ref=e2]', docs("d1"));
   refs.publish('- button "a" [ref=e1]', docs("d1"));
   assert.equal(refs.lookup("p1.e2"), "stale");
@@ -138,4 +141,44 @@ test("a chord goes to Playwright by physical key", () => {
   assert.equal(chord("+"), "Shift+Equal");
   assert.equal(chord("ControlOrMeta+A", "macos"), "Meta+KeyA");
   assert.equal(chord("ControlOrMeta+A", "windows"), "Control+KeyA");
+});
+
+test("a base: refs are the numbers above it, stale above it and unknown below", () => {
+  const refs = new TabRefs("1", 5_000);
+  const out = refs.publish('- button "a" [ref=e1]\n- button "b" [ref=e2]', new Map([["", "d1"]]));
+  assert.equal(out, '- button "a" [ref=p1.e5001]\n- button "b" [ref=p1.e5002]');
+  refs.publish('- button "c" [ref=e9]', new Map([["", "d2"]]));
+  assert.equal(refs.lookup("p1.e5001"), "stale");
+  assert.equal(refs.lookup("p1.e5002"), "stale");
+  assert.notEqual(refs.lookup("p1.e5003"), "unknown");
+  assert.equal(refs.lookup("p1.e5000"), "unknown", "below the base: from another run");
+  assert.equal(refs.lookup("p1.e1"), "unknown", "below the base: from another run");
+  assert.equal(refs.lookup("p1.e5004"), "unknown", "never issued");
+});
+
+test("capLines leaves small text alone", () => {
+  assert.deepEqual(capLines("a\nb"), { text: "a\nb", truncated: false });
+  assert.deepEqual(capLines(""), { text: "", truncated: false });
+});
+
+test("capLines cuts at the line limit", () => {
+  const lines = Array.from({ length: MAX_SNAPSHOT_LINES + 3 }, (_, i) => `l${i}`);
+  const { text, truncated } = capLines(lines.join("\n"));
+  assert.equal(truncated, true);
+  assert.equal(text.split("\n").length, MAX_SNAPSHOT_LINES);
+  assert.equal(text.split("\n").at(-1), `l${MAX_SNAPSHOT_LINES - 1}`);
+  assert.equal(capLines(lines.slice(0, MAX_SNAPSHOT_LINES).join("\n")).truncated, false);
+});
+
+test("capLines cuts long text at a line break, so no ref is left in pieces", () => {
+  const long = "y".repeat(MAX_SNAPSHOT_CHARS - 2);
+  const { text, truncated } = capLines(`${long}\n- button [ref=e1]`);
+  assert.equal(truncated, true);
+  assert.equal(text, long);
+});
+
+test("capLines cuts inside a line only when that one line is over the limit", () => {
+  const { text, truncated } = capLines("z".repeat(MAX_SNAPSHOT_CHARS + 10));
+  assert.equal(truncated, true);
+  assert.equal(text.length, MAX_SNAPSHOT_CHARS);
 });
