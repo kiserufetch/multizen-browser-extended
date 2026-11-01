@@ -691,7 +691,10 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
   // and the driver's own renderer and version inside, as CloakBrowser's own Linux pool has it
   // (NVIDIA: "ANGLE (NVIDIA Corporation, NVIDIA GeForce …/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 565.77)").
   // No nouveau chip names like "NV178", and no Windows "(0x…)" device ids: CreepJS grades those F
-  // and C (docs/detection-baselines).
+  // and C (docs/detection-baselines). Measured on CloakBrowser 146.0.7680.177.5: an Intel GPU here is
+  // clean to CreepJS, but for any NVIDIA or AMD string, this form or another, the engine reports
+  // WebGL limits (MAX_TEXTURE_SIZE 32768) that CreepJS doesn't know: "suspicious gpu" and
+  // "suspicious capabilities". A string from its own Linux pool, all NVIDIA, gets the same two.
   {
     family: "linux-laptop-intel",
     label: "Linux laptop (Intel Iris Xe)",

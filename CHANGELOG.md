@@ -17,16 +17,18 @@ What a page sees of a browser in the Docker image, closer to a Linux desktop. Me
   played into Chromium's fake output (`AudioContext.baseLatency` 441/48000) and showed a made-up
   device list with two `audiooutput`, and Camoufox had no device at all: 44100 Hz, 0 channels, no
   media devices. Now both report 48 kHz stereo and a microphone. PipeWire rather than PulseAudio,
-  which pages can't tell apart here but costs 160 MB more. About 20 MB with the fonts below.
+  which pages can't tell apart here but adds 200 MB to the image instead of 20.
 - **Linux desktop fonts in the image:** Ubuntu, Cantarell, FreeSans, and Carlito and Caladea,
   which Chromium takes for Calibri and Cambria. A Linux persona now has 11 of the probe's 15 Linux
   fonts instead of 8, a Windows persona 5 of its 59 instead of 3. `fonts-ubuntu` is why the image
-  enables Debian's non-free area. Still no Microsoft fonts.
+  enables Debian's non-free area. Still no Microsoft fonts. Another 20 MB.
 - **Linux GPU personas read like Chrome on Linux:** ANGLE on OpenGL, vendor `Google Inc. (…)`, as
   CloakBrowser's own Linux pool has them. Gone: nouveau chip names (`NV178`, `NV137`), `Mesa` as the
-  vendor of NVIDIA's own driver, Windows `(0x…)` device ids. CreepJS graded `NV178` F and put it in
-  its trash as `suspicious gpu`. Existing profiles keep their GPU; editing the fingerprint of one that
-  has a retired string gives it its family's first GPU.
+  vendor of NVIDIA's own driver, Windows `(0x…)` device ids. CreepJS graded `NV178` F; every string
+  now grades A. An Intel GPU is clean to CreepJS, but for NVIDIA and AMD CloakBrowser itself reports
+  WebGL limits CreepJS doesn't know, whatever the string: `suspicious gpu` and `suspicious
+  capabilities` stay. Existing profiles keep their GPU; editing the fingerprint of one that has a
+  retired string gives it its family's first GPU.
 - **A Linux persona has its panel on CloakBrowser:** the persona's available screen
   (`availScreen`, screen height minus 30) reaches the engine as `--fingerprint-taskbar-height`.
   `screen.availHeight` and `outerHeight` used to equal the screen's, which CreepJS counts twice
