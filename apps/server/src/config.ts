@@ -90,6 +90,8 @@ export function dataPaths(dataDir: string): {
   ownerTokenPath: string;
   tokensPath: string;
   secretKeyPath: string;
+  stateFile: string;
+  xvfbRunDir: string;
 } {
   return {
     dbPath: join(dataDir, "profiles.db"),
@@ -98,6 +100,8 @@ export function dataPaths(dataDir: string): {
     ownerTokenPath: join(dataDir, "owner-token"),
     tokensPath: join(dataDir, "tokens.json"),
     secretKeyPath: join(dataDir, "secret.key"),
+    stateFile: join(dataDir, "run", "state.json"),
+    xvfbRunDir: join(dataDir, "run", "xvfb"),
   };
 }
 
@@ -450,7 +454,7 @@ export type StdioConfig =
       ServerConfig,
       "maxBrowsers" | "browserQueueTimeoutMs" | "displayMode" | "headless" | "egressPolicy" | "egressAllow"
     >)
-  | { kind: "connect"; url: string; tokenFile?: string };
+  | { kind: "connect"; url: string; tokenFile?: string; keepAliveMs?: number };
 
 export function parseStdioConfig(
   argv: string[],
@@ -461,6 +465,7 @@ export function parseStdioConfig(
     ...DATA_DIR_OPTIONS,
     connect: { type: "string" },
     "token-file": { type: "string" },
+    "keepalive-ms": { type: "string" },
     "uploads-root": { type: "string" },
     ...BROWSER_LIMIT_OPTIONS,
     ...DISPLAY_OPTIONS,
@@ -470,8 +475,10 @@ export function parseStdioConfig(
 
   const connect = flags.flag("connect");
   const tokenFile = flags.flag("token-file");
+  const keepAlive = flags.flag("keepalive-ms");
   if (connect === undefined) {
     if (tokenFile !== undefined) throw new UsageError("--token-file only applies with --connect");
+    if (keepAlive !== undefined) throw new UsageError("--keepalive-ms only applies with --connect");
     return {
       kind: "local",
       dataDir: resolveDataDir(flags, env, facts),
@@ -509,7 +516,12 @@ export function parseStdioConfig(
     throw new UsageError(`--connect needs an http(s) URL, got "${connect}"`);
   }
   if (url.pathname === "/") url.pathname = "/mcp";
-  return { kind: "connect", url: url.href, tokenFile };
+  return {
+    kind: "connect",
+    url: url.href,
+    tokenFile,
+    ...(keepAlive !== undefined ? { keepAliveMs: parsePositiveInt("--keepalive-ms", keepAlive) } : {}),
+  };
 }
 
 export type ProfileCommand =

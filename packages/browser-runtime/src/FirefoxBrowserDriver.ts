@@ -50,6 +50,7 @@ import { resolveProxyLaunchGeo } from "./launchGeo";
 import { asEgressBlocked, startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { sanitizeStartUrl } from "./startPage";
 import type { RunningStateChange } from "./ChromiumBrowserDriver.ts";
+import { findPidsByDataDir, type ProcessJournal } from "./runState.ts";
 import { startXvfb, type XvfbHandle } from "./xvfb.ts";
 
 /**
@@ -228,6 +229,12 @@ export interface FirefoxBrowserDriverOptions {
   closeDeadlineMs?: number;
   /** Enforcing, every profile runs through the bridge. Otherwise launches stay as they were. */
   egress?: EgressPolicy;
+  /** Told about each process as it starts and ends, for the next start's reaper. Default: none. */
+  processJournal?: ProcessJournal;
+  /** Where Xvfb's auth files go. Default: the system's temp directory. */
+  xvfbRunDir?: string;
+  /** Replaces {@link findPidsByDataDir}. */
+  findPids?: (userDataDir: string) => Promise<number[]>;
 }
 
 type PersistentContextOptions = NonNullable<Parameters<typeof firefox.launchPersistentContext>[1]>;
@@ -374,6 +381,9 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   private readonly operationDeadlineMs: number;
   private readonly closeDeadlineMs: number;
   private readonly egress?: EgressPolicy;
+  private readonly processJournal?: ProcessJournal;
+  private readonly xvfbRunDir?: string;
+  private readonly findPids: (userDataDir: string) => Promise<number[]>;
 
   /**
    * Bounds every verb in one place, rather than in each body, so nothing an agent
@@ -405,6 +415,9 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     this.operationDeadlineMs = opts.operationDeadlineMs ?? OPERATION_DEADLINE_MS;
     this.closeDeadlineMs = opts.closeDeadlineMs ?? CLOSE_DEADLINE_MS;
     this.egress = opts.egress;
+    this.processJournal = opts.processJournal;
+    this.xvfbRunDir = opts.xvfbRunDir;
+    this.findPids = opts.findPids ?? ((userDataDir) => findPidsByDataDir(userDataDir));
   }
 
   override on<K extends keyof FirefoxDriverEvents>(event: K, listener: FirefoxDriverEvents[K]): this {
@@ -526,7 +539,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       xvfb = await startXvfb({
         width: fingerprint.screen.width,
         height: fingerprint.screen.height,
-        runDir: tmpdir(),
+        runDir: this.xvfbRunDir ?? tmpdir(),
+        ...(this.processJournal ? { journal: { processJournal: this.processJournal, profileId } } : {}),
       }).catch((e: unknown) => {
         if (hasProxyBridge) stopBridgeForProfile(profileId);
         throw e;
@@ -611,7 +625,10 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     // proxy/network) must not throw out of launch().
     const startUrl = sanitizeStartUrl(profile.startUrl);
     const startPage = context.pages()[0];
-    if (startPage) await openStartPage(startPage, startUrl);
+    await Promise.all([
+      this.learnPid(profileId, record, userDataDir),
+      ...(startPage ? [openStartPage(startPage, startUrl)] : []),
+    ]);
 
     this.emit("running-changed", { kind: "launched", profileId });
     return {
@@ -621,6 +638,32 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       startedAt: record.startedAt,
       displayMode,
     };
+  }
+
+  /**
+   * Playwright doesn't say what it spawned, so the browser's PID comes from its command line.
+   * Until then only the reaper's scan covers it. With no answer the browser just has no known
+   * PID, as it always had: that is no reason to fail its launch.
+   */
+  private async learnPid(profileId: ProfileId, r: RunningFirefox, userDataDir: string): Promise<void> {
+    let pid: number | undefined;
+    try {
+      [pid] = await this.findPids(userDataDir);
+    } catch (e) {
+      console.warn(`[multizen] could not find the Camoufox process: ${(e as Error).message}`);
+    }
+    if (!pid) return;
+    r.pid = pid;
+    // It may have gone during the search, with nothing left to say so.
+    if (this.running.get(profileId) !== r) return;
+    this.processJournal?.add({
+      kind: "browser",
+      engine: "camoufox",
+      profileId,
+      pid,
+      userDataDir,
+      startedAt: r.startedAt,
+    });
   }
 
   /** Takes over a started browser: its tabs, and every event that outlives launch(). */
@@ -635,8 +678,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     const record: RunningFirefox = {
       context,
       startedAt: new Date().toISOString(),
-      // Firefox/Playwright exposes no stable child pid for a persistent context;
-      // pid is informational only, so 0 = unknown.
+      // Set by learnPid. 0 = unknown.
       pid: 0,
       hasProxyBridge,
       closingByRequest: false,
@@ -666,7 +708,11 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     context.on("page", (p: Page) => {
       record.targets.addIdle({ targetId: this.trackPage(record, profileId, p), type: "page" });
     });
-    context.on("close", () => this.onContextClosed(profileId, record));
+    context.on("close", () => {
+      // Whatever a close did about the slot: only this says the process is gone.
+      this.processJournal?.remove(record.pid);
+      this.onContextClosed(profileId, record);
+    });
 
     // macOS keeps Firefox alive after its last window closes (standard app
     // lifecycle), so closing the window never closes the persistent context —

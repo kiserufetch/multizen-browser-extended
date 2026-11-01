@@ -1091,6 +1091,92 @@ test("a browser that goes by itself ends the calls on it too", async (t) => {
   await assert.rejects(stuck, hasCode("PROFILE_NOT_RUNNING"));
 });
 
+function journalRig(t: TestContext, findPids: (dir: string) => Promise<number[]>) {
+  const dir = mkdtempSync(join(tmpdir(), "mz-ff-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const page = new FakePage();
+  const context = new FakeContext(page);
+  const journal: Array<[string, unknown]> = [];
+  const driver = new FirefoxBrowserDriver({
+    profileManager: { get: (id: ProfileId) => (id === ID ? { id, dataDir: dir } : null) } as never,
+    browserDataDir: () => "the-data-dir",
+    refBase: 0,
+    closeDeadlineMs: 20,
+    findPids,
+    processJournal: {
+      add: (entry) => journal.push(["add", entry]),
+      remove: (pid) => journal.push(["remove", pid]),
+    },
+  });
+  const record = (driver as unknown as { adopt: (...a: unknown[]) => unknown }).adopt(ID, context, false, "windows");
+  const learn = (): Promise<void> =>
+    (driver as unknown as { learnPid: (...a: unknown[]) => Promise<void> }).learnPid(ID, record, "the-data-dir");
+  t.after(() => context.close());
+  return { driver, context, journal, learn };
+}
+
+test("the PID comes from the data dir, into the launch's answer and the journal", async (t) => {
+  const asked: string[] = [];
+  const { driver, journal, learn } = journalRig(t, async (dir) => {
+    asked.push(dir);
+    return [4242];
+  });
+  await learn();
+  assert.deepEqual(asked, ["the-data-dir"]);
+  assert.equal((await driver.launch(ID)).pid, 4242);
+  assert.equal(journal.length, 1);
+  const [verb, entry] = journal[0] as [string, Record<string, unknown>];
+  assert.equal(verb, "add");
+  assert.equal(entry.kind, "browser");
+  assert.equal(entry.engine, "camoufox");
+  assert.equal(entry.profileId, ID);
+  assert.equal(entry.pid, 4242);
+  assert.equal(entry.userDataDir, "the-data-dir");
+});
+
+test("no PID to be found, or no way to ask: the launch goes on with none, as it always did", async (t) => {
+  for (const findPids of [async () => [], () => Promise.reject(new Error("no powershell"))]) {
+    const { driver, journal, learn } = journalRig(t, findPids);
+    await learn();
+    assert.equal((await driver.launch(ID)).pid, 0);
+    assert.deepEqual(journal, []);
+  }
+});
+
+test("a browser gone during the search leaves no entry behind", async (t) => {
+  let answer = (_pids: number[]): void => {};
+  const { context, journal, learn } = journalRig(
+    t,
+    () => new Promise((resolve) => (answer = resolve)),
+  );
+  const learning = learn();
+  await new Promise((resolve) => setImmediate(resolve));
+  context.emit("close");
+  answer([4242]);
+  await learning;
+  assert.deepEqual(journal.filter(([verb]) => verb === "add"), []);
+});
+
+test("the journal entry goes when the browser does", async (t) => {
+  const { driver, journal, learn } = journalRig(t, async () => [4242]);
+  await learn();
+  await driver.close(ID);
+  assert.deepEqual(journal.at(-1), ["remove", 4242]);
+});
+
+test("a browser that won't close: its slot goes free, its entry stays until it really exits", async (t) => {
+  const { driver, context, journal, learn } = journalRig(t, async () => [4242]);
+  await learn();
+  const realClose = context.close.bind(context);
+  context.close = hangs;
+  await driver.close(ID);
+  assert.equal(driver.isRunning(ID), false, "the slot is free");
+  assert.deepEqual(journal.map(([verb]) => verb), ["add"], "the process is still there");
+  context.close = realClose;
+  context.emit("close");
+  assert.deepEqual(journal.at(-1), ["remove", 4242]);
+});
+
 test("a browser that won't close is given up on, once, as closed", async (t) => {
   const { driver, context } = hurriedRig(t, { closeDeadlineMs: 20 });
   const realClose = context.close.bind(context);

@@ -45,6 +45,7 @@ import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
 import { sanitizeStartUrl } from "./startPage";
 import { firstFreePort } from "./portProbe.ts";
 import { displayEnv, HEADLESS_CHROMIUM_ARGS } from "./displayMode.ts";
+import { SINGLETON_FILES, type ProcessJournal } from "./runState.ts";
 import { startXvfb, type XvfbHandle } from "./xvfb.ts";
 import { sandboxInstructions } from "./linuxSandbox.ts";
 import type { RuntimeHost } from "./host.ts";
@@ -222,6 +223,10 @@ export interface ChromiumBrowserDriverOptions {
    * PID is what a restarted container gets wrong, with PIDs reused under a fixed hostname.
    */
   ownsDataDir?: boolean;
+  /** Told about each process as it starts and ends, for the next start's reaper. Default: none. */
+  processJournal?: ProcessJournal;
+  /** Where Xvfb's auth files go. Default: the system's temp directory. */
+  xvfbRunDir?: string;
   /** Receives the browser's stderr. Default: raw lines on this process's stderr. */
   onBrowserStderr?: (pid: number, text: string) => void;
   /** Budget for the CDP readiness ladder after spawn. Default 15 s. */
@@ -283,6 +288,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private readonly onSandboxInactive?: (binaryPath: string) => void;
   private readonly requireSandbox: boolean;
   private readonly ownsDataDir: boolean;
+  private readonly processJournal?: ProcessJournal;
+  private readonly xvfbRunDir?: string;
   private readonly onBrowserStderr?: (pid: number, text: string) => void;
   private readonly readinessBudgetMs: number;
   private readonly customAllocatePort?: () => Promise<number>;
@@ -302,6 +309,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     this.onSandboxInactive = opts.onSandboxInactive;
     this.requireSandbox = opts.requireSandbox ?? false;
     this.ownsDataDir = opts.ownsDataDir ?? false;
+    this.processJournal = opts.processJournal;
+    this.xvfbRunDir = opts.xvfbRunDir;
     this.onBrowserStderr = opts.onBrowserStderr;
     this.readinessBudgetMs = opts.readinessBudgetMs ?? 15000;
     this.customAllocatePort = opts.allocatePort;
@@ -742,6 +751,15 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       });
       const pid = child.pid;
       if (!pid) throw new Error("Failed to spawn Chromium");
+      // Before anything can go wrong: a crash during readiness leaves this one too.
+      this.processJournal?.add({
+        kind: "browser",
+        engine,
+        profileId,
+        pid,
+        userDataDir: browserDataDir,
+        startedAt: new Date().toISOString(),
+      });
       // Treat as a sandbox crash ONLY when the FATAL signature appeared on
       // stderr AND the child actually exited (either event may land first). A
       // bare early exit, or a stray signature on a healthy child, is NOT a
@@ -765,6 +783,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         else process.stderr.write(`[chromium ${pid}] ${line}\n`);
       });
       child.on("exit", (code, signal) => {
+        this.processJournal?.remove(pid);
         // First-line breadcrumb — the record's child.on("exit") below also
         // handles running-changed teardown.
         if (code !== 0 && code !== null) {
@@ -816,7 +835,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         xvfb = await startXvfb({
           width: fp.screen.width + XVFB_SCREEN_MARGIN_PX,
           height: fp.screen.height + XVFB_SCREEN_MARGIN_PX,
-          runDir: tmpdir(),
+          runDir: this.xvfbRunDir ?? tmpdir(),
+          ...(this.processJournal ? { journal: { processJournal: this.processJournal, profileId } } : {}),
         });
       }
       childEnv = displayEnv(cleanEnv, displayMode, xvfb);
@@ -1532,8 +1552,6 @@ async function disableMacOsPersistentStateRestore(): Promise<void> {
     "true",
   ]).catch(() => {});
 }
-
-const SINGLETON_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] as const;
 
 /** See {@link ChromiumBrowserDriverOptions.ownsDataDir}. */
 async function removeSingletonFiles(dataDir: string): Promise<void> {

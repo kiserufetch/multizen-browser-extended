@@ -14,7 +14,7 @@ Usage:
   multizen-server stdio [--data-dir <dir>] [--default-engine cloakbrowser|camoufox]
                         [--uploads-root <dir>] [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
                         [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
-  multizen-server stdio --connect <url> [--token-file <path>]
+  multizen-server stdio --connect <url> [--token-file <path>] [--keepalive-ms <ms>]
   multizen-server profile export <profile-id> [--out <file.mzar>] [--passphrase-file <path>] [--data-dir <dir>]
   multizen-server profile import <file.mzar> [--passphrase-file <path>] [--data-dir <dir>]
                         [--default-engine cloakbrowser|camoufox]
@@ -33,6 +33,10 @@ MULTIZEN_SESSION_IDLE_TTL_MS, MULTIZEN_MAX_SESSIONS, MULTIZEN_SECRET_KEY,
 MULTIZEN_SECRET_KEY_NEW (secrets rotate only), MULTIZEN_EGRESS_POLICY, MULTIZEN_EGRESS_ALLOW.
 
 --max-browsers counts both engines and defaults to what the machine's memory allows.
+
+stdio --connect pings the server every --keepalive-ms (30000), which keeps its session from idling
+out. Below a server's --session-idle-ttl-ms is what it takes. When the session is gone anyway, because
+the server restarted or the token was revoked, it says so on stderr and exits 1: restart it.
 
 --host beyond loopback needs --allow-remote, and TLS or --allow-insecure-remote. Behind a
 reverse proxy, stay on loopback and name the proxy's host with --allowed-hosts or --public-url.

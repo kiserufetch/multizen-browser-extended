@@ -1386,6 +1386,27 @@ test("a verb that hangs ends at its deadline, whichever command it is on", async
   assert.ok(Date.now() - startedAt < 5_000);
 });
 
+test("the deadline names the verb, however long the commands before the stuck one took", async () => {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) b.attachPage("A", "S-A");
+    return {};
+  });
+  // All in one turn of the event loop, as a loaded machine can make it: the operation's
+  // timer is already running, and less of its budget is left for the command that hangs.
+  b.handlers.set("Runtime.evaluate", () => {
+    const until = Date.now() + 15;
+    while (Date.now() < until);
+    return { result: { value: { ok: true, x: 1, y: 2 } } };
+  });
+  b.hang.add("Page.createIsolatedWorld");
+  const s = newSession(b, { operationDeadlineMs: 40 });
+  await s.connect();
+  const e = await assertMultizenCode(s.click("#a"), "TIMEOUT");
+  assert.match(e.message, /click did not finish within 40 ms/);
+  assert.match(String(e.hint), /close_profile/);
+});
+
 test("a verb given up on sends nothing more: its input can't land in the next operation", async () => {
   const b = new FakeBrowser();
   b.handlers.set("Target.setAutoAttach", (_p, sid) => {

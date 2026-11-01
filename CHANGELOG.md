@@ -78,6 +78,16 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   `cdp_send` and `cdp_send_no_safety` are not gated, and on CloakBrowser a browser context from
   `Target.createBrowserContext` with `proxyServer: "direct://"` was measured reaching a private
   address. `token create` doesn't give `raw` unless asked.
+- **`multizen-server` cleans up after a crash.** It keeps a journal of its browsers and X servers
+  in `<data-dir>/run/state.json`. A `serve` or `stdio` that finds what a killed server left kills
+  those processes before opening its port, removes their locks, and keeps what was on disk. A
+  process is only killed on proof from its own command line: a recorded PID now running something
+  else is logged and left alone. On Linux a killed server's CloakBrowser browsers do stay behind.
+  On Windows they die with it, and Camoufox goes when its pipe closes, on both. The desktop has
+  no journal and no reaper.
+- **`stdio --connect` keeps its session.** It pings the server every `--keepalive-ms` (30000), so
+  an idle relay outlasts `--session-idle-ttl-ms`. When the session is gone anyway, because the server
+  restarted or the token was revoked, it says so on stderr and exits 1, instead of answering 404s.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.
@@ -85,6 +95,8 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 ### Changed
 
+- `launch_profile` reports a Camoufox browser's real `pid`, found from its command line, instead
+  of 0. It stays 0 if the search fails, which doesn't fail the launch.
 - MCP over HTTP takes requests of up to 22 MiB on both of its transports, so a large
   `upload_file` also works over legacy SSE, which stopped at 4 MB. Streamable HTTP had no
   limit. Larger requests get HTTP 413 with `FILE_TOO_LARGE`.

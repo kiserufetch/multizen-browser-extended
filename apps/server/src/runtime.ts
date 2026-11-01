@@ -8,8 +8,10 @@ import {
   EngineRegistry,
   EngineRouter,
   randomFreePort,
+  reapPreviousRun,
   stopAllBridges,
   sweepOrphans,
+  type ProcessJournal,
 } from "@multizen/browser-runtime";
 import pkg from "../package.json" with { type: "json" };
 import { dataPaths, type Env, type ServerConfig } from "./config.ts";
@@ -186,6 +188,16 @@ export function enginesInUse(
 }
 
 /**
+ * Deals with what the last run on this data dir left: see {@link reapPreviousRun}. For a
+ * process holding the data dir's lock, before it opens a port. Gives this run's journal.
+ */
+export async function takeOverFromPreviousRun(dataDir: string): Promise<ProcessJournal> {
+  const { stateFile, profilesRoot, xvfbRunDir } = dataPaths(dataDir);
+  const { journal } = await reapPreviousRun({ stateFile, profilesRoot, xvfbRunDir, log });
+  return journal;
+}
+
+/**
  * The browser runtime as the server runs it. Compared with the desktop's startup
  * this leaves out, on purpose: EngineUpdateService (the version stays pinned, so a
  * UA can't change mid-work), UpdaterService, UsageReporting, backfillProxyCountries
@@ -203,8 +215,9 @@ export async function buildRuntime(
     | "egressPolicy"
     | "egressAllow"
   >,
+  processJournal?: ProcessJournal,
 ): Promise<ServerRuntime> {
-  const { extensionStoreRoot } = dataPaths(cfg.dataDir);
+  const { extensionStoreRoot, xvfbRunDir } = dataPaths(cfg.dataDir);
   const settings = new SettingsStore(defaultSettingsPath(cfg.dataDir));
   const initialSettings = await settings.load();
   const getDefaultEngine = (): BrowserEngine => cfg.defaultEngine ?? initialSettings.browserEngine;
@@ -233,6 +246,8 @@ export async function buildRuntime(
     requireSandbox: true,
     ownsDataDir: true,
     egress,
+    processJournal,
+    xvfbRunDir,
     onBrowserStderr: (pid, text) =>
       log.debug("browser stderr", { pid, text: text.slice(0, BROWSER_STDERR_MAX_CHARS) }),
   });
@@ -241,7 +256,13 @@ export async function buildRuntime(
     engineRegistry,
     getDefaultEngine,
     chromiumDriver,
-    firefoxOptions: { ...SERVER_FIREFOX_OPTIONS, extraPrefs: serverFirefoxPrefs(process.platform), egress },
+    firefoxOptions: {
+      ...SERVER_FIREFOX_OPTIONS,
+      extraPrefs: serverFirefoxPrefs(process.platform),
+      egress,
+      processJournal,
+      xvfbRunDir,
+    },
     engineNotReady: "reject",
     maxBrowsers: cfg.maxBrowsers,
     browserQueueTimeoutMs: cfg.browserQueueTimeoutMs,

@@ -55,7 +55,7 @@ test("randomFreePort stays in the server's range and avoids a taken port", async
   try {
     for (let i = 0; i < 20; i++) {
       const port = await randomFreePort();
-      assert.ok(port >= 20000 && port <= 60000, `out of range: ${port}`);
+      assert.ok(port >= 20000 && port <= 32767, `out of range, or among outgoing ports: ${port}`);
       assert.notEqual(port, taken);
     }
   } finally {

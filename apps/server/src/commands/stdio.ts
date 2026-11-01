@@ -6,7 +6,8 @@ import { acquireServerLock, ServerLockHeldError } from "@multizen/browser-runtim
 import { createMultizenMcpServer } from "@multizen/mcp-server";
 import { dataDirPathWarning, type StdioConfig } from "../config.ts";
 import { errorFields, log, protocolStdout } from "../log.ts";
-import { buildRuntime, enginesInUse, SERVER_VERSION } from "../runtime.ts";
+import { DEFAULT_KEEPALIVE_MS, RelayKeepAlive, whySessionGone } from "../relayKeepAlive.ts";
+import { buildRuntime, enginesInUse, SERVER_VERSION, takeOverFromPreviousRun } from "../runtime.ts";
 import { preflightProcess, preflightUserNamespaces } from "../sandboxPreflight.ts";
 import type { ShutdownManager } from "../shutdown.ts";
 
@@ -47,7 +48,7 @@ async function runLocal(
   }
   shutdown.add("lock", () => lock.release());
 
-  const runtime = await buildRuntime(config);
+  const runtime = await buildRuntime(config, await takeOverFromPreviousRun(config.dataDir));
   // A stdio client that exits gives its child about two seconds before killing
   // it (the MCP SDK's client does), and on Windows that kill can't be caught.
   // So an EOF takes the short path, the same one the desktop's quit uses.
@@ -88,6 +89,13 @@ async function runLocal(
   });
 }
 
+/** This relay's own requests. Their answers stop here: the client never asked. */
+const KEEPALIVE_ID_PREFIX = "mz-relay-keepalive-";
+
+function isKeepAliveAnswer(message: JSONRPCMessage): boolean {
+  return "id" in message && typeof message.id === "string" && message.id.startsWith(KEEPALIVE_ID_PREFIX);
+}
+
 /** The JSON-RPC error a client gets when a request can't be delivered. */
 function failedSendReply(message: JSONRPCMessage, e: unknown): JSONRPCMessage | null {
   if (!("id" in message) || !("method" in message)) return null;
@@ -113,30 +121,56 @@ async function runConnect(
   const client = new StdioServerTransport(process.stdin, protocolStdout);
   const initializeIds = new Set<unknown>();
 
+  // A client's session can't move to a new one under it, so this relay ends: its client
+  // sees a server that went away, and whoever runs it reads why on stderr.
+  let sessionGone = false;
+  const endRelay = (why: string): void => {
+    if (sessionGone) return;
+    sessionGone = true;
+    log.error(`stdio relay ending: ${why}`, { url: config.url });
+    void shutdown.run("session-gone", 1);
+  };
+  let pings = 0;
+  const keepAlive = new RelayKeepAlive({
+    intervalMs: config.keepAliveMs ?? DEFAULT_KEEPALIVE_MS,
+    ping: () => upstream.send({ jsonrpc: "2.0", id: `${KEEPALIVE_ID_PREFIX}${++pings}`, method: "ping" }),
+    onGone: endRelay,
+  });
+
   client.onmessage = (message) => {
     if ("method" in message && message.method === "initialize" && "id" in message) {
       initializeIds.add(message.id);
     }
-    upstream.send(message).catch((e: unknown) => {
+    upstream.send(message).catch(async (e: unknown) => {
       log.error("upstream send failed", errorFields(e));
       const reply = failedSendReply(message, e);
-      if (reply) void client.send(reply);
+      if (reply) await client.send(reply).catch(() => {});
+      // Before there is a session this is only an answer to the client, which can try again.
+      const gone = upstream.sessionId === undefined ? null : whySessionGone(e);
+      if (gone) endRelay(gone);
     });
   };
   upstream.onmessage = (message) => {
+    if (isKeepAliveAnswer(message)) return;
     // The SDK's Client does this for a direct connection; a relay has to.
     if ("id" in message && initializeIds.delete(message.id) && "result" in message) {
       const version = (message.result as { protocolVersion?: unknown }).protocolVersion;
       if (typeof version === "string") upstream.setProtocolVersion(version);
+      keepAlive.start();
     }
     void client.send(message);
   };
-  upstream.onerror = (e) => log.warn("upstream error", errorFields(e));
+  upstream.onerror = (e) => {
+    log.warn("upstream error", errorFields(e));
+    // A dropped stream is the first sign of a server gone. Before a session there is nothing to ping.
+    if (upstream.sessionId !== undefined) keepAlive.checkNow();
+  };
   client.onerror = (e) => log.warn("client stream error", errorFields(e));
   upstream.onclose = () => void shutdown.run("upstream-closed", 0);
 
   shutdown.add("upstream", async () => {
-    await upstream.terminateSession().catch(() => {});
+    keepAlive.stop();
+    if (!sessionGone) await upstream.terminateSession().catch(() => {});
     await upstream.close();
   });
 

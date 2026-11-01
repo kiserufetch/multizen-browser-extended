@@ -165,11 +165,8 @@ const OPERATION_BUDGETS: Readonly<Record<string, (args: unknown[], deadlineMs: n
 };
 
 interface Operation {
-  deadline: number;
   /** Why it was given up on. What it would still have sent stays unsent. */
   failure: Error | null;
-  /** Past its answer. A dialog can leave its last commands waiting: those may still go. */
-  settled: boolean;
 }
 
 const currentOperation = new AsyncLocalStorage<Operation>();
@@ -534,10 +531,9 @@ export class CdpSession {
    */
   private operation<T>(name: string, budgetMs: number, work: () => Promise<T>): Promise<T> {
     if (currentOperation.getStore()) return work();
-    const op: Operation = { deadline: Date.now() + budgetMs, failure: null, settled: false };
+    const op: Operation = { failure: null };
     return new Promise<T>((resolve, reject) => {
       const finish = (): void => {
-        op.settled = true;
         clearTimeout(timer);
         this.operations.delete(fail);
       };
@@ -1067,17 +1063,21 @@ export class CdpSession {
     return this.client;
   }
 
-  /** A command on one session, bounded like cdpSend's and by what its operation has left. */
+  /**
+   * A command on one session, bounded like cdpSend's. Its operation's deadline is that
+   * operation's own timer to enforce. A second timer here, cut to what the operation has
+   * left, comes due just before it, as a timer starts from the loop's clock and what is
+   * left is read from a later one: the agent would get a bare command timeout, with no hint.
+   */
   private send<T = unknown>(
     method: string,
     params?: Record<string, unknown>,
     sessionId?: string,
     timeoutMs: number = DEFAULT_CDP_TIMEOUT_MS,
   ): Promise<T> {
-    const op = currentOperation.getStore();
-    if (op?.failure) return Promise.reject(op.failure);
-    const bound = op && !op.settled ? Math.min(timeoutMs, op.deadline - Date.now()) : timeoutMs;
-    return sendTo<T>(this.require(), method, params, sessionId, bound);
+    const given = currentOperation.getStore()?.failure;
+    if (given) return Promise.reject(given);
+    return sendTo<T>(this.require(), method, params, sessionId, timeoutMs);
   }
 
   /** The active tab, for verbs that act on the page. */

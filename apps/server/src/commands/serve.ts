@@ -10,7 +10,7 @@ import {
 } from "@multizen/mcp-server";
 import { dataDirPathWarning, dataPaths, isWildcardHost, type ServerConfig } from "../config.ts";
 import { log } from "../log.ts";
-import { buildRuntime, enginesInUse, SERVER_VERSION } from "../runtime.ts";
+import { buildRuntime, enginesInUse, SERVER_VERSION, takeOverFromPreviousRun } from "../runtime.ts";
 import { preflightProcess, preflightUserNamespaces } from "../sandboxPreflight.ts";
 import { ensurePrivateFile } from "../secretKey.ts";
 import type { ShutdownManager } from "../shutdown.ts";
@@ -85,7 +85,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     });
   }
 
-  const runtime = await buildRuntime(config);
+  const runtime = await buildRuntime(config, await takeOverFromPreviousRun(config.dataDir));
   shutdown.add("runtime", () => runtime.close(), RUNTIME_CLOSE_BUDGET_MS);
   preflightUserNamespaces(enginesInUse(runtime));
 

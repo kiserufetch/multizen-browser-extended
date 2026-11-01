@@ -1,10 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import type { Readable } from "node:stream";
-import { MultizenError } from "@multizen/types";
+import { MultizenError, type ProfileId } from "@multizen/types";
+import type { ProcessJournal } from "./runState.ts";
 
 const READY_TIMEOUT_MS = 10_000;
 const STOP_GRACE_MS = 2_000;
@@ -26,6 +27,8 @@ export interface StartXvfbOptions {
   height: number;
   /** Each server's auth file goes in a private directory created under this. */
   runDir: string;
+  /** Told about the server as soon as it exists, and when it exits. */
+  journal?: { processJournal: ProcessJournal; profileId: ProfileId };
   spawnFn?: typeof spawn;
   timeoutMs?: number;
 }
@@ -93,6 +96,7 @@ async function stopChild(child: ChildProcess): Promise<void> {
 export async function startXvfb(o: StartXvfbOptions): Promise<XvfbHandle> {
   const spawnFn = o.spawnFn ?? spawn;
   const timeoutMs = o.timeoutMs ?? READY_TIMEOUT_MS;
+  await mkdir(o.runDir, { recursive: true });
   const dir = await mkdtemp(join(o.runDir, "mz-xvfb-"));
   const removeDir = (): Promise<void> => rm(dir, { recursive: true, force: true }).catch(() => {});
   const authFile = join(dir, "Xauthority");
@@ -126,6 +130,13 @@ export async function startXvfb(o: StartXvfbOptions): Promise<XvfbHandle> {
     throw new MultizenError("DISPLAY_UNAVAILABLE", `Xvfb failed to start: ${(e as Error).message}`, {
       hint: INSTALL_HINT,
     });
+  }
+
+  const { pid } = child;
+  if (o.journal && pid) {
+    const { processJournal, profileId } = o.journal;
+    processJournal.add({ kind: "xvfb", profileId, pid, authFile, startedAt: new Date().toISOString() });
+    child.once("exit", () => processJournal.remove(pid));
   }
 
   let stderrTail = "";

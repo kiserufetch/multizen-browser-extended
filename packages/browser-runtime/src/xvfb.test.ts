@@ -86,6 +86,56 @@ test("the Xauthority record is the exact bytes of a wildcard MIT cookie", () => 
   assert.equal(record.length, 44);
 });
 
+test("the journal hears of the server as soon as it exists, before its display, and of its exit", async (t) => {
+  const r = rig(t);
+  const journal: Array<[string, unknown]> = [];
+  const starting = startXvfb({
+    width: 100,
+    height: 100,
+    runDir: r.runDir,
+    spawnFn: r.spawnFn,
+    journal: {
+      profileId: "p",
+      processJournal: {
+        add: (entry) => journal.push(["add", entry]),
+        remove: (pid) => journal.push(["remove", pid]),
+      },
+    },
+  });
+  await new Promise((resolve) => {
+    const poll = (): void => void (r.spawned.length > 0 ? resolve(null) : setTimeout(poll, 1));
+    poll();
+  });
+  const authFile = r.spawned[0]!.args[r.spawned[0]!.args.indexOf("-auth") + 1];
+  assert.equal(journal.length, 1);
+  const [verb, entry] = journal[0] as [string, Record<string, unknown>];
+  assert.equal(verb, "add");
+  assert.equal(entry.kind, "xvfb");
+  assert.equal(entry.profileId, "p");
+  assert.equal(entry.pid, 4242);
+  assert.equal(entry.authFile, authFile);
+  r.child.fd3.write("7\n");
+  const handle = await starting;
+  assert.equal(journal.length, 1);
+  await handle.stop();
+  assert.deepEqual(journal.at(-1), ["remove", 4242]);
+});
+
+test("the auth file's directory is made if it isn't there: a server's lives under its data dir", async (t) => {
+  const r = rig(t);
+  const runDir = join(r.runDir, "run", "xvfb");
+  const starting = startXvfb({ width: 100, height: 100, runDir, spawnFn: r.spawnFn });
+  await new Promise((resolve) => {
+    const poll = (): void => void (r.spawned.length > 0 ? resolve(null) : setTimeout(poll, 1));
+    poll();
+  });
+  r.child.fd3.write("7\n");
+  const handle = await starting;
+  assert.ok(handle.authFile.startsWith(join(runDir, "mz-xvfb-")), handle.authFile);
+  await handle.stop();
+  assert.deepEqual(readdirSync(runDir), []);
+});
+
 test("the server runs with the agreed flags: no TCP, its own auth, the fingerprint's screen", async (t) => {
   const r = rig(t);
   const starting = start(r);

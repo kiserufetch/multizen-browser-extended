@@ -289,6 +289,34 @@ test("a row outside the profiles root with no directory refuses the start, namin
   }
 });
 
+test("the journal and the Xvfb directory reach both drivers, the Firefox one through the router", async () => {
+  const dir = dataDirWithEngine();
+  const processJournal = { add: () => {}, remove: () => {} };
+  const runtime = await buildRuntime({ dataDir: dir }, processJournal);
+  try {
+    const router = runtime.driver as unknown as {
+      firefoxOptions: { processJournal: unknown; xvfbRunDir: unknown };
+      chromiumDriver: { processJournal: unknown; xvfbRunDir: unknown };
+    };
+    const { xvfbRunDir } = dataPaths(dir);
+    assert.equal(router.firefoxOptions.processJournal, processJournal);
+    assert.equal(router.firefoxOptions.xvfbRunDir, xvfbRunDir);
+    assert.equal(router.chromiumDriver.processJournal, processJournal);
+    assert.equal(router.chromiumDriver.xvfbRunDir, xvfbRunDir);
+    assert.ok(xvfbRunDir.startsWith(dir), "not the system's temp directory");
+  } finally {
+    await runtime.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test("the desktop never reaps or journals: a browser of the user's isn't this code's to kill", () => {
+  const desktop = readFileSync(join(SRC, "..", "..", "desktop", "src", "main", "index.ts"), "utf8");
+  for (const name of ["reapPreviousRun", "processJournal", "RunState", "takeOverFromPreviousRun"]) {
+    assert.ok(!desktop.includes(name), `the desktop's startup mentions ${name}`);
+  }
+});
+
 test("buildRuntime refuses the same way, before any engine work", async () => {
   const dir = dataDirWithEngine();
   try {

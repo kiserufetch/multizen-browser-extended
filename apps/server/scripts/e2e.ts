@@ -9,7 +9,7 @@
  *   corepack yarn workspace @multizen/server build
  *   corepack yarn workspace @multizen/server exec tsx scripts/e2e.ts \
  *     --data-dir %TEMP%\mzts2 --engine-version-dir <dir with chrome.exe> \
- *     [--engine cloakbrowser|camoufox] [--flows http,sigint,stdio,tabs,concurrency,display,auth]
+ *     [--engine cloakbrowser|camoufox] [--flows http,sigint,stdio,tabs,concurrency,display,auth,reaper,relay]
  *     [--keep] [--camoufox-install <dir>] [--headless] [--lan-address <ip>]
  *
  * --engine-version-dir links an installed engine into the temp data dir through a
@@ -49,13 +49,22 @@
  * of a reverse proxy on loopback, and a proxy password encrypted on disk that still gets a
  * browser through a local SOCKS proxy. It needs openssl for its certificate.
  *
+ * The reaper flow, not run by default, kills a server by its PID alone with its browsers running,
+ * of both engines with --camoufox-install. On Linux they stay as orphans. On Windows they die with
+ * it: Node puts a child that isn't detached in a job that ends with Node. So it also starts each
+ * engine by hand, detached from everything, on directories inside the data dir, one recorded in the
+ * journal and one not. The next start deals with all of them: a process with a recorded PID that
+ * isn't a browser survives and is logged, locks are gone, a relaunch works and keeps what was on
+ * disk. The relay flow runs a stdio --connect past a short idle TTL thanks to its pings, then kills
+ * the server under it.
+ *
  * Every server here runs the production egress policy, with the fixtures' hosts let through by
  * --egress-allow, so every profile goes through the bridge as it would in production. What the
  * policy itself does is checked by scripts/egress-live.ts.
  *
  * --engine camoufox runs the same flows on Camoufox, minus what is CDP's or CloakBrowser's:
- * there are no OOPIF targets, cdp_send refuses, its pid is unknown (so nothing is killed
- * from outside), and no chrome:// pages. Its engine installs into the data dir.
+ * there are no OOPIF targets, cdp_send refuses, and no chrome:// pages. Its engine installs
+ * into the data dir.
  *
  * The signal delivery, the link to the engine and the process scan differ by platform.
  */
@@ -528,7 +537,7 @@ async function httpFlow(fixture: Fixture): Promise<string> {
     await toolSurfaceChecks(client, id);
 
     const launched = await launch(client, id);
-    expect(IS_CAMOUFOX || Number(launched.pid) > 0, "launch_profile returned no pid");
+    expect(Number(launched.pid) > 0, "launch_profile returned no pid");
     expect(
       !FORCED_HEADLESS || launched.displayMode === "headless",
       `--headless launched in ${String(launched.displayMode)}`,
@@ -648,18 +657,16 @@ async function sigintFlow(profileId: string): Promise<void> {
 
     // A browser dying under the server must cost that profile only. In Electron a
     // stray socket error is survivable; under plain Node it would end the process.
-    if (!IS_CAMOUFOX) {
-      killBrowserTree(Number(launched.pid));
-      await waitFor(() => /"reason":"external-exit"/.test(serve.output()), "the browser's exit to register");
-      const after = (await call(client, "list_profiles")).profiles as Array<{ isRunning: boolean }>;
-      expect(after[0]?.isRunning === false, "the killed browser still reads as running");
-      expect(serve.child.exitCode === null, "the server died with its browser");
-      expect(!/uncaught exception|unhandled rejection/.test(serve.output()), "a killed browser was fatal");
-      pass("a browser killed from outside", "the server stays up, the profile reads as closed");
+    killBrowserTree(Number(launched.pid));
+    await waitFor(() => /"reason":"external-exit"/.test(serve.output()), "the browser's exit to register");
+    const after = (await call(client, "list_profiles")).profiles as Array<{ isRunning: boolean }>;
+    expect(after[0]?.isRunning === false, "the killed browser still reads as running");
+    expect(serve.child.exitCode === null, "the server died with its browser");
+    expect(!/uncaught exception|unhandled rejection/.test(serve.output()), "a killed browser was fatal");
+    pass("a browser killed from outside", "the server stays up, the profile reads as closed");
 
-      await launch(client, profileId);
-      pass("relaunch after the kill");
-    }
+    await launch(client, profileId);
+    pass("relaunch after the kill");
     await client.close();
     sendConsoleCtrl(serve.child.pid!, "CTRL_C");
     const code = await Promise.race([
@@ -1511,12 +1518,14 @@ const EVENTS_HTML = `<!doctype html>
 <body style="margin:0">
   <button id="left" style="position:absolute;left:40px;top:40px;width:200px;height:120px">left</button>
   <button id="right" style="position:absolute;left:400px;top:40px;width:200px;height:120px">right</button>
-  <input id="field" style="position:absolute;left:40px;top:220px;width:300px">
+  <input id="field" aria-label="field" style="position:absolute;left:40px;top:220px;width:300px">
   <script>
-    window.__log = [];
+    // On the document, as Camoufox's evaluate_js has a world of its own and shares only that.
+    const events = document.documentElement.dataset;
+    events.log = "";
     for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "keydown"]) {
       addEventListener(type, (e) => {
-        if (e.isTrusted) window.__log.push(type + ":" + (e.target.id || e.target.tagName));
+        if (e.isTrusted) events.log += type + ":" + (e.target.id || e.target.tagName) + " ";
       }, true);
     }
   </script>
@@ -1554,9 +1563,9 @@ async function startEventsSite(): Promise<{ origin: string; close(): Promise<voi
 async function eventLog(client: Client, id: string): Promise<string[]> {
   const read = await call(client, "evaluate_js", {
     profile_id: id,
-    expression: "JSON.stringify(window.__log)",
+    expression: "document.documentElement.dataset.log",
   });
-  return JSON.parse(String((read.result as { value?: unknown }).value)) as string[];
+  return String((read.result as { value?: unknown }).value).split(" ").filter(Boolean);
 }
 
 /** Keeps the renderer busy, which is what a stuck page looks like from here. */
@@ -1593,6 +1602,8 @@ async function waitUntilStopped(client: Client, id: string, budgetMs: number): P
 }
 
 const SLOT_WAIT_MS = 12_000;
+/** The Firefox driver's close deadline, and a margin. */
+const CAMOUFOX_CLOSE_BUDGET_MS = 16_500;
 
 /** Three at once with two slots; a kill frees one; the third times out with none free. */
 async function limitChecks(owner: Client, ids: string[]): Promise<void> {
@@ -1684,9 +1695,13 @@ async function noInterleavingChecks(url: string, token: string, id: string, orig
   const sides = groups.map((g) => (g[0]!.endsWith("left") ? "L" : "R")).join("");
   pass("two clients clicking one page don't interleave", `${overlapping} calls in flight together, page saw ${sides}`);
 
-  await call(left, "evaluate_js", { profile_id: id, expression: "window.__log.length = 0" });
+  await call(left, "evaluate_js", { profile_id: id, expression: 'document.documentElement.dataset.log = ""' });
+  // Camoufox's type by selector fills the field, with no keys to cut into. Its type_ref has them.
+  const field = IS_CAMOUFOX ? refOf(treeOf(((await call(left, "extract", { profile_id: id })) as unknown as { result: Extracted }).result), "field") : null;
   await Promise.all([
-    call(left, "type", { profile_id: id, selector: "#field", text: "interleave" }),
+    field
+      ? call(left, "type_ref", { profile_id: id, ref: field, text: "interleave" })
+      : call(left, "type", { profile_id: id, selector: "#field", text: "interleave" }),
     call(right, "click", { profile_id: id, selector: "#right" }),
   ]);
   const typed = (await eventLog(left, id)).map((e) => e.split(":")[0]!);
@@ -1787,6 +1802,7 @@ async function preemptionChecks(url: string, token: string, id: string): Promise
   const holder = await httpClient(url, token);
   const queued = await httpClient(url, token);
   const closer = await httpClient(url, token);
+  const { pid } = await call(holder, "launch_profile", { profile_id: id });
   const stuck = rawCall(holder, "evaluate_js", { profile_id: id, expression: busyPage(25_000) });
   await new Promise((done) => setTimeout(done, 500));
   const waiting = rawCall(queued, "click", { profile_id: id, selector: "#left" });
@@ -1803,11 +1819,23 @@ async function preemptionChecks(url: string, token: string, id: string): Promise
   expect(waiterError.code === "PROFILE_NOT_RUNNING", `waiter: ${JSON.stringify(waiterError)}`);
   expect(holderError.code === "PROFILE_NOT_RUNNING", `holder: ${JSON.stringify(holderError)}`);
   expect(holderMs < 3_000, `the holder took ${holderMs} ms to fail`);
-  expect(closeMs < 15_000, `the close took ${closeMs} ms`);
+  // Camoufox doesn't quit while a page holds its thread: the close gives up at its deadline.
+  expect(closeMs < (IS_CAMOUFOX ? CAMOUFOX_CLOSE_BUDGET_MS : 15_000), `the close took ${closeMs} ms`);
   pass(
     "close_profile preempts a stuck page",
     `waiter failed in ${waiterMs} ms, holder in ${holderMs} ms, closed in ${closeMs} ms`,
   );
+  const stillRunning = (): boolean => readJournal().entries.some((e) => e.pid === pid);
+  if (stillRunning()) {
+    expect(IS_CAMOUFOX, `CloakBrowser ${String(pid)} was closed yet is still in the journal`);
+    expect(processExists(Number(pid)), `the journal still lists ${String(pid)}, which is gone`);
+    const freed = (await call(closer, "list_profiles")).profiles as Array<{ id: string; isRunning: boolean }>;
+    expect(!freed.find((p) => p.id === id)?.isRunning, "the slot of a browser given up on should be free");
+    pass("a browser that refused to close: its slot is free, its journal entry stays", `pid ${String(pid)}`);
+    await waitFor(() => !stillRunning(), "its entry to go when it finally exits", 30_000);
+    await waitFor(() => !processExists(Number(pid)), "its process to end", 10_000);
+    pass("when it does exit, the exit handler clears the entry");
+  }
   await holder.close();
   await queued.close();
   await closer.close();
@@ -1898,7 +1926,6 @@ async function bothEnginesChecks(client: Client, origin: string): Promise<void> 
 }
 
 async function concurrencyFlow(): Promise<void> {
-  expect(!IS_CAMOUFOX, "this flow kills a browser by its PID, which Camoufox doesn't report");
   const site = await startEventsSite();
   const serve = await startServe([
     "--max-browsers",
@@ -1923,9 +1950,9 @@ async function concurrencyFlow(): Promise<void> {
     await leaseChecks(serve.url, serve.token, page);
     await preemptionChecks(serve.url, serve.token, page);
     await launch(owner, page);
-    await relaunchRefCheck(owner, page, site.origin, "CloakBrowser");
+    await relaunchRefCheck(owner, page, site.origin, IS_CAMOUFOX ? "Camoufox" : "CloakBrowser");
     await call(owner, "close_profile", { profile_id: page });
-    if (values["camoufox-install"]) {
+    if (values["camoufox-install"] && !IS_CAMOUFOX) {
       await bothEnginesChecks(owner, site.origin);
     }
 
@@ -2770,6 +2797,274 @@ async function authFlow(fixture: Fixture): Promise<void> {
   await secretBoxChecks(fixture);
 }
 
+// ── After a crash ────────────────────────────────────────────────────────────
+
+/** The server's own process and nothing else, with no chance to clean up. */
+function killServerAlone(pid: number): void {
+  if (!IS_WINDOWS) {
+    process.kill(pid, "SIGKILL");
+    return;
+  }
+  const killed = spawnSync("taskkill", ["/F", "/PID", String(pid)], { encoding: "utf8", windowsHide: true });
+  expect(killed.status === 0, `taskkill failed: ${killed.stdout}${killed.stderr}`);
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readJournal(): { serverPid: number; entries: Array<Record<string, unknown>> } {
+  return JSON.parse(readFileSync(join(DATA_DIR, "run", "state.json"), "utf8")) as {
+    serverPid: number;
+    entries: Array<Record<string, unknown>>;
+  };
+}
+
+/** Every lock either engine leaves in any profile. */
+function lockFiles(): string[] {
+  const found: string[] = [];
+  const profiles = join(DATA_DIR, "profiles");
+  for (const profile of existsSync(profiles) ? readdirSync(profiles) : []) {
+    const engines = join(profiles, profile, "engines");
+    for (const engine of existsSync(engines) ? readdirSync(engines) : []) {
+      for (const name of readdirSync(join(engines, engine))) {
+        if (/^Singleton|^lock$|^\.parentlock$|^parent\.lock$/.test(name)) found.push(`${engine}/${name}`);
+      }
+    }
+  }
+  return found;
+}
+
+function xvfbDirs(): string[] {
+  const dir = join(DATA_DIR, "run", "xvfb");
+  return existsSync(dir) ? readdirSync(dir) : [];
+}
+
+/** An engine started by hand on a directory of this data dir, as a crash could leave one. */
+function startOrphan(engine: string, name: string): { pid: number; userDataDir: string; child: ChildProcess } {
+  const userDataDir = join(DATA_DIR, "profiles", name, "engines", engine);
+  mkdirSync(userDataDir, { recursive: true });
+  let binary: string;
+  let args: string[];
+  if (engine === "camoufox") {
+    binary = join(DATA_DIR, "camoufox", IS_WINDOWS ? "camoufox.exe" : "camoufox-bin");
+    args = ["-no-remote", "-headless", "-profile", userDataDir, "about:blank"];
+  } else {
+    const cache = join(DATA_DIR, "chromium", "cloakbrowser");
+    const { version, binaryRelative } = JSON.parse(readFileSync(join(cache, "current.json"), "utf8")) as {
+      version: string;
+      binaryRelative: string;
+    };
+    binary = join(cache, version, binaryRelative);
+    args = [`--user-data-dir=${userDataDir}`, "--headless=new", "--no-first-run", "about:blank"];
+  }
+  const child = spawn(binary, args, { detached: true, stdio: "ignore", windowsHide: true });
+  child.on("error", (e) => process.stdout.write(`could not start ${binary}: ${e.message}\n`));
+  child.unref();
+  expect(child.pid, `${binary} did not start`);
+  return { pid: child.pid, userDataDir, child };
+}
+
+const COOKIE_KEPT = (name: string): Record<string, unknown> => ({
+  name,
+  value: "kept",
+  domain: "127.0.0.1",
+  path: "/",
+  expires: Math.floor(Date.now() / 1000) + 86_400,
+});
+
+async function reaperFlow(fixture: Fixture): Promise<void> {
+  const engines = IS_CAMOUFOX
+    ? ["camoufox"]
+    : values["camoufox-install"]
+      ? ["cloakbrowser", "camoufox"]
+      : ["cloakbrowser"];
+  const first = await startServe();
+  // A real long-running process, whose PID goes in the journal as if it were a browser.
+  const decoy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+  let second: Awaited<ReturnType<typeof startServe>> | undefined;
+  try {
+    const client = await httpClient(first.url, first.token);
+    const browsers: Array<{ engine: string; id: string; pid: number }> = [];
+    for (const engine of engines) {
+      const id = String((await call(client, "create_profile", { name: `reaper-${engine}`, engine })).id);
+      // A cookie on disk: a browser flushes those as it closes, and a kill can't take them back.
+      await launch(client, id);
+      await call(client, "navigate", { profile_id: id, url: fixture.url });
+      await call(client, "set_cookies", { profile_id: id, cookies: [COOKIE_KEPT("mz_flushed")] });
+      await call(client, "close_profile", { profile_id: id });
+      const launched = await launch(client, id);
+      await call(client, "navigate", { profile_id: id, url: fixture.url });
+      const pid = Number(launched.pid);
+      expect(pid > 0, `${engine}: no pid in ${JSON.stringify(launched)}`);
+      browsers.push({ engine, id, pid });
+    }
+    const journal = readJournal();
+    expect(journal.serverPid === first.child.pid, `the journal names server ${journal.serverPid}`);
+    for (const { engine, pid } of browsers) {
+      const entry = journal.entries.find((e) => e.pid === pid);
+      expect(entry?.kind === "browser" && entry.engine === engine, `no ${engine} entry: ${JSON.stringify(journal)}`);
+    }
+    pass("the journal lists each browser", JSON.stringify(journal.entries.map((e) => [e.kind, e.engine ?? "-", e.pid])));
+    const before = leftoverProcesses().length;
+
+    const serverPid = first.child.pid!;
+    killServerAlone(serverPid);
+    await first.exited;
+    await new Promise((done) => setTimeout(done, 2_000));
+    const orphans = browsers.filter((b) => processExists(b.pid));
+    pass(
+      "the server killed by its PID alone",
+      `pid ${serverPid}; ${before} processes named the data dir before, ${leftoverProcesses().length} after; ` +
+        `browsers still up: ${JSON.stringify(browsers.map((b) => [b.engine, b.pid, processExists(b.pid)]))}`,
+    );
+    expect(
+      IS_WINDOWS || browsers.every((b) => b.engine !== "cloakbrowser" || processExists(b.pid)),
+      "a CloakBrowser browser should outlive its server: this run tested nothing",
+    );
+    const staleLocks = lockFiles();
+    pass("what it left", `locks: ${JSON.stringify(staleLocks)}, Xvfb dirs: ${xvfbDirs().length}, server.lock: ${existsSync(join(DATA_DIR, "server.lock"))}`);
+
+    const stale = readJournal();
+    stale.entries.push({
+      kind: "browser",
+      engine: "cloakbrowser",
+      profileId: "decoy",
+      pid: decoy.pid,
+      userDataDir: join(DATA_DIR, "profiles", "decoy", "engines", "cloakbrowser"),
+      startedAt: new Date().toISOString(),
+    });
+    const recordedOrphans = engines.map((engine) => ({ engine, ...startOrphan(engine, `orphan-recorded-${engine}`) }));
+    const unrecorded = engines.map((engine) => ({ engine, ...startOrphan(engine, `orphan-stray-${engine}`) }));
+    for (const { engine, pid, userDataDir } of recordedOrphans) {
+      stale.entries.push({ kind: "browser", engine, profileId: "orphan", pid, userDataDir, startedAt: new Date().toISOString() });
+    }
+    writeFileSync(join(DATA_DIR, "run", "state.json"), JSON.stringify(stale));
+    // Long enough for their children and their own lock files to exist.
+    await new Promise((done) => setTimeout(done, 4_000));
+    for (const { engine, pid } of [...recordedOrphans, ...unrecorded]) {
+      expect(processExists(pid), `the hand-started ${engine} ${pid} is not running`);
+    }
+    const trees = leftoverProcesses();
+    pass(
+      "real engines running on this data dir, with no server",
+      `${trees.length} processes name it; recorded ${JSON.stringify(recordedOrphans.map((o) => [o.engine, o.pid]))}, ` +
+        `not recorded ${JSON.stringify(unrecorded.map((o) => [o.engine, o.pid]))}, locks ${JSON.stringify(lockFiles())}`,
+    );
+
+    const startedAt = Date.now();
+    second = await startServe();
+    pass("the next start", `${Date.now() - startedAt} ms to listening`);
+    const log = second.output();
+    for (const { engine, pid } of [...orphans, ...recordedOrphans, ...unrecorded]) {
+      expect(!processExists(pid), `the ${engine} orphan ${pid} is still there:\n${log}`);
+    }
+    const report = log.split("\n").find((line) => line.includes('"previous run reaped"'));
+    expect(report, `no report in:\n${log}`);
+    const reaped = JSON.parse(report) as { killed: number[]; strays: number[]; notOwned: number[]; gone: number[] };
+    for (const { engine, pid } of recordedOrphans) {
+      expect(reaped.killed.includes(pid), `the recorded ${engine} ${pid} wasn't killed as recorded: ${report}`);
+    }
+    for (const { engine, pid } of unrecorded) {
+      expect(reaped.strays.includes(pid), `the ${engine} ${pid} wasn't found by the scan: ${report}`);
+    }
+    pass("orphans reaped", report.slice(0, 500));
+
+    expect(processExists(decoy.pid!), "the decoy was killed");
+    const notOurs = log.split("\n").find((line) => line.includes("not ours") && line.includes(`"pid":${decoy.pid}`));
+    expect(notOurs, `the decoy wasn't logged:\n${log}`);
+    pass("a recorded PID that isn't a browser survives, and is logged", notOurs.slice(0, 240));
+
+    const others = (): string[] => leftoverProcesses().filter((line) => !line.startsWith(`${second!.child.pid} `));
+    // A crash handler can take a moment to follow its browser out.
+    for (let i = 0; i < 10 && others().length > 0; i++) await new Promise((done) => setTimeout(done, 300));
+    expect(others().length === 0, `left behind: ${others().join(", ")}`);
+    pass("nothing else of the old run is left", "0 processes name the data dir but the new server");
+
+    expect(lockFiles().length === 0, `locks left: ${JSON.stringify(lockFiles())}`);
+    expect(xvfbDirs().length === 0, `auth dirs left: ${JSON.stringify(xvfbDirs())}`);
+    pass("locks and auth files are gone");
+
+    const fresh = readJournal();
+    expect(fresh.serverPid === second.child.pid, `the journal names server ${fresh.serverPid}`);
+    expect(fresh.entries.length === 0, `entries left: ${JSON.stringify(fresh.entries)}`);
+    pass("the journal starts over with the new server");
+
+    const next = await httpClient(second.url, second.token);
+    const listed = (await call(next, "list_profiles")).profiles as Array<{ id: string; isRunning: boolean }>;
+    expect(listed.every((p) => !p.isRunning), `reads as running: ${JSON.stringify(listed)}`);
+    for (const { engine, id } of browsers) {
+      const again = await launch(next, id);
+      await call(next, "navigate", { profile_id: id, url: fixture.url });
+      const sent = fixture.cookieHeaders.at(-1) ?? "";
+      expect(sent.includes("mz_flushed=kept"), `${engine} lost its cookie; the page got "${sent}"`);
+      pass(`${engine}: relaunch after the crash keeps its cookies`, `pid ${again.pid}, the page got "${sent}"`);
+    }
+    const journalled = readJournal().entries.map((e) => e.pid);
+    expect(journalled.length >= browsers.length, `the journal after relaunch: ${JSON.stringify(journalled)}`);
+    for (const { id } of browsers) await call(next, "close_profile", { profile_id: id });
+    await waitFor(() => readJournal().entries.length === 0, "the journal to empty as browsers close", 15_000);
+    pass("closing them empties the journal");
+
+    await closeAndExit(second, next);
+    second = undefined;
+    await assertNoLeftovers("the run after the crash");
+  } finally {
+    decoy.kill("SIGKILL");
+    if (second && second.child.exitCode === null) second.child.kill();
+    if (first.child.exitCode === null) first.child.kill();
+  }
+}
+
+async function relayFlow(): Promise<void> {
+  const IDLE_TTL_MS = 3_000;
+  const serve = await startServe(["--session-idle-ttl-ms", String(IDLE_TTL_MS)]);
+  try {
+    const plain = await httpClient(serve.url, serve.token);
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [CLI, "stdio", "--connect", serve.url, "--token-file", join(DATA_DIR, "owner-token"), "--keepalive-ms", "1000"],
+      stderr: "pipe",
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
+    const relay = new Client({ name: "e2e-relay", version: "1.0.0" });
+    await relay.connect(transport);
+    const child = (transport as unknown as { _process: ChildProcess })._process;
+    const exited = new Promise<number | null>((done) => child.on("close", (code) => done(code)));
+    await call(relay, "list_profiles");
+    await call(plain, "list_profiles");
+
+    await new Promise((done) => setTimeout(done, 3 * IDLE_TTL_MS));
+    await call(relay, "list_profiles");
+    pass("the relay is usable past the idle TTL", `${3 * IDLE_TTL_MS} ms idle with a ${IDLE_TTL_MS} ms TTL`);
+    const lapsed = await plain.listTools().then(
+      () => "still there",
+      (e: unknown) => String(e),
+    );
+    expect(/404|Session not found/.test(lapsed), `a client with no pings should have lost its session: ${lapsed}`);
+    pass("a client without pings lost its session meanwhile", lapsed.slice(0, 120));
+
+    const killedAt = Date.now();
+    killServerAlone(serve.child.pid!);
+    await serve.exited;
+    const code = await exited;
+    expect(code === 1, `the relay exited ${code}:\n${stderr}`);
+    const message = stderr.split("\n").find((line) => line.includes("stdio relay ending"));
+    expect(message, `no message in:\n${stderr}`);
+    pass("the server killed: the relay exits 1 with a clear message", `${Date.now() - killedAt} ms; ${message.slice(0, 300)}`);
+    await relay.close().catch(() => {});
+    await plain.close().catch(() => {});
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
 async function main(): Promise<void> {
   prepareDataDir();
   const fixture = await startFixture();
@@ -2783,6 +3078,8 @@ async function main(): Promise<void> {
     if (FLOWS.includes("concurrency")) await concurrencyFlow();
     if (FLOWS.includes("display")) await displayFlow(fixture);
     if (FLOWS.includes("auth")) await authFlow(fixture);
+    if (FLOWS.includes("reaper")) await reaperFlow(fixture);
+    if (FLOWS.includes("relay")) await relayFlow();
   } finally {
     await fixture.close();
     if (!values.keep) {

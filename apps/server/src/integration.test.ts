@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -20,6 +21,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { build } from "../scripts/build.mjs";
+import { dataPaths } from "./config.ts";
 
 /**
  * The built bundle as a real process, with real SDK clients: everything a server
@@ -124,8 +126,8 @@ interface Serve extends Running {
 /** Starts `serve` and waits for it to listen. `stop` is a hard kill on Windows,
  *  which can't deliver SIGTERM, and graceful elsewhere. The graceful path is covered
  *  through stdio EOF below and by shutdown.test.ts and scripts/e2e.ts. */
-async function startServe(dataDir: string, extra: string[] = []): Promise<Serve> {
-  const port = await freePort();
+async function startServe(dataDir: string, extra: string[] = [], onPort?: number): Promise<Serve> {
+  const port = onPort ?? (await freePort());
   const running = startCli(["serve", "--data-dir", dataDir, "--port", String(port), ...extra]);
   await waitFor(() => running.stdout().includes('"listening"'), "serve to listen");
   return {
@@ -410,6 +412,246 @@ test("stdio --connect with a wrong token answers the request with an error", asy
     await assert.rejects(client.connect(transport), /request failed/);
     await client.close();
   } finally {
+    serve.stop();
+    await serve.exited;
+    removeDir(dir);
+  }
+});
+
+/** A relay with its exit code in reach. The SDK's close() would kill it before it could say. */
+async function startRelay(
+  serve: Serve,
+  extra: string[] = [],
+): Promise<{ client: Client; stderr(): string; exited: Promise<number | null>; end(): Promise<void> }> {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [CLI, "stdio", "--connect", serve.url, "--token-file", serve.tokenFile, ...extra],
+    stderr: "pipe",
+  });
+  let stderr = "";
+  transport.stderr?.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
+  const client = new Client({ name: "relay", version: "1.0.0" });
+  await client.connect(transport);
+  const child = (transport as unknown as { _process: ChildProcess })._process;
+  const exited = new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
+  return {
+    client,
+    stderr: () => stderr,
+    exited,
+    end: async () => {
+      await client.close().catch(() => {});
+    },
+  };
+}
+
+function withinMs<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  return Promise.race([
+    work,
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`no ${what} within ${ms} ms`)), ms).unref()),
+  ]);
+}
+
+test("stdio --connect: its pings keep the session past the server's idle TTL", async () => {
+  const dir = newDataDir();
+  const serve = await startServe(dir, ["--session-idle-ttl-ms", "1500"]);
+  try {
+    const kept = await startRelay(serve, ["--keepalive-ms", "300"]);
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    const { tools } = await kept.client.listTools();
+    assert.ok(tools.some((t) => t.name === "create_profile"), "the relay should still work");
+    assert.equal(kept.stderr().includes("relay ending"), false, kept.stderr());
+    await kept.end();
+  } finally {
+    serve.stop();
+    await serve.exited;
+    removeDir(dir);
+  }
+});
+
+test("stdio --connect: a session idled out anyway ends the relay with exit 1, and says why", async () => {
+  const dir = newDataDir();
+  const serve = await startServe(dir, ["--session-idle-ttl-ms", "1000"]);
+  try {
+    // The stream drops with the session, so this needs no client call and no ping.
+    const relay = await startRelay(serve, ["--keepalive-ms", "600000"]);
+    const code = await withinMs(relay.exited, 20_000, "relay exit");
+    assert.equal(code, 1, relay.stderr());
+    assert.match(relay.stderr(), /stdio relay ending: The server no longer has this session/);
+    assert.match(relay.stderr(), /--keepalive-ms/);
+    await relay.end();
+  } finally {
+    serve.stop();
+    await serve.exited;
+    removeDir(dir);
+  }
+});
+
+test("stdio --connect: killing the server ends the relay with exit 1, and says why", async () => {
+  const dir = newDataDir();
+  const serve = await startServe(dir);
+  const relay = await startRelay(serve, ["--keepalive-ms", "300"]);
+  try {
+    await relay.client.listTools();
+    serve.child.kill("SIGKILL");
+    await serve.exited;
+    const code = await withinMs(relay.exited, 20_000, "relay exit");
+    assert.equal(code, 1, relay.stderr());
+    assert.match(relay.stderr(), /stdio relay ending: The server does not answer/);
+    await relay.end();
+  } finally {
+    removeDir(dir);
+  }
+});
+
+test("stdio --connect: a restarted server has no such session: exit 1 on the next ping", async () => {
+  const dir = newDataDir();
+  const port = await freePort();
+  const first = await startServe(dir, [], port);
+  const relay = await startRelay(first, ["--keepalive-ms", "60000"]);
+  let second: Serve | undefined;
+  try {
+    await relay.client.listTools();
+    first.child.kill("SIGKILL");
+    await first.exited;
+    second = await startServe(dir, [], port);
+    // Whichever it hears first, its next client call or the dropped stream: the same end.
+    await relay.client.listTools().catch(() => {});
+    const code = await withinMs(relay.exited, 20_000, "relay exit");
+    assert.equal(code, 1, relay.stderr());
+    assert.match(relay.stderr(), /stdio relay ending/);
+    await relay.end();
+  } finally {
+    second?.stop();
+    await second?.exited;
+    removeDir(dir);
+  }
+});
+
+test("stdio --connect: a revoked token ends the relay with exit 1, and says why", async () => {
+  const dir = newDataDir();
+  const serve = await startServe(dir);
+  try {
+    const token = createToken(dir, "--name", "relay-token");
+    const tokenFile = join(dir, "relay-token");
+    writeFileSync(tokenFile, token);
+    const relay = await startRelay({ ...serve, tokenFile }, ["--keepalive-ms", "300"]);
+    await relay.client.listTools();
+    const revoke = runCli(["token", "revoke", "relay-token", "--data-dir", dir]);
+    assert.equal(revoke.status, 0, revoke.stderr);
+    const code = await withinMs(relay.exited, 20_000, "relay exit");
+    assert.equal(code, 1, relay.stderr());
+    assert.match(relay.stderr(), /stdio relay ending: The server (refuses this relay's token|no longer has this session)/);
+    await relay.end();
+  } finally {
+    serve.stop();
+    await serve.exited;
+    removeDir(dir);
+  }
+});
+
+/** Runs until killed, with these arguments on its command line, as a browser would have them. */
+function startDecoy(args: string[]): ChildProcess {
+  return spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "--", ...args], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function logsOf(serve: Pick<Running, "stdout">): Array<Record<string, unknown>> {
+  return jsonLogs(serve.stdout());
+}
+
+test("the reaper at start: ours by their arguments go, everything else stays, and it says which", async () => {
+  const dir = newDataDir();
+  const { profilesRoot, stateFile, xvfbRunDir } = dataPaths(dir);
+  const profile = (name: string): string => join(profilesRoot, name, "engines", "cloakbrowser");
+  // Recorded, and ours: a journal from a server that died.
+  const recorded = startDecoy([`--user-data-dir=${profile("recorded")}`]);
+  // Not recorded, and ours: a crash before the journal heard of it.
+  const stray = startDecoy(["-profile", join(profilesRoot, "stray", "engines", "camoufox")]);
+  // Recorded, and not ours any more: PID reuse.
+  const reused = startDecoy(["worker.js"]);
+  // Not ours: the next directory along, and one that merely names a path inside.
+  const nextDoor = startDecoy([`--user-data-dir=${join(`${profilesRoot}2`, "x", "engines", "cloakbrowser")}`]);
+  const mentions = startDecoy([profile("recorded")]);
+  const started = [recorded, stray, reused, nextDoor, mentions];
+  const pidOf = (child: ChildProcess): number => child.pid!;
+  mkdirSync(join(stateFile, ".."), { recursive: true });
+  writeFileSync(
+    stateFile,
+    JSON.stringify({
+      serverPid: 1234,
+      serverStartedAt: "before",
+      entries: [
+        { kind: "browser", engine: "cloakbrowser", profileId: "r", pid: pidOf(recorded), userDataDir: profile("recorded"), startedAt: "t" },
+        { kind: "browser", engine: "cloakbrowser", profileId: "u", pid: pidOf(reused), userDataDir: profile("reused"), startedAt: "t" },
+        { kind: "browser", engine: "camoufox", profileId: "m", pid: 999_999, userDataDir: profile("missing"), startedAt: "t" },
+      ],
+    }),
+  );
+  mkdirSync(profile("recorded"), { recursive: true });
+  writeFileSync(join(profile("recorded"), "SingletonCookie"), "");
+  mkdirSync(join(xvfbRunDir, "mz-xvfb-old"), { recursive: true });
+  // The node decoys need a moment to exist for the OS, with their arguments.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  const serve = await startServe(dir);
+  try {
+    assert.equal(alive(pidOf(recorded)), false, "the recorded one should be gone");
+    assert.equal(alive(pidOf(stray)), false, "the unrecorded one should be gone");
+    assert.equal(alive(pidOf(reused)), true, "a reused PID must survive");
+    assert.equal(alive(pidOf(nextDoor)), true, "the next directory along must survive");
+    assert.equal(alive(pidOf(mentions)), true, "a mere mention must survive");
+    const lines = logsOf(serve);
+    const notOurs = lines.find((l) => String(l.msg).includes("not ours"));
+    assert.equal(notOurs?.pid, pidOf(reused));
+    const report = lines.find((l) => l.msg === "previous run reaped");
+    assert.deepEqual(report?.killed, [pidOf(recorded)]);
+    assert.deepEqual(report?.strays, [pidOf(stray)]);
+    assert.deepEqual(report?.notOwned, [pidOf(reused)]);
+    assert.deepEqual(report?.gone, [999_999]);
+    // In order: the port opens after all of that.
+    const order = lines.map((l) => l.msg);
+    assert.ok(order.indexOf("previous run reaped") < order.indexOf("listening"));
+
+    const state = JSON.parse(readFileSync(stateFile, "utf8")) as { serverPid: number; entries: unknown[] };
+    assert.equal(state.serverPid, serve.child.pid);
+    assert.deepEqual(state.entries, []);
+    assert.equal(existsSync(join(profile("recorded"), "SingletonCookie")), false);
+    assert.deepEqual(readdirSync(xvfbRunDir), []);
+  } finally {
+    serve.stop();
+    await serve.exited;
+    for (const child of started) child.kill("SIGKILL");
+    removeDir(dir);
+  }
+});
+
+test("two servers: the one refused by the lock reaps nothing", async () => {
+  const dir = newDataDir();
+  const serve = await startServe(dir);
+  const { profilesRoot } = dataPaths(dir);
+  // Exactly what the first server's own browser would look like.
+  const browser = startDecoy([`--user-data-dir=${join(profilesRoot, "live", "engines", "cloakbrowser")}`]);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const second = runCli(["serve", "--data-dir", dir, "--port", "1"]);
+    assert.equal(second.status, 1, second.stdout);
+    assert.match(second.stdout, /in use by another MultiZen server/);
+    const stdio = runCli(["stdio", "--data-dir", dir]);
+    assert.equal(stdio.status, 1, stdio.stderr);
+    assert.equal(alive(browser.pid!), true, "a refused start must not touch a live server's browser");
+  } finally {
+    browser.kill("SIGKILL");
     serve.stop();
     await serve.exited;
     removeDir(dir);

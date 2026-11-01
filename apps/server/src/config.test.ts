@@ -235,6 +235,18 @@ test("--connect runs no browsers, so the egress flags don't apply", () => {
   }
 });
 
+test("stdio --connect: how often it pings is its own flag", () => {
+  assert.deepEqual(
+    parseStdioConfig(["--connect", "http://127.0.0.1:7777/mcp", "--keepalive-ms", "500"], {}, LINUX),
+    { kind: "connect", url: "http://127.0.0.1:7777/mcp", tokenFile: undefined, keepAliveMs: 500 },
+  );
+  assert.throws(() => parseStdioConfig(["--keepalive-ms", "500"], {}, LINUX), /only applies with --connect/);
+  assert.throws(
+    () => parseStdioConfig(["--connect", "http://x", "--keepalive-ms", "soon"], {}, LINUX),
+    /--keepalive-ms/,
+  );
+});
+
 test("stdio --connect: a bare origin means /mcp", () => {
   assert.deepEqual(parseStdioConfig(["--connect", "http://127.0.0.1:7777"], {}, LINUX), {
     kind: "connect",
