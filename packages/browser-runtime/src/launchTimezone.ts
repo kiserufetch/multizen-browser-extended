@@ -4,7 +4,13 @@
  * Default: pinned `fingerprint.timezone` always wins. Proxy geo only feeds
  * WebRTC IP + geolocation coords. Opt-in `alignTimezoneToProxy` may overwrite
  * TZ only when the geo timezone is in the locale's allowlist.
+ *
+ * Zones are compared as zones, not strings: geo services and ICU answer with
+ * either the current IANA name or a legacy alias (Europe/Kiev for Europe/Kyiv),
+ * and the catalog uses the current one. A matched zone is applied in the
+ * catalog's spelling.
  */
+import { findSameTimeZone, sameTimeZone } from "@multizen/profile-manager";
 
 export interface LaunchTimezoneFingerprint {
   timezone: string;
@@ -59,17 +65,18 @@ export function resolveLaunchTimezone(
   }
 
   if (opts.alignTimezoneToProxy && geo?.timezone) {
-    if (localeTimezones.includes(geo.timezone)) {
-      if (geo.timezone !== fp.timezone) {
-        timezone = geo.timezone;
+    const listed = findSameTimeZone(geo.timezone, localeTimezones);
+    if (listed) {
+      if (!sameTimeZone(listed, fp.timezone)) {
+        timezone = listed;
         appliedGeoTimezone = true;
       }
-    } else if (geo.timezone !== fp.timezone) {
+    } else if (!sameTimeZone(geo.timezone, fp.timezone)) {
       warnings.push(
         `geo timezone '${geo.timezone}' not in locale allowlist [${localeTimezones.join(", ")}]; keeping pinned '${fp.timezone}'`,
       );
     }
-  } else if (geo?.timezone && geo.timezone !== fp.timezone) {
+  } else if (geo?.timezone && !sameTimeZone(geo.timezone, fp.timezone)) {
     warnings.push(
       `keeping pinned timezone '${fp.timezone}' (geo reported '${geo.timezone}'; set alignTimezoneToProxy to opt in)`,
     );

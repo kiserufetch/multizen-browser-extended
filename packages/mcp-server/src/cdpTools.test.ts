@@ -863,6 +863,26 @@ test("probe_fingerprint: still reports userAgent drift on a wrong major or an un
   assert.deepEqual(unreduced.parsed.drift, ["userAgent"]);
 });
 
+test("probe_fingerprint: an ICU alias of the stored timezone is not drift", async () => {
+  // Stored (catalog, IANA) → what Chromium's ICU reports for that zone.
+  const aliases: Array<[string, string]> = [
+    ["America/Argentina/Buenos_Aires", "America/Buenos_Aires"],
+    ["Asia/Kolkata", "Asia/Calcutta"],
+    ["Europe/Kyiv", "Europe/Kiev"],
+    ["Asia/Ho_Chi_Minh", "Asia/Saigon"],
+  ];
+  for (const [stored, reported] of aliases) {
+    const fp = storedFingerprint({ timezone: stored });
+    const res = await probe(fp, { ...healthyLive(fp), timezone: reported });
+    assert.deepEqual(res.parsed.drift, [], `${stored} reported as ${reported}`);
+    assert.equal(res.parsed.expected.timezone, stored);
+  }
+  // A different zone with the same offset is still drift.
+  const fp = storedFingerprint({ timezone: "America/Argentina/Buenos_Aires" });
+  const res = await probe(fp, { ...healthyLive(fp), timezone: "America/Sao_Paulo" });
+  assert.deepEqual(res.parsed.drift, ["timezone"]);
+});
+
 test("probe_fingerprint: Camoufox compares only screen and timezone", async () => {
   const fp = storedFingerprint();
   // Camoufox generates its own Firefox UA / hardware / WebGL for the persona's OS.

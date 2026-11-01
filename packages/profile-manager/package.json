@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test src/transfer.test.ts src/reconcileDataDirs.test.ts src/displayMode.test.ts src/secretBox.test.ts src/webgl.test.ts",
+    "test": "node --import tsx --test src/transfer.test.ts src/reconcileDataDirs.test.ts src/displayMode.test.ts src/secretBox.test.ts src/webgl.test.ts src/timezone.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

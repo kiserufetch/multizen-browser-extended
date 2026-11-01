@@ -79,3 +79,28 @@ test("no geo → keep pinned, no warnings", () => {
   assert.equal(result.timezone, "Asia/Karachi");
   assert.equal(result.warnings.length, 0);
 });
+
+test("a geo service's legacy alias of the pinned zone is the same zone: no warning, nothing applied", () => {
+  const ua = { timezone: "Europe/Kyiv", country: "ua" };
+  const strict = resolveLaunchTimezone(ua, { timezone: "Europe/Kiev", country: "ua" }, ["Europe/Kyiv"]);
+  assert.equal(strict.timezone, "Europe/Kyiv");
+  assert.deepEqual(strict.warnings, []);
+  const aligned = resolveLaunchTimezone(ua, { timezone: "Europe/Kiev", country: "ua" }, ["Europe/Kyiv"], {
+    alignTimezoneToProxy: true,
+  });
+  assert.equal(aligned.timezone, "Europe/Kyiv");
+  assert.equal(aligned.appliedGeoTimezone, false);
+  assert.deepEqual(aligned.warnings, []);
+});
+
+test("alignTimezoneToProxy applies an aliased geo zone in the allowlist's own spelling", () => {
+  const ar = { timezone: "America/Argentina/Cordoba", country: "ar" };
+  const result = resolveLaunchTimezone(
+    ar,
+    { timezone: "America/Buenos_Aires", country: "ar" },
+    ["America/Argentina/Buenos_Aires", "America/Argentina/Cordoba"],
+    { alignTimezoneToProxy: true },
+  );
+  assert.equal(result.timezone, "America/Argentina/Buenos_Aires");
+  assert.equal(result.appliedGeoTimezone, true);
+});

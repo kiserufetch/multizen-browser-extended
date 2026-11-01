@@ -25,6 +25,7 @@ export {
   type LocaleCatalogEntry,
   type GenerateFingerprintOptions,
 } from "./fingerprint.js";
+export { canonicalTimeZone, findSameTimeZone, sameTimeZone } from "./timezone.js";
 export { exportProfile, importProfile } from "./archive.js";
 export { isProxyConfig, isProxyHost } from "./proxyConfig.js";
 export {
