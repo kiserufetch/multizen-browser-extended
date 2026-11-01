@@ -7,7 +7,6 @@ import { z } from "zod";
 import type { ProfileManager } from "@multizen/profile-manager";
 import {
   reconcileFingerprint,
-  FingerprintReconcileError,
   generateFingerprint,
   deviceCatalog,
   localeCatalog,
@@ -22,9 +21,19 @@ import type {
   CreateProfileInput,
   ProxyConfig,
 } from "@multizen/types";
-import { BROWSER_ENGINES, resolveEngine } from "@multizen/types";
+import { BROWSER_ENGINES, MultizenError, resolveEngine } from "@multizen/types";
 import { ActivityLog } from "./ActivityLog.js";
+import { principalFrom, type Principal } from "./auth/principal.js";
+import {
+  assertProfileExists,
+  assertProfileRunning,
+  profileNotFound,
+  toToolError,
+  type ToolErrorFields,
+} from "./errorMapping.js";
 import { InMemoryHumanHandoff, type HumanHandoff } from "./handoff.js";
+import { runGated, visibleTools } from "./toolGate.js";
+import { EXTENSION_DEFS, EXTENSION_HANDLERS, type ToolContext } from "./tools/index.js";
 
 export type { BrowserDriver };
 
@@ -43,6 +52,13 @@ export interface MultizenMcpServerOptions {
    *  on each call so a Settings change applies without a restart. create_profile
    *  pins it when no engine is given. Defaults to CloakBrowser. */
   getDefaultEngine?: () => BrowserEngine;
+  /** Who is calling when the transport says nothing (stdio, the desktop's token,
+   *  tests). A principal the transport attaches to a request wins. Defaults to full. */
+  principal?: Principal;
+  /** A directory upload_file may read from, besides the profile's uploads dir. */
+  uploadsRoot?: string;
+  /** Largest base64 upload and inline download. Defaults to 16 MiB. */
+  maxInlineFileBytes?: number;
 }
 
 export interface MultizenMcpServer {
@@ -271,23 +287,31 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
     },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOL_DEFINITIONS,
+  server.setRequestHandler(ListToolsRequestSchema, async (_req, extra) => ({
+    tools: visibleTools(
+      [...TOOL_DEFINITIONS, ...EXTENSION_DEFS],
+      principalFrom(extra, opts.principal),
+    ),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const name = req.params.name;
     const args = req.params.arguments ?? {};
     const event = activityLog.startCall(name, args);
     const startedAt = Date.now();
 
     try {
-      const result = await dispatch(name, args, {
-        profileManager,
-        browserDriver,
-        handoff,
-        getDefaultEngine,
-      });
+      const principal = principalFrom(extra, opts.principal);
+      const result = await runGated(name, args, { principal }, () =>
+        dispatch(name, args, {
+          profileManager,
+          browserDriver,
+          handoff,
+          getDefaultEngine,
+          uploadsRoot: opts.uploadsRoot,
+          maxInlineFileBytes: opts.maxInlineFileBytes,
+        }),
+      );
       const image = asImageResult(result);
       if (image) {
         activityLog.finish(event, "ok", `[${image.mimeType}, ${imageBytes(image.data)} bytes]`, startedAt);
@@ -296,27 +320,16 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
       activityLog.finish(event, "ok", summarize(result), startedAt);
       return ok(result);
     } catch (e) {
-      const message = e instanceof z.ZodError ? e.message : e instanceof Error ? e.message : String(e);
-      // InputNotDeliveredError comes from @multizen/cdp-driver, which this
-      // package does not depend on, so match it by name.
-      const code =
-        e instanceof z.ZodError || e instanceof FingerprintReconcileError
-          ? "INVALID_INPUT"
-          : e instanceof Error && e.name === "InputNotDeliveredError"
-            ? "INPUT_NOT_DELIVERED"
-            : "INTERNAL_ERROR";
-      activityLog.finish(event, "error", message, startedAt);
-      return err(code, message);
+      const fields = toToolError(e, name);
+      activityLog.finish(event, "error", fields.message, startedAt);
+      return err(fields);
     }
   });
 
   return { server, activityLog };
 }
 
-interface DispatchDeps {
-  profileManager: ProfileManager;
-  browserDriver: BrowserDriver;
-  handoff: HumanHandoff;
+interface DispatchDeps extends ToolContext {
   getDefaultEngine: () => BrowserEngine;
 }
 
@@ -376,7 +389,7 @@ async function dispatch(
     case "update_profile": {
       const input = UpdateProfileSchema.parse(args);
       const existing = profileManager.get(input.profile_id);
-      if (!existing) throw new Error(`Profile ${input.profile_id} not found`);
+      if (!existing) throw profileNotFound(input.profile_id);
 
       // Same rule as the profiles:update IPC: a running browser is tied to its
       // engine's binary + data dir, so refuse a real engine change (re-sending
@@ -387,7 +400,8 @@ async function dispatch(
         browserDriver.isRunning(input.profile_id) &&
         input.engine !== resolveEngine(existing.engine, defaultEngine)
       ) {
-        throw new Error(
+        throw new MultizenError(
+          "PROFILE_ALREADY_RUNNING",
           "Stop the profile before changing its engine: call close_profile, then update_profile again.",
         );
       }
@@ -735,8 +749,11 @@ async function dispatch(
         ],
       };
     }
-    default:
-      throw new Error(`Unknown tool: ${name}`);
+    default: {
+      const handler = EXTENSION_HANDLERS.get(name);
+      if (!handler) throw new Error(`Unknown tool: ${name}`);
+      return handler(args, deps);
+    }
   }
 }
 
@@ -825,7 +842,7 @@ const ENGINE_JSON_SCHEMA = {
 const INPUT_DELIVERY_NOTE =
   " On CloakBrowser, fails with INPUT_NOT_DELIVERED when the page did not receive the input (for example a hidden page that has not painted yet); the error message says what to do next.";
 
-const TOOL_DEFINITIONS = [
+export const TOOL_DEFINITIONS = [
   {
     name: "list_profiles",
     description:
@@ -1324,27 +1341,16 @@ function imageBytes(b64: string): number {
   return Math.max(0, Math.floor((len * 3) / 4) - padding);
 }
 
-function err(code: string, message: string) {
+function err(error: ToolErrorFields) {
   return {
     isError: true,
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify({ error: { code, message } }),
+        text: JSON.stringify({ error }),
       },
     ],
   };
-}
-
-function assertProfileExists(pm: ProfileManager, id: string): void {
-  const p = pm.get(id);
-  if (!p) throw new Error(`Profile ${id} not found`);
-}
-
-function assertProfileRunning(driver: BrowserDriver, id: string): void {
-  if (!driver.isRunning(id)) {
-    throw new Error(`Profile ${id} is not running. Call launch_profile first.`);
-  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1390,7 +1396,8 @@ async function pollUntil(check: () => Promise<boolean>, budgetMs: number): Promi
     }
     if (Date.now() >= deadline) {
       if (lastTransient) {
-        throw new Error(
+        throw new MultizenError(
+          "TIMEOUT",
           `Timed out after ${budgetMs}ms waiting for the page to settle; ` +
             `last transient navigation error: ${lastTransient.message}`,
         );

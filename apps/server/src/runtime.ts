@@ -191,6 +191,7 @@ export async function buildRuntime(
     getDefaultEngine,
     chromiumDriver,
     firefoxOptions: SERVER_FIREFOX_OPTIONS,
+    engineNotReady: "reject",
   });
   driver.on("running-changed", (change) => log.info("profile state", { ...change }));
 

@@ -78,6 +78,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
         handoff: runtime.shared.handoff,
         serverVersion: SERVER_VERSION,
         getDefaultEngine: runtime.getDefaultEngine,
+        uploadsRoot: config.uploadsRoot,
       }).server,
   });
   await http.start();

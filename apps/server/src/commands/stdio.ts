@@ -63,6 +63,7 @@ async function runLocal(
     handoff: runtime.shared.handoff,
     serverVersion: SERVER_VERSION,
     getDefaultEngine: runtime.getDefaultEngine,
+    uploadsRoot: config.uploadsRoot,
   });
   const transport = new StdioServerTransport(process.stdin, protocolStdout);
   transport.onclose = () => void shutdown.run("transport-closed", 0);

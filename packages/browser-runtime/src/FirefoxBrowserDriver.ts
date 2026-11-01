@@ -2,7 +2,17 @@ import { EventEmitter } from "node:events";
 import { firefox, type BrowserContext, type Page } from "playwright-core";
 import { launchOptions } from "camoufox-js";
 import type { BrowserDriver } from "@multizen/types";
-import type { LaunchedProfile, Profile, ProfileId } from "@multizen/types";
+import type {
+  CapturedFrame,
+  DownloadFile,
+  DownloadRecord,
+  DriverAction,
+  LaunchedProfile,
+  OpenDialog,
+  Profile,
+  ProfileId,
+} from "@multizen/types";
+import { MultizenError } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
 import { resolveProxyLaunchGeo } from "./launchGeo";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
@@ -143,7 +153,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     }
 
     const profile = this.profileManager.get(profileId);
-    if (!profile) throw new Error(`Profile ${profileId} not found`);
+    if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
     this.profileManager.markOpened(profileId);
 
     const userDataDir = this.browserDataDir(profile);
@@ -308,7 +318,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
 
   private require(profileId: ProfileId): RunningFirefox {
     const r = this.running.get(profileId);
-    if (!r) throw new Error(`Profile ${profileId} is not running`);
+    if (!r) throw new MultizenError("PROFILE_NOT_RUNNING", `Profile ${profileId} is not running`);
     return r;
   }
 
@@ -316,7 +326,9 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   private activePage(profileId: ProfileId): Page {
     const r = this.require(profileId);
     const pages = r.context.pages();
-    if (pages.length === 0) throw new Error(`Profile ${profileId} has no open page`);
+    if (pages.length === 0) {
+      throw new MultizenError("TAB_NOT_FOUND", `Profile ${profileId} has no open page`);
+    }
     return pages[pages.length - 1]!;
   }
 
@@ -338,13 +350,15 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
 
   /** Refs come from the CDP accessibility tree, so `extract` here returns none. */
   async clickRef(): Promise<{ ok: true }> {
-    throw new Error(
+    throw new MultizenError(
+      "UNSUPPORTED_ON_ENGINE",
       "click_ref is unsupported on the Firefox (Camoufox) engine; use click with a CSS selector",
     );
   }
 
   async typeRef(): Promise<{ ok: true }> {
-    throw new Error(
+    throw new MultizenError(
+      "UNSUPPORTED_ON_ENGINE",
       "type_ref is unsupported on the Firefox (Camoufox) engine; use type with a CSS selector",
     );
   }
@@ -420,16 +434,60 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     for (const [page, id] of r.pageIds) {
       if (id === targetId && !page.isClosed()) return page;
     }
-    throw new Error(`No tab ${targetId} on profile ${profileId}`);
+    throw new MultizenError("TAB_NOT_FOUND", `No tab ${targetId} on profile ${profileId}`);
   }
 
   /** Raw CDP is Chromium-only; Camoufox speaks the Firefox protocol (AC6). */
   async cdpSend(): Promise<unknown> {
-    throw new Error("cdp_send is unsupported on the Firefox (Camoufox) engine");
+    throw new MultizenError(
+      "UNSUPPORTED_ON_ENGINE",
+      "cdp_send is unsupported on the Firefox (Camoufox) engine",
+    );
+  }
+
+  // The driver surface a later change fills in. Until then each refuses by code, so a
+  // client sees a typed error rather than a missing method.
+  async performAction(_profileId: ProfileId, action: DriverAction): Promise<{ ok: true }> {
+    throw notAvailableYet(action.type);
+  }
+
+  async listDownloads(): Promise<DownloadRecord[]> {
+    throw notAvailableYet("list_downloads");
+  }
+
+  async getDownload(): Promise<DownloadFile | null> {
+    throw notAvailableYet("get_download");
+  }
+
+  async setDialogPolicy(): Promise<{ ok: true }> {
+    throw notAvailableYet("set_dialog_policy");
+  }
+
+  async listDialogs(): Promise<OpenDialog[]> {
+    throw notAvailableYet("list_dialogs");
+  }
+
+  async handleDialog(): Promise<{ ok: true }> {
+    throw notAvailableYet("handle_dialog");
+  }
+
+  async captureFrame(): Promise<CapturedFrame> {
+    throw notAvailableYet("captureFrame");
+  }
+
+  async dispatchInput(): Promise<void> {
+    throw notAvailableYet("dispatchInput");
   }
 
   async closeAll(): Promise<void> {
     const ids = [...this.running.keys()];
     await Promise.all(ids.map((id) => this.close(id)));
   }
+}
+
+function notAvailableYet(what: string): MultizenError {
+  return new MultizenError(
+    "UNSUPPORTED_ON_ENGINE",
+    `${what} is not available on Camoufox in this build.`,
+  );
 }

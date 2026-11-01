@@ -1,6 +1,27 @@
 import { EventEmitter } from "node:events";
-import { resolveEngine } from "@multizen/types";
-import type { BrowserEngine, LaunchedProfile, ProfileId } from "@multizen/types";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  MultizenError,
+  PROFILE_UPLOADS_DIR,
+  resolveEngine,
+  UPLOAD_INBOX_DIR,
+} from "@multizen/types";
+import type {
+  BrowserEngine,
+  CapturedFrame,
+  ChromiumStatus,
+  DialogPolicy,
+  DialogResponse,
+  DownloadFile,
+  DownloadRecord,
+  DriverAction,
+  HumanInputEvent,
+  LaunchedProfile,
+  OpenDialog,
+  ProfileId,
+  RunningInfo,
+} from "@multizen/types";
 import type { BrowserDriver } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
 import type { EngineRegistry } from "./engineRegistry.ts";
@@ -11,9 +32,20 @@ import {
   type RunningStateChange,
 } from "./ChromiumBrowserDriver.ts";
 import { camoufoxConfigForProfile } from "./firefoxFingerprint.ts";
+import { StrictGeoCoherenceError } from "./launchTimezone";
 // Type-only: the concrete module (which statically imports camoufox-js +
 // playwright-core) is loaded lazily, so Chromium-only sessions never pull it in.
 import type { FirefoxBrowserDriver, FirefoxBrowserDriverOptions } from "./FirefoxBrowserDriver.ts";
+
+/** The steps of an install: long enough that an MCP client would give up waiting. */
+const INSTALLING: ReadonlySet<ChromiumStatus["kind"]> = new Set<ChromiumStatus["kind"]>([
+  "fetching-manifest",
+  "downloading",
+  "verifying",
+  "extracting",
+]);
+const ENGINE_STATUS_POLL_MS = 25;
+const ENGINE_RETRY_AFTER_MS = 5_000;
 
 interface EngineRouterEvents {
   "running-changed": (change: RunningStateChange) => void;
@@ -28,6 +60,13 @@ export interface EngineRouterOptions {
   chromiumDriver: ChromiumBrowserDriver;
   /** Passed to the Firefox driver, which the router itself constructs lazily. */
   firefoxOptions?: Pick<FirefoxBrowserDriverOptions, "launchExtras">;
+  /**
+   * A launch while the engine is still installing. `wait` (the default, the desktop
+   * with its progress UI) blocks until it is ready. `reject` (the server) answers at
+   * once with a retryable ENGINE_NOT_READY, since a first download runs far past an
+   * MCP client's timeout, and the install carries on in the background.
+   */
+  engineNotReady?: "wait" | "reject";
 }
 
 /**
@@ -45,6 +84,7 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   private readonly getDefaultEngine: () => BrowserEngine;
   private readonly chromiumDriver: ChromiumBrowserDriver;
   private readonly firefoxOptions: EngineRouterOptions["firefoxOptions"];
+  private readonly engineNotReady: NonNullable<EngineRouterOptions["engineNotReady"]>;
   private firefoxDriver: FirefoxBrowserDriver | null = null;
   /** profileId → the driver it launched on (bound at launch, cleared on close). */
   private readonly bindings = new Map<ProfileId, BrowserDriver>();
@@ -56,6 +96,7 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     this.getDefaultEngine = opts.getDefaultEngine;
     this.chromiumDriver = opts.chromiumDriver;
     this.firefoxOptions = opts.firefoxOptions;
+    this.engineNotReady = opts.engineNotReady ?? "wait";
     this.chromiumDriver.on("running-changed", (c) => this.onSubEvent(c));
   }
 
@@ -71,8 +112,31 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   }
 
   private onSubEvent(change: RunningStateChange): void {
-    if (change.kind === "closed") this.bindings.delete(change.profileId);
+    if (change.kind === "closed") {
+      this.bindings.delete(change.profileId);
+      this.clearUploadInbox(change.profileId);
+    }
     this.emit("running-changed", change);
+  }
+
+  /**
+   * A browser reads an uploaded file when the page submits it, so base64 uploads
+   * stay on disk until the browser is gone. Here, because every way of closing a
+   * profile ends up here, including a browser that was killed.
+   */
+  private clearUploadInbox(profileId: ProfileId): void {
+    let dataDir: string | undefined;
+    try {
+      dataDir = this.profileManager.get(profileId)?.dataDir;
+    } catch {
+      return; // The database closes during shutdown; the next close of this profile clears it.
+    }
+    if (!dataDir) return;
+    void rm(join(dataDir, PROFILE_UPLOADS_DIR, UPLOAD_INBOX_DIR), {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+    }).catch(() => {});
   }
 
   /** The engine a not-yet-running profile would launch on. */
@@ -108,8 +172,33 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   /** The driver a RUNNING profile is bound to; throws if it isn't running. */
   private require(profileId: ProfileId): BrowserDriver {
     const driver = this.bindings.get(profileId);
-    if (!driver) throw new Error(`Profile ${profileId} is not running`);
+    if (!driver) {
+      throw new MultizenError("PROFILE_NOT_RUNNING", `Profile ${profileId} is not running`);
+    }
     return driver;
+  }
+
+  /** Binary-gate a launch on this engine, by the `engineNotReady` rule. */
+  private async ensureEngine(engine: BrowserEngine): Promise<void> {
+    const bootstrap = this.engineRegistry.get(engine);
+    if (this.engineNotReady === "wait") {
+      await bootstrap.ensure();
+      return;
+    }
+    const before = bootstrap.getStatus();
+    let settled = false;
+    const ensuring = bootstrap.ensure().finally(() => {
+      settled = true;
+    });
+    // May outlive this call. A failure then shows in the status and in the next launch.
+    ensuring.catch(() => {});
+    // An installed engine settles at once and never reports one of these steps.
+    while (!settled) {
+      const status = bootstrap.getStatus();
+      if (INSTALLING.has(status.kind)) throw engineNotReadyError(engine, status, before);
+      await new Promise((resolve) => setTimeout(resolve, ENGINE_STATUS_POLL_MS));
+    }
+    await ensuring;
   }
 
   async launch(profileId: ProfileId): Promise<LaunchedProfile> {
@@ -119,10 +208,12 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     const engine = this.engineFor(profileId);
     // Binary-gate the launch on this engine (idempotent; the Chromium driver
     // also self-gates, the Firefox driver relies on this).
-    await this.engineRegistry.get(engine).ensure();
+    await this.ensureEngine(engine);
 
     const driver = await this.driverForEngine(engine);
-    const result = await driver.launch(profileId);
+    const result = await driver.launch(profileId).catch((e: unknown) => {
+      throw typedLaunchError(e);
+    });
     this.bindings.set(profileId, driver);
     return result;
   }
@@ -192,6 +283,36 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   closeTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown> {
     return this.require(profileId).closeTab(profileId, targetId, sessionId);
   }
+  performAction(profileId: ProfileId, action: DriverAction): Promise<{ ok: true }> {
+    return this.require(profileId).performAction(profileId, action);
+  }
+  listDownloads(profileId: ProfileId): Promise<DownloadRecord[]> {
+    return this.require(profileId).listDownloads(profileId);
+  }
+  getDownload(profileId: ProfileId, downloadId: string): Promise<DownloadFile | null> {
+    return this.require(profileId).getDownload(profileId, downloadId);
+  }
+  setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }> {
+    return this.require(profileId).setDialogPolicy(profileId, policy);
+  }
+  listDialogs(profileId: ProfileId): Promise<OpenDialog[]> {
+    return this.require(profileId).listDialogs(profileId);
+  }
+  handleDialog(profileId: ProfileId, response: DialogResponse): Promise<{ ok: true }> {
+    return this.require(profileId).handleDialog(profileId, response);
+  }
+  captureFrame(profileId: ProfileId, opts?: { quality?: number }): Promise<CapturedFrame> {
+    return this.require(profileId).captureFrame(profileId, opts);
+  }
+  dispatchInput(profileId: ProfileId, event: HumanInputEvent): Promise<void> {
+    return this.require(profileId).dispatchInput(profileId, event);
+  }
+  hasOpenDialog(profileId: ProfileId): boolean {
+    return this.bindings.get(profileId)?.hasOpenDialog?.(profileId) ?? false;
+  }
+  runningInfo(profileId: ProfileId): RunningInfo | null {
+    return this.bindings.get(profileId)?.runningInfo?.(profileId) ?? null;
+  }
 
   /** `opts` shortens the Chromium shutdown on the quit path (see before-quit). */
   async closeAll(opts: { gracefulMs?: number; reap?: boolean } = {}): Promise<void> {
@@ -203,4 +324,35 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     ]);
     this.bindings.clear();
   }
+}
+
+function engineNotReadyError(
+  engine: BrowserEngine,
+  status: ChromiumStatus,
+  before: ChromiumStatus,
+): MultizenError {
+  return new MultizenError(
+    "ENGINE_NOT_READY",
+    `The ${engine} engine is still being installed (${status.kind}); no browser was started.`,
+    {
+      hint: "Call launch_profile again after details.retry_after_ms.",
+      details: {
+        retry_after_ms: ENGINE_RETRY_AFTER_MS,
+        engine,
+        status: status.kind,
+        ...(status.kind === "downloading"
+          ? { bytes_received: status.bytesReceived, bytes_total: status.bytesTotal }
+          : {}),
+        // Otherwise a failing install looks like an endless "try again".
+        ...(before.kind === "error" ? { last_error: before.message } : {}),
+      },
+    },
+  );
+}
+
+/** The two engines fail a launch in their own words; clients get one code for it. */
+function typedLaunchError(e: unknown): unknown {
+  if (e instanceof MultizenError) return e;
+  if (e instanceof StrictGeoCoherenceError) return new MultizenError("GEO_MISMATCH", e.message);
+  return new MultizenError("LAUNCH_FAILED", e instanceof Error ? e.message : String(e));
 }

@@ -15,6 +15,8 @@ export interface ServerConfig {
   noAuth: boolean;
   /** Overrides the stored setting for profiles that haven't pinned an engine. */
   defaultEngine?: BrowserEngine;
+  /** A directory upload_file may read from, besides each profile's uploads dir. */
+  uploadsRoot?: string;
 }
 
 export type Env = Record<string, string | undefined>;
@@ -139,6 +141,11 @@ function resolveDefaultEngine(flags: ParsedFlags, env: Env): BrowserEngine | und
   return parseEngine(flags.flag("default-engine") ?? env.MULTIZEN_DEFAULT_ENGINE);
 }
 
+function uploadsRootField(flags: ParsedFlags, env: Env): { uploadsRoot?: string } {
+  const uploadsRoot = flags.flag("uploads-root") ?? env.MULTIZEN_UPLOADS_ROOT;
+  return uploadsRoot ? { uploadsRoot: resolve(uploadsRoot) } : {};
+}
+
 export function parseServeConfig(
   argv: string[],
   env: Env = process.env,
@@ -149,6 +156,7 @@ export function parseServeConfig(
     host: { type: "string" },
     port: { type: "string" },
     "no-auth": { type: "boolean" },
+    "uploads-root": { type: "string" },
   });
   rejectPositionals(flags.positionals);
   return {
@@ -157,11 +165,12 @@ export function parseServeConfig(
     port: parsePort(flags.flag("port") ?? env.MULTIZEN_PORT ?? "7777"),
     noAuth: flags.isSet("no-auth") || env.MULTIZEN_NO_AUTH === "1",
     defaultEngine: resolveDefaultEngine(flags, env),
+    ...uploadsRootField(flags, env),
   };
 }
 
 export type StdioConfig =
-  | { kind: "local"; dataDir: string; defaultEngine?: BrowserEngine }
+  | { kind: "local"; dataDir: string; defaultEngine?: BrowserEngine; uploadsRoot?: string }
   | { kind: "connect"; url: string; tokenFile?: string };
 
 export function parseStdioConfig(
@@ -173,6 +182,7 @@ export function parseStdioConfig(
     ...DATA_DIR_OPTIONS,
     connect: { type: "string" },
     "token-file": { type: "string" },
+    "uploads-root": { type: "string" },
   });
   rejectPositionals(flags.positionals);
 
@@ -184,11 +194,14 @@ export function parseStdioConfig(
       kind: "local",
       dataDir: resolveDataDir(flags, env, facts),
       defaultEngine: resolveDefaultEngine(flags, env),
+      ...uploadsRootField(flags, env),
     };
   }
 
-  if (flags.isSet("data-dir") || flags.isSet("default-engine")) {
-    throw new UsageError("--connect runs no browsers: --data-dir and --default-engine don't apply");
+  if (flags.isSet("data-dir") || flags.isSet("default-engine") || flags.isSet("uploads-root")) {
+    throw new UsageError(
+      "--connect runs no browsers: --data-dir, --default-engine and --uploads-root don't apply",
+    );
   }
   let url: URL;
   try {

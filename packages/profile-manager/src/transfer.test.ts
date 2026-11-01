@@ -162,6 +162,36 @@ test("an archive with no recorded engine is pinned to the default, silently", as
   });
 });
 
+test("uploads and downloads stay out of an archive; only those two top-level dirs", async () => {
+  await withSides(async (from, to, dir) => {
+    const profile = create(from);
+    const browserDir = join(profile.dataDir, "engines", "cloakbrowser");
+    mkdirSync(join(browserDir, "downloads"), { recursive: true });
+    writeFileSync(join(browserDir, "Cookies"), "cookie-bytes");
+    writeFileSync(join(browserDir, "downloads", "state"), "browser-owned");
+    mkdirSync(join(profile.dataDir, "uploads", ".inbox"), { recursive: true });
+    writeFileSync(join(profile.dataDir, "uploads", "a.pdf"), "upload");
+    writeFileSync(join(profile.dataDir, "uploads", ".inbox", "uuid-b.pdf"), "inbox");
+    mkdirSync(join(profile.dataDir, "downloads"), { recursive: true });
+    writeFileSync(join(profile.dataDir, "downloads", "c.zip"), "download");
+    const archive = join(dir, "p.mzar");
+
+    await exportProfileToArchive(profile, "pw", archive, from.extensionStoreRoot);
+    const { id } = await importProfileFromArchive(to.pm, archive, "pw", {
+      profilesRoot: to.profilesRoot,
+      extensionStoreRoot: to.extensionStoreRoot,
+      defaultEngine: "cloakbrowser",
+    });
+
+    const restored = to.pm.get(id)!.dataDir;
+    assert.equal(existsSync(join(restored, "uploads")), false);
+    assert.equal(existsSync(join(restored, "downloads")), false);
+    const restoredBrowserDir = join(restored, "engines", "cloakbrowser");
+    assert.equal(readFileSync(join(restoredBrowserDir, "Cookies"), "utf8"), "cookie-bytes");
+    assert.equal(readFileSync(join(restoredBrowserDir, "downloads", "state"), "utf8"), "browser-owned");
+  });
+});
+
 test("a wrong passphrase rejects and inserts nothing", async () => {
   await withSides(async (from, to, dir) => {
     const archive = join(dir, "p.mzar");

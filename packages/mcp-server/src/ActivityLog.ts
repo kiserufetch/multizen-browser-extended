@@ -45,7 +45,7 @@ export class ActivityLog extends EventEmitter {
       timestamp: new Date().toISOString(),
       tool,
       profileId: typeof args.profile_id === "string" ? args.profile_id : undefined,
-      args: sanitize(args),
+      args: sanitize(tool, args),
       status: "pending",
     };
     this.push(event);
@@ -72,9 +72,98 @@ export class ActivityLog extends EventEmitter {
   }
 }
 
-function sanitize(args: Record<string, unknown>): Record<string, unknown> {
+const SELECTORS = ["ref", "selector"] as const;
+const PROFILE = ["profile_id"] as const;
+const PROFILE_AND_SESSION = ["profile_id", "sessionId"] as const;
+const WAIT = [...PROFILE_AND_SESSION, "timeout_ms"] as const;
+const DIALOG_MODE_FIELDS = ["mode", "alert", "confirm", "prompt", "beforeunload"] as const;
+
+/**
+ * The arguments each tool may put in the activity feed, which the desktop renders
+ * and an operator can pipe to a file. An argument not named here is not logged, so
+ * a new argument or a new tool stays private until someone decides otherwise. Left
+ * out on purpose: `expression` and cdp `params` (page and session secrets),
+ * `lease_id` (a capability), `prompt_text` (often a credential), and the seed and
+ * notes of a profile. A test keeps this table in step with toolPolicy.ts.
+ */
+export const LOGGED_ARGS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
+  ["list_profiles", []],
+  ["list_fingerprint_options", []],
+  ["create_profile", ["name", "tags", "engine", "proxy", "alignTimezoneToProxy", "strictGeoCoherence"]],
+  [
+    "update_profile",
+    ["profile_id", "name", "tags", "engine", "proxy", "alignTimezoneToProxy", "strictGeoCoherence"],
+  ],
+  ["delete_profile", PROFILE],
+  ["launch_profile", PROFILE],
+  ["close_profile", PROFILE],
+  ["extract", PROFILE],
+  ["screenshot", PROFILE],
+  ["probe_fingerprint", PROFILE],
+  ["navigate", ["profile_id", "url"]],
+  ["click", ["profile_id", "selector"]],
+  ["type", ["profile_id", "selector", "text"]],
+  ["click_ref", ["profile_id", "ref"]],
+  ["type_ref", ["profile_id", "ref", "text"]],
+  ["request_human", ["profile_id", "reason"]],
+  ["wait_for_human", ["profile_id", "timeout_ms"]],
+  ["resume_human", PROFILE],
+  ["get_human_status", PROFILE],
+  ["cdp_send", [...PROFILE_AND_SESSION, "method"]],
+  ["cdp_send_no_safety", [...PROFILE_AND_SESSION, "method"]],
+  ["evaluate_js", PROFILE_AND_SESSION],
+  ["wait_for_selector", [...WAIT, "selector"]],
+  ["wait_for_navigation", WAIT],
+  ["wait_for_load", WAIT],
+  ["get_cookies", [...PROFILE_AND_SESSION, "urls"]],
+  ["set_cookies", [...PROFILE_AND_SESSION, "cookies"]],
+  ["list_tabs", PROFILE_AND_SESSION],
+  ["new_tab", [...PROFILE_AND_SESSION, "url"]],
+  ["activate_tab", [...PROFILE_AND_SESSION, "target_id"]],
+  ["close_tab", [...PROFILE_AND_SESSION, "target_id"]],
+  ["press_key", [...PROFILE, ...SELECTORS, "key"]],
+  ["hover", [...PROFILE, ...SELECTORS]],
+  ["select_option", [...PROFILE, ...SELECTORS, "value", "label", "index"]],
+  ["scroll", [...PROFILE, ...SELECTORS, "delta_x", "delta_y"]],
+  ["upload_file", [...PROFILE, ...SELECTORS, "files"]],
+  ["list_downloads", PROFILE],
+  ["get_download", ["profile_id", "download_id"]],
+  ["set_dialog_policy", [...PROFILE, ...DIALOG_MODE_FIELDS]],
+  ["list_dialogs", PROFILE],
+  ["handle_dialog", ["profile_id", "action", "dialog_id"]],
+  ["acquire_profile", ["profile_id", "ttl_ms"]],
+  ["renew_profile", ["profile_id", "ttl_ms"]],
+  ["release_profile", ["profile_id", "force"]],
+]);
+
+const MAX_LOGGED_CHARS = 200;
+const MAX_LOGGED_ITEMS = 20;
+const MAX_LOGGED_DEPTH = 3;
+
+/** Bounds a logged value: an allowlisted argument can still be huge or deeply nested. */
+function capped(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") {
+    return value.length > MAX_LOGGED_CHARS
+      ? `${value.slice(0, MAX_LOGGED_CHARS)}…[${value.length} chars]`
+      : value;
+  }
+  if (!value || typeof value !== "object") return value;
+  if (depth >= MAX_LOGGED_DEPTH) return "[…]";
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_LOGGED_ITEMS).map((item) => capped(item, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .slice(0, MAX_LOGGED_ITEMS)
+      .map(([k, v]) => [k, capped(v, depth + 1)]),
+  );
+}
+
+function sanitize(tool: string, args: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(args)) {
+  for (const k of LOGGED_ARGS.get(tool) ?? []) {
+    if (!Object.hasOwn(args, k)) continue;
+    const v = args[k];
     if (k === "text" && typeof v === "string") {
       // The `type` tool's text is keystrokes into page fields — it may be a
       // password or an OTP, and short ones (< 80 chars) used to be logged in
@@ -96,11 +185,20 @@ function sanitize(args: Record<string, unknown>): Record<string, unknown> {
     } else if (k === "cookies" && Array.isArray(v)) {
       // set_cookies args carry cookie values (session tokens) in cleartext.
       // Redact each value in the audit trail; keep name/domain/etc. for context.
-      out[k] = v.map((c) =>
-        c && typeof c === "object" ? { ...(c as Record<string, unknown>), value: "***" } : c,
+      out[k] = capped(
+        v.map((c) =>
+          c && typeof c === "object" ? { ...(c as Record<string, unknown>), value: "***" } : c,
+        ),
+      );
+    } else if (k === "files" && Array.isArray(v)) {
+      // upload_file carries file contents as base64. Only the names are logged.
+      out[k] = capped(
+        v.map((f) =>
+          f && typeof f === "object" ? (f as { file_name?: unknown }).file_name : undefined,
+        ),
       );
     } else {
-      out[k] = v;
+      out[k] = capped(v);
     }
   }
   return out;

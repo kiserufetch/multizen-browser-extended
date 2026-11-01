@@ -120,6 +120,15 @@ test("the occlusion tracker is off on Windows only, and only here", async () => 
   });
 });
 
+test("a launch during an engine install is refused, not left blocking a client", async () => {
+  await withRuntime(async (runtime) => {
+    assert.equal(
+      (runtime.driver as unknown as { engineNotReady: unknown }).engineNotReady,
+      "reject",
+    );
+  });
+});
+
 test("no companion: nothing wires its install button and the host has no resource", async () => {
   await withRuntime(async (runtime) => {
     const chromium = (runtime.driver as unknown as { chromiumDriver: { onCompanionInstall?: unknown } })

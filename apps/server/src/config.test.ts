@@ -78,6 +78,26 @@ test("serve: flags, defaults and environment", () => {
   assert.equal(flags.defaultEngine, "cloakbrowser");
 });
 
+test("serve and a local stdio take an uploads root, resolved; flag over env; absent by default", () => {
+  assert.equal("uploadsRoot" in parseServeConfig([], {}, LINUX), false);
+  assert.equal(
+    parseServeConfig([], { MULTIZEN_UPLOADS_ROOT: "from-env" }, LINUX).uploadsRoot,
+    resolve("from-env"),
+  );
+  assert.equal(
+    parseServeConfig(["--uploads-root", "from-flag"], { MULTIZEN_UPLOADS_ROOT: "from-env" }, LINUX)
+      .uploadsRoot,
+    resolve("from-flag"),
+  );
+  const stdio = parseStdioConfig(["--uploads-root", "u"], {}, LINUX);
+  assert.ok(stdio.kind === "local");
+  assert.equal(stdio.uploadsRoot, resolve("u"));
+  assert.throws(
+    () => parseStdioConfig(["--connect", "http://x", "--uploads-root", "u"], {}, LINUX),
+    /runs no browsers/,
+  );
+});
+
 test("serve: localhost binds the IPv4 loopback", () => {
   assert.equal(parseServeConfig(["--host", "localhost"], {}, LINUX).host, "127.0.0.1");
 });

@@ -11,8 +11,17 @@ import {
 } from "node:crypto";
 import { promisify } from "node:util";
 import type { Profile } from "@multizen/types";
+import { PROFILE_DOWNLOADS_DIR, PROFILE_UPLOADS_DIR } from "@multizen/types";
 
 const scrypt = promisify(scryptCb);
+
+/** Top-level dirs of a profile that are transit, not identity. An archive carries a
+ *  profile's browser state; what an agent downloaded or uploaded through it can be
+ *  large and is no part of moving that profile to another machine. */
+const EXCLUDED_PROFILE_DIRS: ReadonlySet<string> = new Set([
+  PROFILE_UPLOADS_DIR,
+  PROFILE_DOWNLOADS_DIR,
+]);
 
 const MAGIC = "MZAR";
 /** v1 = profile user-data-dir only. v2 = also bundles shared-store extension
@@ -77,7 +86,7 @@ export async function exportProfile(
   outPath: string,
   opts: ExportOptions = {},
 ): Promise<void> {
-  const files = await collectFiles(profile.dataDir);
+  const files = await collectFiles(profile.dataDir, EXCLUDED_PROFILE_DIRS);
 
   // Collect bundled extensions (v2). Each extension's files are appended after
   // the profile files, in the same [len][content] framing, so import can read
@@ -332,13 +341,17 @@ interface CollectedFile {
   sha256: string;
 }
 
-async function collectFiles(root: string): Promise<CollectedFile[]> {
+async function collectFiles(
+  root: string,
+  excludedTopLevelDirs: ReadonlySet<string> = new Set(),
+): Promise<CollectedFile[]> {
   const out: CollectedFile[] = [];
   async function walk(dir: string): Promise<void> {
     const entries = await readdir(dir, { withFileTypes: true });
     for (const e of entries) {
       const abs = join(dir, e.name);
       if (e.isDirectory()) {
+        if (dir === root && excludedTopLevelDirs.has(e.name)) continue;
         await walk(abs);
       } else if (e.isFile()) {
         const stat = statSync(abs);

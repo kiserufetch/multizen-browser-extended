@@ -1,6 +1,7 @@
 /**
  * Live end-to-end check of the built server against a real browser engine, with
- * real MCP SDK clients. Not part of test:unit: it opens real browser windows.
+ * real MCP SDK clients. Not part of test:unit: it opens real browser windows. Run it
+ * from PowerShell or cmd: Ctrl+C can't be delivered to anything started from Git Bash.
  *
  *   corepack yarn workspace @multizen/server build
  *   corepack yarn workspace @multizen/server exec tsx scripts/e2e.ts \
@@ -10,9 +11,11 @@
  * junction on the version directory only, so nothing the server does to its own
  * engine cache can reach the original. Without it the engine is downloaded.
  *
- * Checks, in order: an HTTP client creates a profile, launches, navigates to a
- * local fixture, reads with extract, clicks by ref, screenshots, sets a cookie,
- * closes, and a relaunch still sends that cookie. A second serve and a plain stdio
+ * Checks, in order: tools/list carries all four annotation hints on every tool, and
+ * a typed error reports its code and retryable. An HTTP client creates a profile,
+ * launches, navigates to a local fixture, reads with extract, clicks by ref,
+ * screenshots, sets a cookie, closes, and a relaunch still sends that cookie.
+ * A second serve and a plain stdio
  * refuse the lock. A stdio --connect client reaches the same server. Ctrl+Break and
  * Ctrl+C with a browser running each exit 0 and leave no process behind. A plain
  * stdio client launches a browser with stdout staying valid JSON-RPC, and stdin
@@ -46,6 +49,8 @@ const APP_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = join(APP_ROOT, "dist", "cli.js");
 if (!existsSync(CLI)) throw new Error(`${CLI} is missing: build the server first`);
 
+const ENGINE_INSTALL_BUDGET_MS = 15 * 60_000;
+const CTRL_C_EXIT_BUDGET_MS = 30_000;
 const results: Array<{ check: string; observed: string }> = [];
 function pass(check: string, observed = ""): void {
   results.push({ check, observed });
@@ -206,6 +211,79 @@ async function call(
   return JSON.parse(text) as Record<string, unknown>;
 }
 
+/** The `error` object of a call that must fail. */
+async function callError(
+  client: Client,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const result = await rawCall(client, name, args);
+  const text = result.content[0]?.text ?? "{}";
+  expect(result.isError, `${name} was expected to fail: ${text}`);
+  return (JSON.parse(text) as { error: Record<string, unknown> }).error;
+}
+
+/** A launch during an engine download is refused as retryable, as it is for any client. */
+async function launch(client: Client, id: string): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + ENGINE_INSTALL_BUDGET_MS;
+  for (;;) {
+    const result = await rawCall(client, "launch_profile", { profile_id: id });
+    const body = JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown> & {
+      error?: { code?: string; retryable?: boolean; details?: { retry_after_ms?: number } };
+    };
+    if (!result.isError) return body;
+    const retry = body.error?.code === "ENGINE_NOT_READY" && body.error.retryable === true;
+    expect(retry && Date.now() < deadline, `launch_profile failed: ${JSON.stringify(body)}`);
+    await new Promise((done) => setTimeout(done, body.error?.details?.retry_after_ms ?? 5000));
+  }
+}
+
+const ANNOTATION_HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"];
+const EXPECTED_NEW_TOOLS = [
+  "press_key",
+  "hover",
+  "select_option",
+  "scroll",
+  "upload_file",
+  "list_downloads",
+  "get_download",
+  "set_dialog_policy",
+  "handle_dialog",
+  "list_dialogs",
+  "acquire_profile",
+  "renew_profile",
+  "release_profile",
+  "get_human_status",
+];
+
+async function toolSurfaceChecks(client: Client, profileId: string): Promise<void> {
+  const { tools } = await client.listTools();
+  for (const tool of tools) {
+    const annotations = (tool.annotations ?? {}) as Record<string, unknown>;
+    for (const hint of ANNOTATION_HINTS) {
+      expect(typeof annotations[hint] === "boolean", `${tool.name} has no boolean ${hint}`);
+    }
+  }
+  const names = new Set(tools.map((t) => t.name));
+  for (const name of EXPECTED_NEW_TOOLS) expect(names.has(name), `tools/list lacks ${name}`);
+  pass("tools/list annotations", `all 4 hints on each of ${tools.length} tools`);
+
+  const notRunning = await callError(client, "navigate", {
+    profile_id: profileId,
+    url: "http://127.0.0.1:1/",
+  });
+  expect(notRunning.code === "PROFILE_NOT_RUNNING", `navigate: ${JSON.stringify(notRunning)}`);
+  expect(notRunning.retryable === false, `navigate: ${JSON.stringify(notRunning)}`);
+  expect(/launch_profile/.test(String(notRunning.message)), "navigate: the message lost its advice");
+  pass("typed error on navigate", JSON.stringify(notRunning));
+
+  const notFound = await callError(client, "launch_profile", { profile_id: "no-such-profile" });
+  expect(notFound.code === "PROFILE_NOT_FOUND", `launch: ${JSON.stringify(notFound)}`);
+  const refused = await callError(client, "no_such_tool", {});
+  expect(refused.code === "FORBIDDEN", `unknown tool: ${JSON.stringify(refused)}`);
+  pass("typed errors on launch_profile and an unknown tool", "PROFILE_NOT_FOUND, FORBIDDEN");
+}
+
 /** What a page says about itself. Hidden and unpainted drops all input. */
 async function pageState(client: Client, id: string): Promise<string> {
   const state = await call(client, "evaluate_js", {
@@ -296,7 +374,9 @@ async function httpFlow(fixture: Fixture): Promise<string> {
     const id = String(created.id);
     pass("create_profile", id);
 
-    const launched = await call(client, "launch_profile", { profile_id: id });
+    await toolSurfaceChecks(client, id);
+
+    const launched = await launch(client, id);
     expect(Number(launched.pid) > 0, "launch_profile returned no pid");
     pass("launch_profile", `pid ${launched.pid}, ${launched.cdpEndpoint}`);
 
@@ -341,7 +421,7 @@ async function httpFlow(fixture: Fixture): Promise<string> {
     expect(closed[0]?.isRunning === false, "the profile still reads as running after close");
     pass("close_profile");
 
-    await call(client, "launch_profile", { profile_id: id });
+    await launch(client, id);
     await call(client, "navigate", { profile_id: id, url: fixture.url });
     expect(
       fixture.cookieHeaders.at(-1)?.includes("mz_e2e=kept-across-relaunch"),
@@ -407,7 +487,7 @@ async function sigintFlow(profileId: string): Promise<void> {
   const serve = await startServe();
   try {
     const client = await httpClient(serve.url, serve.token);
-    const launched = await call(client, "launch_profile", { profile_id: profileId });
+    const launched = await launch(client, profileId);
 
     // A browser dying under the server must cost that profile only. In Electron a
     // stray socket error is survivable; under plain Node it would end the process.
@@ -423,11 +503,19 @@ async function sigintFlow(profileId: string): Promise<void> {
     expect(!/uncaught exception|unhandled rejection/.test(serve.output()), "a killed browser was fatal");
     pass("a browser killed from outside", "the server stays up, the profile reads as closed");
 
-    await call(client, "launch_profile", { profile_id: profileId });
+    await launch(client, profileId);
     pass("relaunch after the kill");
     await client.close();
     sendConsoleCtrl(serve.child.pid!, "CTRL_C");
-    const code = await serve.exited;
+    const code = await Promise.race([
+      serve.exited,
+      new Promise<"no exit">((done) => setTimeout(() => done("no exit"), CTRL_C_EXIT_BUDGET_MS)),
+    ]);
+    expect(
+      code !== "no exit",
+      "Ctrl+C never reached the server. A process started from Git Bash inherits Ctrl+C " +
+        "disabled, which nothing below it can undo: run this script from PowerShell or cmd.",
+    );
     expect(code === 0, `Ctrl+C exit code ${code}:\n${serve.output()}`);
     expect(/"reason":"SIGINT"/.test(serve.output()), "the shutdown was not started by SIGINT");
     pass("Ctrl+C with a browser running", `exit ${code}`);
@@ -460,7 +548,7 @@ async function stdioFlow(fixture: Fixture): Promise<void> {
 
   const created = await call(client, "create_profile", { name: "e2e-stdio" });
   const id = String(created.id);
-  await call(client, "launch_profile", { profile_id: id });
+  await launch(client, id);
   await call(client, "navigate", { profile_id: id, url: fixture.url });
   const page = (await call(client, "extract", { profile_id: id })).result as { title: string };
   expect(page.title === "MZ Fixture", `extract over stdio saw "${page.title}"`);

@@ -10,13 +10,18 @@ const execFileP = promisify(execFile);
 import type { BrowserDriver } from "@multizen/types";
 import { deviceMemoryApiValue, type ProfileManager } from "@multizen/profile-manager";
 import type {
+  CapturedFrame,
   ChromiumStatus,
   ClientHints,
+  DownloadFile,
+  DownloadRecord,
+  DriverAction,
   FingerprintConfig,
   LaunchedProfile,
+  OpenDialog,
   ProfileId,
 } from "@multizen/types";
-import { resolveEngine, type BrowserEngine } from "@multizen/types";
+import { MultizenError, resolveEngine, type BrowserEngine } from "@multizen/types";
 import { CdpSession } from "@multizen/cdp-driver";
 import { EngineRegistry } from "./engineRegistry.ts";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
@@ -210,7 +215,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     }
 
     const profile = this.profileManager.get(profileId);
-    if (!profile) throw new Error(`Profile ${profileId} not found`);
+    if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
 
     // Update `last_opened_at` for every launch, regardless of trigger
     // (UI button, MCP tool, command palette). Done early so even a
@@ -227,7 +232,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // (and the rest of the app) are unaffected.
     const engineStatus = await bootstrap.ensure();
     if (engineStatus.kind !== "ready" && engineStatus.kind !== "dev-system") {
-      throw new Error(`Engine "${engine}" is not ready to launch (status: ${engineStatus.kind}).`);
+      throw new MultizenError(
+        "ENGINE_NOT_READY",
+        `Engine "${engine}" is not ready to launch (status: ${engineStatus.kind}).`,
+      );
     }
     const chromiumPath = bootstrap.resolveBinaryPath();
     const browserDataDir = browserDataDirForEngine(profile.dataDir, engine);
@@ -916,6 +924,40 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return this.cdpSend(profileId, "Target.closeTarget", { targetId }, sessionId, { safe: true });
   }
 
+  // The driver surface a later change fills in. Until then each refuses by code, so a
+  // client sees a typed error rather than a missing method.
+  async performAction(_profileId: ProfileId, action: DriverAction): Promise<{ ok: true }> {
+    throw notAvailableYet(action.type);
+  }
+
+  async listDownloads(): Promise<DownloadRecord[]> {
+    throw notAvailableYet("list_downloads");
+  }
+
+  async getDownload(): Promise<DownloadFile | null> {
+    throw notAvailableYet("get_download");
+  }
+
+  async setDialogPolicy(): Promise<{ ok: true }> {
+    throw notAvailableYet("set_dialog_policy");
+  }
+
+  async listDialogs(): Promise<OpenDialog[]> {
+    throw notAvailableYet("list_dialogs");
+  }
+
+  async handleDialog(): Promise<{ ok: true }> {
+    throw notAvailableYet("handle_dialog");
+  }
+
+  async captureFrame(): Promise<CapturedFrame> {
+    throw notAvailableYet("captureFrame");
+  }
+
+  async dispatchInput(): Promise<void> {
+    throw notAvailableYet("dispatchInput");
+  }
+
   async closeAll(opts: { gracefulMs?: number; reap?: boolean } = {}): Promise<void> {
     const ids = [...this.running.keys()];
     await Promise.all(ids.map((id) => this.shutdownProfile(id, "user-close", opts)));
@@ -923,7 +965,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
 
   private requireSession(profileId: ProfileId): CdpSession {
     const r = this.running.get(profileId);
-    if (!r) throw new Error(`Profile ${profileId} is not running`);
+    if (!r) throw new MultizenError("PROFILE_NOT_RUNNING", `Profile ${profileId} is not running`);
     return r.session;
   }
 
@@ -932,6 +974,13 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       ? this.customAllocatePort()
       : firstFreePort(() => this.nextPort++);
   }
+}
+
+function notAvailableYet(what: string): MultizenError {
+  return new MultizenError(
+    "UNSUPPORTED_ON_ENGINE",
+    `${what} is not available on CloakBrowser in this build.`,
+  );
 }
 
 function buildCloakBrowserFingerprintArgs(profileId: ProfileId, fp: FingerprintConfig): string[] {
