@@ -1,0 +1,88 @@
+name: Release backfill
+
+# Builds one platform from an existing tag and uploads it into that tag's GitHub Release, for when a
+# build job failed for a reason outside the code, such as a retired runner image. It runs this file
+# from the default branch, so a fixed runner label applies without moving the tag.
+#
+# Each macOS build overwrites latest-mac.yml. After backfilling one, check that the manifest lists
+# both architectures: an Intel Mac handed an arm64 build crashes on startup.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, such as v0.11.0"
+        required: true
+        type: string
+      os:
+        description: "Runner: macos-15 is Apple silicon, macos-15-intel is Intel"
+        required: true
+        type: choice
+        options:
+          - macos-15
+          - macos-15-intel
+          - windows-latest
+          - ubuntu-latest
+      script:
+        description: "Build script in apps/desktop"
+        required: true
+        type: choice
+        options:
+          - build:mac:arm64:publish
+          - build:mac:x64:publish
+          - build:win:publish
+          - build:linux:publish
+
+permissions:
+  contents: write # needed to upload to the GitHub Release
+
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Enable Corepack (Yarn 4)
+        run: |
+          corepack enable
+          corepack prepare yarn@4.5.0 --activate
+
+      - name: Cache Yarn
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.yarn/berry/cache
+            .yarn/cache
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Check the tag matches the app version
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="$(node -p "require('./apps/desktop/package.json').version")"
+          if [[ "v${VERSION}" != "$TAG" ]]; then
+            echo "apps/desktop is ${VERSION}, the tag is ${TAG}" >&2
+            exit 1
+          fi
+
+      - name: Build & publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          SCRIPT: ${{ inputs.script }}
+        run: yarn workspace @multizen/desktop "$SCRIPT"

@@ -106,7 +106,8 @@ jobs:
           # after that, revisit (universal2 build / self-hosted / drop Intel).
           - os: macos-15-intel # Intel runner → x64 native module
             script: build:mac:x64:publish
-          - os: macos-14 # Apple-silicon runner → arm64 native module
+          # macos-14 was retired 2026-11-02.
+          - os: macos-15 # Apple-silicon runner → arm64 native module
             script: build:mac:arm64:publish
           - os: windows-latest
             script: build:win:publish
