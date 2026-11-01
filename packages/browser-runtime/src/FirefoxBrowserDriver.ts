@@ -9,6 +9,7 @@ import {
   type BrowserContext,
   type Dialog,
   type Download,
+  type Frame,
   type Locator,
   type Page,
 } from "playwright-core";
@@ -35,6 +36,7 @@ import { DEFAULT_DIALOG_ANSWERS, MultizenError, PROFILE_DOWNLOADS_DIR } from "@m
 import type { ProfileManager } from "@multizen/profile-manager";
 import { displayEnv } from "./displayMode.ts";
 import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
+import type { EgressPolicy } from "./egressPolicy.ts";
 import { osForDevice } from "./firefoxFingerprint.ts";
 import {
   capLines,
@@ -45,7 +47,7 @@ import {
   tabOfRef,
 } from "./firefoxRefs.ts";
 import { resolveProxyLaunchGeo } from "./launchGeo";
-import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
+import { asEgressBlocked, startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { sanitizeStartUrl } from "./startPage";
 import type { RunningStateChange } from "./ChromiumBrowserDriver.ts";
 import { startXvfb, type XvfbHandle } from "./xvfb.ts";
@@ -80,6 +82,8 @@ const FILE_CHOOSER_TIMEOUT_MS = 5_000;
 const DOCUMENT_READ_TIMEOUT_MS = 5_000;
 const WHEEL_AFTER_MOVE_MS = 150;
 const START_PAGE_COMMIT_MS = 3_000;
+/** The most a failed load waits for its error page: see {@link gotoSettled}. */
+const ERROR_PAGE_COMMIT_MS = 1_000;
 /**
  * Ceiling for one verb, first call to last. Playwright's actions have their own timeouts,
  * but evaluate, title, keyboard and the like have none, and whoever holds the profile
@@ -101,6 +105,22 @@ const PLAYWRIGHT_DOWNLOADS_DIR = ".playwright";
  * with it can only confuse refs into its own elements.
  */
 const DOCUMENT_ID = "performance.timeOrigin";
+/**
+ * What keeps Firefox's traffic where the bridge can see it, proxied or direct: loopback
+ * through the proxy, names resolved at the far end, and nothing that goes around it (DoH,
+ * prefetches and speculative connections, UDP for HTTP/3 and WebTransport).
+ */
+export const EGRESS_FIREFOX_PREFS: Readonly<Record<string, string | number | boolean>> = {
+  "network.proxy.allow_hijacking_localhost": true,
+  "network.proxy.no_proxies_on": "",
+  "network.proxy.socks_remote_dns": true,
+  "network.trr.mode": 5,
+  "network.dns.disablePrefetch": true,
+  "network.prefetch-next": false,
+  "network.http.speculative-parallel-limit": 0,
+  "network.http.http3.enable": false,
+  "network.webtransport.enabled": false,
+};
 
 /** The verbs that run as an operation, and how long each may take. */
 const typing = (textArg: number) => (args: unknown[], deadlineMs: number) =>
@@ -206,6 +226,8 @@ export interface FirefoxBrowserDriverOptions {
   operationDeadlineMs?: number;
   /** Replaces {@link CLOSE_DEADLINE_MS}. */
   closeDeadlineMs?: number;
+  /** Enforcing, every profile runs through the bridge. Otherwise launches stay as they were. */
+  egress?: EgressPolicy;
 }
 
 type PersistentContextOptions = NonNullable<Parameters<typeof firefox.launchPersistentContext>[1]>;
@@ -278,17 +300,47 @@ function minimalChildEnv(): Record<string, string> {
 }
 
 /**
+ * A failed load is reported first, and Firefox commits its error page a moment later. That
+ * commit would abort the client's next navigate ("interrupted by another navigation") or
+ * destroy the context of its next evaluate, so a failure comes back only once it has happened.
+ * A timeout or a download has no error page coming.
+ */
+async function gotoSettled(
+  page: Pick<Page, "goto" | "on" | "off">,
+  url: string,
+  options?: Parameters<Page["goto"]>[1],
+): Promise<void> {
+  let sawCommit = (): void => {};
+  const commit = new Promise<void>((resolve) => {
+    sawCommit = resolve;
+  });
+  const onNavigated = (frame: Frame): void => {
+    if (!frame.parentFrame()) sawCommit();
+  };
+  page.on("framenavigated", onNavigated);
+  try {
+    await page.goto(url, options);
+  } catch (e) {
+    const noErrorPage = (e as Error | undefined)?.name === "TimeoutError" || /Download is starting/.test(errorText(e));
+    if (!noErrorPage) await Promise.race([commit, delay(ERROR_PAGE_COMMIT_MS)]);
+    throw e;
+  } finally {
+    page.off("framenavigated", onNavigated);
+  }
+}
+
+/**
  * Starts the first tab on its way to the start page, and waits for that to commit. A commit
  * arriving after a client's own navigate aborts it with "interrupted by another navigation",
  * which is what a client calling navigate right after launch_profile would otherwise get.
  * Only the commit, and only for so long: a slow start page loads on in the background.
  */
 export async function openStartPage(
-  page: Pick<Page, "goto">,
+  page: Pick<Page, "goto" | "on" | "off">,
   url: string,
   budgetMs = START_PAGE_COMMIT_MS,
 ): Promise<void> {
-  const committed = page.goto(url, { waitUntil: "commit" }).catch(() => {});
+  const committed = gotoSettled(page, url, { waitUntil: "commit" }).catch(() => {});
   let timer: NodeJS.Timeout | undefined;
   await Promise.race([
     committed,
@@ -321,6 +373,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   private readonly refBase: number | undefined;
   private readonly operationDeadlineMs: number;
   private readonly closeDeadlineMs: number;
+  private readonly egress?: EgressPolicy;
 
   /**
    * Bounds every verb in one place, rather than in each body, so nothing an agent
@@ -351,6 +404,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     this.refBase = opts.refBase;
     this.operationDeadlineMs = opts.operationDeadlineMs ?? OPERATION_DEADLINE_MS;
     this.closeDeadlineMs = opts.closeDeadlineMs ?? CLOSE_DEADLINE_MS;
+    this.egress = opts.egress;
   }
 
   override on<K extends keyof FirefoxDriverEvents>(event: K, listener: FirefoxDriverEvents[K]): this {
@@ -441,6 +495,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   private async doLaunch(profileId: ProfileId, displayMode: DisplayMode): Promise<LaunchedProfile> {
     const profile = this.profileManager.get(profileId);
     if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
+    // First of all: the geo probe below connects to this proxy from this process.
+    if (profile.proxy) await this.egress?.assertProxyAllowed(profile.proxy);
     this.profileManager.markOpened(profileId);
 
     const userDataDir = this.browserDataDir(profile);
@@ -454,11 +510,13 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
 
     // Route a configured proxy through the local SOCKS5 bridge (handles upstream
     // auth + keeps DNS remote), exactly like the Chromium engine. The browser
-    // then talks to a credential-free localhost endpoint.
+    // then talks to a credential-free localhost endpoint. Under an enforcing egress
+    // policy a direct profile comes through it too, to have its connections checked.
+    const enforcing = this.egress?.enforced === true;
     let proxy: { server: string } | undefined;
     let hasProxyBridge = false;
-    if (profile.proxy) {
-      const localProxyUrl = await startBridgeForProfile(profileId, profile.proxy);
+    if (profile.proxy || enforcing) {
+      const localProxyUrl = await startBridgeForProfile(profileId, profile.proxy ?? null, this.egress);
       proxy = { server: localProxyUrl };
       hasProxyBridge = true;
     }
@@ -498,7 +556,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     // geoip auto-detection would run from the HOST (not through the proxy) and
     // pin the real IP — so the safe move is to disable WebRTC on proxied
     // profiles, matching the Chromium engine's non-proxied-UDP hardening. A page
-    // otherwise leaks the operator's real address via STUN outside the proxy.
+    // otherwise leaks the operator's real address via STUN outside the proxy. A direct
+    // profile under an egress policy gets the same, as the bridge can't see UDP.
     const config: Record<string, unknown> = {
       ...camoufoxDisplayOptions(displayMode, xvfb),
       exclude_addons: ["UBO"],
@@ -508,6 +567,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
         : {}),
     };
 
+    const extraPrefs = enforcing ? { ...this.extraPrefs, ...EGRESS_FIREFOX_PREFS } : this.extraPrefs;
     let context: BrowserContext;
     try {
       const opts = (await launchOptions(
@@ -523,7 +583,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
           downloadsPath,
           ...(proxy ? { proxy } : {}),
           ...(this.launchExtras ? { launchExtras: this.launchExtras } : {}),
-          ...(this.extraPrefs ? { extraPrefs: this.extraPrefs } : {}),
+          ...(extraPrefs ? { extraPrefs } : {}),
         }),
       );
     } catch (e) {
@@ -1002,8 +1062,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     const r = this.require(profileId);
     const { page, pageId } = await this.foregroundTab(r);
     return this.pageOp(r, pageId, async () => {
-      await page.goto(url).catch((e: unknown) => {
-        throw navigationError(url, e);
+      await gotoSettled(page, url).catch((e: unknown) => {
+        throw asEgressBlocked(profileId, navigationError(url, e));
       });
       return { url: page.url() };
     });

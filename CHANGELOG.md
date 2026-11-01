@@ -62,6 +62,22 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   launch fails with `SANDBOX_UNAVAILABLE` and what to do about it. Starting as root, or on a
   data directory it can't write to or run from, is refused at once. Under Xvfb and in headless
   the first page has focus, and under Xvfb its window has the persona's exact size.
+- **`multizen-server`: an egress policy.** `--egress-policy block-private`, a server's default,
+  keeps its browsers off private, loopback, link-local, CGNAT, multicast and cloud metadata
+  addresses, in any spelling: IPv4-mapped IPv6, NAT64, `2852039166`, `0x7f.1`. Every profile runs
+  through the local bridge, which checks each connection a browser opens, so this covers
+  redirects, `fetch`, images, iframes and WebSockets, and loopback no longer goes around it. A
+  direct profile's names resolve in the bridge and only the addresses checked are dialed, which
+  closes DNS rebinding. A proxied profile still resolves nothing locally: its literal addresses
+  and loopback and metadata names are judged, and its proxy's own address at `create_profile`,
+  `update_profile` and launch. `navigate` and `new_tab` to such an address, a navigation
+  redirected to one and a proxy at one give `EGRESS_BLOCKED`. WebRTC and WebTransport are off the
+  network on both engines. `--egress-allow` makes exceptions (an IP, a CIDR, a name, `*.suffix`,
+  each with an optional `:port`), and `--egress-policy allow-all` turns the policy off. The desktop
+  has no policy and keeps its launch flags. **A token with the `raw` group can defeat this**:
+  `cdp_send` and `cdp_send_no_safety` are not gated, and on CloakBrowser a browser context from
+  `Target.createBrowserContext` with `proxyServer: "direct://"` was measured reaching a private
+  address. `token create` doesn't give `raw` unless asked.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.
@@ -108,6 +124,10 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 - A Streamable HTTP client that disappeared without ending its session left its queued
   calls in line, and they fired later on whatever the page showed by then.
+- On Camoufox, the call after a failed `navigate` could fail by itself: Firefox commits its
+  error page just after reporting the failure, which aborted the next `navigate` with
+  "interrupted by another navigation" or destroyed the context of the next `evaluate_js`. A failed
+  `navigate` or start page now comes back once that page has committed, within a second.
 - On Camoufox, a `navigate` right after `launch_profile` could fail with "interrupted by
   another navigation" when the start page committed after it. A launch now waits for the
   start page to commit, for up to 3 s.

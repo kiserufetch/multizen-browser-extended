@@ -123,6 +123,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
         serverVersion: SERVER_VERSION,
         getDefaultEngine: runtime.getDefaultEngine,
         uploadsRoot: config.uploadsRoot,
+        egress: runtime.egress,
       }).server,
   });
   await http.start();
@@ -146,6 +147,8 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     defaultEngine: runtime.getDefaultEngine(),
     displayMode: config.headless ? "headless (forced)" : config.displayMode,
     maxBrowsers: config.maxBrowsers,
+    egressPolicy: config.egressPolicy,
+    egressAllow: config.egressAllow,
     version: SERVER_VERSION,
   });
 }

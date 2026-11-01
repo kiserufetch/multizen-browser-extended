@@ -34,7 +34,8 @@ import {
 } from "@multizen/types";
 import { CdpSession } from "@multizen/cdp-driver";
 import { EngineRegistry } from "./engineRegistry.ts";
-import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
+import type { EgressPolicy } from "./egressPolicy.ts";
+import { asEgressBlocked, startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { resolveProxyLaunchGeo } from "./launchGeo";
 import { companionDir } from "./extensions/companion";
 import { resolveLoadDir } from "./extensions/extensionStore.ts";
@@ -236,6 +237,12 @@ export interface ChromiumBrowserDriverOptions {
    * until an agent asks.
    */
   armDownloadsAtLaunch?: boolean;
+  /**
+   * Where a browser may connect. Not given, or `allow-all`, every launch has the flags it
+   * always had. Enforcing, every profile runs through the bridge, which checks each
+   * connection, and loopback no longer skips it.
+   */
+  egress?: EgressPolicy;
 }
 
 export type RunningStateChange =
@@ -281,6 +288,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private readonly customAllocatePort?: () => Promise<number>;
   private readonly extraDisabledFeatures: readonly string[];
   private readonly armDownloadsAtLaunch: boolean;
+  private readonly egress?: EgressPolicy;
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     super();
@@ -299,6 +307,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     this.customAllocatePort = opts.allocatePort;
     this.extraDisabledFeatures = opts.extraDisabledFeatures ?? [];
     this.armDownloadsAtLaunch = opts.armDownloadsAtLaunch ?? false;
+    this.egress = opts.egress;
   }
 
   override on<K extends keyof DriverEvents>(event: K, listener: DriverEvents[K]): this {
@@ -346,6 +355,9 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   ): Promise<LaunchedProfile> {
     const profile = this.profileManager.get(profileId);
     if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
+
+    // First of all: the geo probe below connects to this proxy from this process.
+    if (profile.proxy) await this.egress?.assertProxyAllowed(profile.proxy);
 
     // Update `last_opened_at` for every launch, regardless of trigger
     // (UI button, MCP tool, command palette). Done early so even a
@@ -533,7 +545,9 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       // chained). Chromium with --proxy-server=socks5://… does *remote*
       // DNS by spec, so the egress IP becomes the only resolver test
       // sites observe.
-      const localProxyUrl = await startBridgeForProfile(profileId, profile.proxy);
+      const localProxyUrl = await startBridgeForProfile(profileId, profile.proxy, this.egress, {
+        refuseByClosing: true,
+      });
       args.push(`--proxy-server=${localProxyUrl}`);
       // WebRTC leaks the *real* public IP via STUN even when HTTP traffic
       // is proxied — STUN uses UDP and bypasses HTTP proxies by default.
@@ -591,7 +605,19 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       args.push("--disable-component-update");
       args.push("--disable-domain-reliability");
       args.push("--disable-client-side-phishing-detection");
+    } else if (this.egress?.enforced) {
+      // A direct profile only needs the bridge in its path, and WebRTC kept out of what
+      // the bridge can't see. Nothing else from the block above: that set changes the
+      // TLS fingerprint, and would split direct profiles from a desktop's.
+      const localProxyUrl = await startBridgeForProfile(profileId, null, this.egress, {
+        refuseByClosing: true,
+      });
+      args.push(`--proxy-server=${localProxyUrl}`);
+      args.push("--webrtc-ip-handling-policy=disable_non_proxied_udp");
     }
+    // Chromium sends loopback straight past any proxy unless told not to, which would
+    // leave a page this machine's own ports: this server's, the CDP port, the bridges'.
+    if (this.egress?.enforced) args.push("--proxy-bypass-list=<-loopback>");
 
     // Single `--disable-features=` for the whole launch (see disableFeatures).
     args.push(`--disable-features=${disableFeatures.join(",")}`);
@@ -1017,7 +1043,9 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
 
   async navigate(profileId: ProfileId, url: string): Promise<{ url: string }> {
     const session = this.requireSession(profileId);
-    const result = await session.navigate(url);
+    const result = await session.navigate(url).catch((e: unknown) => {
+      throw asEgressBlocked(profileId, e);
+    });
     return { url: result.url };
   }
 

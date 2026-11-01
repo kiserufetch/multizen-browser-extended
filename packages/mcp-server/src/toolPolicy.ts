@@ -22,6 +22,8 @@ export interface ToolPolicy {
   humanGate: HumanGate;
   /** The argument holding a URL the browser will open. */
   urlArg?: string;
+  /** The argument holding a proxy the browser, and this process, will connect to. */
+  proxyArg?: string;
   /** Ends the profile for everyone queued: they are told so rather than left to wait. */
   preempts?: boolean;
   /** Checks a lease itself, because a holder that reconnected has to get through. */
@@ -107,9 +109,9 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
   release_profile: { group: "act", annotations: LOCAL_CHANGE, scope: "profile", ...unlocked, ownLeaseCheck: true },
 
   // profile-admin
-  create_profile: { group: "profile-admin", annotations: hints(false, false, false, false), scope: "none", ...unlocked, needsAllProfiles: true },
+  create_profile: { group: "profile-admin", annotations: hints(false, false, false, false), scope: "none", ...unlocked, needsAllProfiles: true, proxyArg: "proxy" },
   // Only the database: a live browser keeps what it launched with, so nothing to queue behind.
-  update_profile: { group: "profile-admin", annotations: hints(false, true, true, false), ...pageWrite, lock: "none" },
+  update_profile: { group: "profile-admin", annotations: hints(false, true, true, false), ...pageWrite, lock: "none", proxyArg: "proxy" },
   delete_profile: { group: "profile-admin", annotations: hints(false, true, true, false), ...pageWrite },
 
   // raw

@@ -10,8 +10,10 @@ Usage:
                         [--allowed-hosts <name[:port],...>] [--allowed-origins <origin,...>]
                         [--public-url <url>] [--trust-proxy]
                         [--session-idle-ttl-ms <ms>] [--max-sessions <n>]
+                        [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
   multizen-server stdio [--data-dir <dir>] [--default-engine cloakbrowser|camoufox]
                         [--uploads-root <dir>] [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
+                        [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
   multizen-server stdio --connect <url> [--token-file <path>]
   multizen-server profile export <profile-id> [--out <file.mzar>] [--passphrase-file <path>] [--data-dir <dir>]
   multizen-server profile import <file.mzar> [--passphrase-file <path>] [--data-dir <dir>]
@@ -28,7 +30,7 @@ MULTIZEN_BROWSER_QUEUE_TIMEOUT_MS, MULTIZEN_ARCHIVE_PASSPHRASE, MULTIZEN_ALLOW_R
 MULTIZEN_ALLOW_INSECURE_REMOTE=1, MULTIZEN_TLS_CERT, MULTIZEN_TLS_KEY, MULTIZEN_ALLOWED_HOSTS,
 MULTIZEN_ALLOWED_ORIGINS, MULTIZEN_PUBLIC_URL, MULTIZEN_TRUST_PROXY=1,
 MULTIZEN_SESSION_IDLE_TTL_MS, MULTIZEN_MAX_SESSIONS, MULTIZEN_SECRET_KEY,
-MULTIZEN_SECRET_KEY_NEW (secrets rotate only).
+MULTIZEN_SECRET_KEY_NEW (secrets rotate only), MULTIZEN_EGRESS_POLICY, MULTIZEN_EGRESS_ALLOW.
 
 --max-browsers counts both engines and defaults to what the machine's memory allows.
 
@@ -36,6 +38,12 @@ MULTIZEN_SECRET_KEY_NEW (secrets rotate only).
 reverse proxy, stay on loopback and name the proxy's host with --allowed-hosts or --public-url.
 Without --no-auth (loopback only) serve needs a token: the first start creates the owner's in
 <data-dir>/owner-token. token create's default tools are read and act, and --panel adds operator.
+
+--egress-policy block-private, the default, keeps browsers off private, loopback, link-local and
+metadata addresses, at their network level and with EGRESS_BLOCKED from navigate, new_tab and a proxy
+pointing at one. --egress-allow names exceptions: an IP, a CIDR, a name or *.suffix, each with an
+optional :port. A token with the raw group can defeat this policy: cdp_send can open a browser
+context with its own proxy. Don't give raw to anything you are using this policy against.
 
 Proxy passwords are encrypted with MULTIZEN_SECRET_KEY (hex or base64, 32 bytes) or
 <data-dir>/secret.key, which is created if neither exists.

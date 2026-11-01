@@ -137,6 +137,44 @@ test("Camoufox's occlusion tracker is off on Windows only, and reaches the route
   });
 });
 
+test("the egress policy is one object, known to both drivers and to the tools", async () => {
+  const dir = dataDirWithEngine();
+  const runtime = await buildRuntime({
+    dataDir: dir,
+    egressPolicy: "block-private",
+    egressAllow: ["127.0.0.1:1"],
+  } as Parameters<typeof buildRuntime>[0]);
+  try {
+    assert.equal(runtime.egress.enforced, true);
+    const router = runtime.driver as unknown as {
+      chromiumDriver: { egress: unknown };
+      firefoxOptions: { egress: unknown };
+    };
+    assert.equal(router.chromiumDriver.egress, runtime.egress);
+    assert.equal(router.firefoxOptions.egress, runtime.egress);
+    assert.equal(runtime.egress.checkProxied("127.0.0.1", 1).allowed, true);
+    assert.equal(runtime.egress.checkProxied("127.0.0.1", 2).allowed, false);
+  } finally {
+    await runtime.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test("--egress-policy allow-all: the drivers have nothing to enforce", async () => {
+  const dir = dataDirWithEngine();
+  const runtime = await buildRuntime({
+    dataDir: dir,
+    egressPolicy: "allow-all",
+    egressAllow: [],
+  } as Parameters<typeof buildRuntime>[0]);
+  try {
+    assert.equal(runtime.egress.enforced, false);
+  } finally {
+    await runtime.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 test("a launch during an engine install is refused, not left blocking a client", async () => {
   await withRuntime(async (runtime) => {
     assert.equal(

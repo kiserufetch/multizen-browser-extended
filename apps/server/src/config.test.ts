@@ -189,11 +189,50 @@ test("stdio: local by default, --connect switches to the relay", () => {
     defaultEngine: undefined,
     displayMode: "auto",
     headless: false,
+    egressPolicy: "block-private",
+    egressAllow: [],
   });
   assert.deepEqual(
     parseStdioConfig(["--connect", "http://127.0.0.1:7777/mcp", "--token-file", "t"], {}, LINUX),
     { kind: "connect", url: "http://127.0.0.1:7777/mcp", tokenFile: "t" },
   );
+});
+
+test("egress: a server blocks private addresses unless told otherwise; flag over env", () => {
+  for (const parse of [parseServeConfig, parseStdioConfig]) {
+    const defaults = parse([], {}, LINUX) as ReturnType<typeof parseServeConfig>;
+    assert.equal(defaults.egressPolicy, "block-private");
+    assert.deepEqual(defaults.egressAllow, []);
+    const env = { MULTIZEN_EGRESS_POLICY: "allow-all", MULTIZEN_EGRESS_ALLOW: "10.0.0.1, db.lan:5432" };
+    const fromEnv = parse([], env, LINUX) as ReturnType<typeof parseServeConfig>;
+    assert.equal(fromEnv.egressPolicy, "allow-all");
+    assert.deepEqual(fromEnv.egressAllow, ["10.0.0.1", "db.lan:5432"]);
+    const flags = parse(
+      ["--egress-policy", "block-private", "--egress-allow", "*.lan,10.0.0.0/8,127.0.0.1:80,[::1]:80,fd00::/8"],
+      env,
+      LINUX,
+    ) as ReturnType<typeof parseServeConfig>;
+    assert.equal(flags.egressPolicy, "block-private");
+    assert.deepEqual(flags.egressAllow, ["*.lan", "10.0.0.0/8", "127.0.0.1:80", "[::1]:80", "fd00::/8"]);
+  }
+});
+
+for (const [name, argv, pattern] of [
+  ["an unknown policy", ["--egress-policy", "block"], /--egress-policy must be one of allow-all, block-private/],
+  ["a bad allow entry", ["--egress-allow", "10.0.0.0/33"], /--egress-allow takes/],
+  ["a wildcard for everything", ["--egress-allow", "*"], /--egress-allow takes/],
+] as Array<[string, string[], RegExp]>) {
+  test(`egress: ${name} is a usage error`, () => {
+    for (const parse of [parseServeConfig, parseStdioConfig]) {
+      assert.throws(() => parse(argv, {}, LINUX), (e: unknown) => e instanceof UsageError && pattern.test(e.message));
+    }
+  });
+}
+
+test("--connect runs no browsers, so the egress flags don't apply", () => {
+  for (const flag of [["--egress-policy", "allow-all"], ["--egress-allow", "10.0.0.1"]]) {
+    assert.throws(() => parseStdioConfig(["--connect", "http://x", ...flag], {}, LINUX), /runs no browsers/);
+  }
 });
 
 test("stdio --connect: a bare origin means /mcp", () => {

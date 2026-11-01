@@ -4,6 +4,7 @@ import { defaultSettingsPath, SettingsStore } from "@multizen/settings-store";
 import { resolveEngine, type BrowserEngine, type ChromiumStatus, type ProfileId } from "@multizen/types";
 import {
   ChromiumBrowserDriver,
+  EgressPolicy,
   EngineRegistry,
   EngineRouter,
   randomFreePort,
@@ -160,6 +161,8 @@ export interface ServerRuntime {
   activityLog: ActivityLog;
   /** State every MCP session shares. */
   shared: SharedMcpState;
+  /** What the drivers enforce on connections, for tools to refuse up front. */
+  egress: EgressPolicy;
   getDefaultEngine: () => BrowserEngine;
   /**
    * Starts fetching the default engine in the background, so a first run's
@@ -191,7 +194,14 @@ export function enginesInUse(
 export async function buildRuntime(
   cfg: Pick<
     ServerConfig,
-    "dataDir" | "defaultEngine" | "maxBrowsers" | "browserQueueTimeoutMs" | "displayMode" | "headless"
+    | "dataDir"
+    | "defaultEngine"
+    | "maxBrowsers"
+    | "browserQueueTimeoutMs"
+    | "displayMode"
+    | "headless"
+    | "egressPolicy"
+    | "egressAllow"
   >,
 ): Promise<ServerRuntime> {
   const { extensionStoreRoot } = dataPaths(cfg.dataDir);
@@ -205,6 +215,10 @@ export async function buildRuntime(
   const host = createNodeHost(cfg.dataDir);
   const engineRegistry = new EngineRegistry(host);
   engineRegistry.on("status", engineProgressLogger());
+  const egress = new EgressPolicy({ mode: cfg.egressPolicy, allow: cfg.egressAllow });
+  if (cfg.egressPolicy === "allow-all") {
+    log.warn("egress policy allow-all: pages can reach private addresses, this machine's ports and cloud metadata");
+  }
 
   const chromiumDriver = new ChromiumBrowserDriver({
     host,
@@ -218,6 +232,7 @@ export async function buildRuntime(
     armDownloadsAtLaunch: true,
     requireSandbox: true,
     ownsDataDir: true,
+    egress,
     onBrowserStderr: (pid, text) =>
       log.debug("browser stderr", { pid, text: text.slice(0, BROWSER_STDERR_MAX_CHARS) }),
   });
@@ -226,7 +241,7 @@ export async function buildRuntime(
     engineRegistry,
     getDefaultEngine,
     chromiumDriver,
-    firefoxOptions: { ...SERVER_FIREFOX_OPTIONS, extraPrefs: serverFirefoxPrefs(process.platform) },
+    firefoxOptions: { ...SERVER_FIREFOX_OPTIONS, extraPrefs: serverFirefoxPrefs(process.platform), egress },
     engineNotReady: "reject",
     maxBrowsers: cfg.maxBrowsers,
     browserQueueTimeoutMs: cfg.browserQueueTimeoutMs,
@@ -279,6 +294,7 @@ export async function buildRuntime(
     driver,
     activityLog,
     shared: createSharedMcpState(),
+    egress,
     getDefaultEngine,
     startEngineBootstrap,
     close,

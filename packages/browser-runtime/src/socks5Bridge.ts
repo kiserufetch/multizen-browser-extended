@@ -1,7 +1,8 @@
-import { createServer, type Socket, type AddressInfo } from "node:net";
+import { createServer, isIP, type LookupFunction, type Socket, type AddressInfo } from "node:net";
 import { connect as netConnect } from "node:net";
 import { SocksClient } from "socks";
-import type { ProfileId, ProxyConfig } from "@multizen/types";
+import { MultizenError, type ProfileId, type ProxyConfig } from "@multizen/types";
+import { egressBlocked, type EgressDecision, type EgressPolicy } from "./egressPolicy.ts";
 
 /**
  * Local SOCKS5 → upstream-proxy bridge, per profile.
@@ -26,13 +27,18 @@ import type { ProfileId, ProxyConfig } from "@multizen/types";
  *
  * The host string from the SOCKS5 CONNECT is forwarded as-is — no local
  * DNS resolution happens on the MultiZen process side either.
+ *
+ * Under an enforcing egress policy every profile comes through here, and every
+ * CONNECT is checked before anything is dialed. With `upstream === null` (a direct
+ * profile) the bridge is the last hop: it resolves the name itself and dials only
+ * the addresses it checked. A proxied profile still resolves nothing here.
  */
 
 interface BridgeHandle {
   /** localhost port Chromium connects to */
   port: number;
-  /** Upstream proxy config (kept so the GUI can render diagnostics) */
-  upstream: ProxyConfig;
+  /** Upstream proxy config (kept so the GUI can render diagnostics). Null: direct. */
+  upstream: ProxyConfig | null;
   close: () => Promise<void>;
 }
 
@@ -42,21 +48,83 @@ const byProfile = new Map<ProfileId, BridgeHandle>();
  *  proxy fails EVERY CONNECT (e.g. "403 Forbidden"), which floods stderr with
  *  identical lines. Log each distinct message at most once per 30s. */
 const bridgeWarnAt = new Map<string, number>();
+/** Under an egress policy a message names a target, which a page chooses. */
+const BRIDGE_WARN_KEPT = 1_024;
 function warnBridgeThrottled(msg: string): void {
   const now = Date.now();
   if (now - (bridgeWarnAt.get(msg) ?? 0) < 30_000) return;
+  if (bridgeWarnAt.size >= BRIDGE_WARN_KEPT) bridgeWarnAt.clear();
   bridgeWarnAt.set(msg, now);
   console.warn("[multizen] socks5 bridge:", msg);
 }
 
+/** How long a navigation's failure can still be put down to one the bridge recorded. */
+const FAILURE_WINDOW_MS = 2_000;
+
+interface RecordedFailure {
+  /** The policy refused it. Otherwise it was allowed, and just couldn't be reached. */
+  blocked: boolean;
+  target: string;
+  reason: string;
+  at: number;
+}
+
+const lastFailure = new Map<ProfileId, RecordedFailure>();
+
+/**
+ * What a load reports when the bridge ended its CONNECT: see {@link refuseConnect}. On
+ * Chromium, connected and closed. On Firefox, a SOCKS failure, which it calls a plain
+ * NS_ERROR_CONNECTION_REFUSED whichever reply it got (measured on Camoufox), or, when its
+ * error page commits before the failure is reported, an interruption by that page.
+ */
+const ENDED_BY_BRIDGE =
+  /ERR_SOCKET_NOT_CONNECTED|ERR_CONNECTION_(?:CLOSED|RESET|ABORTED)|ERR_EMPTY_RESPONSE|ERR_SOCKS_|ERR_PROXY_|NS_ERROR_CONNECTION_REFUSED|NS_ERROR_UNKNOWN_HOST|NS_ERROR_PROXY_|NS_ERROR_SOCKS_|NS_ERROR_UNKNOWN_PROXY|interrupted by another navigation/;
+
+/**
+ * A navigation that failed because the bridge refused one of its connections is
+ * EGRESS_BLOCKED, whichever hop it was: this is what catches a redirect, which no check
+ * of the URL could see. One the bridge couldn't reach stays NAVIGATION_FAILED, and says what
+ * really happened, which the browser can't know. Anything else stays what it was.
+ */
+export function asEgressBlocked(profileId: ProfileId, e: unknown): unknown {
+  const failure = lastFailure.get(profileId);
+  if (!failure || Date.now() - failure.at > FAILURE_WINDOW_MS) return e;
+  if (!ENDED_BY_BRIDGE.test(e instanceof Error ? e.message : String(e))) return e;
+  if (failure.blocked) {
+    return egressBlocked(`The egress policy blocked ${failure.target} during this navigation: ${failure.reason}`, {
+      target: failure.target,
+    });
+  }
+  if (e instanceof MultizenError && e.code === "NAVIGATION_FAILED") {
+    return new MultizenError("NAVIGATION_FAILED", `${e.message} (${failure.target}: ${failure.reason})`, {
+      details: { ...e.details, target: failure.target, reason: failure.reason },
+    });
+  }
+  return e;
+}
+
 export async function startBridgeForProfile(
   profileId: ProfileId,
-  upstream: ProxyConfig,
+  upstream: ProxyConfig | null,
+  policy?: EgressPolicy,
+  opts: { refuseByClosing?: boolean } = {},
 ): Promise<string> {
   const existing = byProfile.get(profileId);
   if (existing) return `socks5://127.0.0.1:${existing.port}`;
 
-  const handle = await startBridge(upstream);
+  const handle = await startBridge(
+    upstream,
+    policy?.enforced
+      ? {
+          policy,
+          refuseByClosing: opts.refuseByClosing ?? false,
+          onFailure: (blocked, target, reason) => {
+            lastFailure.set(profileId, { blocked, target, reason, at: Date.now() });
+            if (blocked) warnBridgeThrottled(`egress policy blocked ${target}: ${reason}`);
+          },
+        }
+      : undefined,
+  );
   byProfile.set(profileId, handle);
   return `socks5://127.0.0.1:${handle.port}`;
 }
@@ -65,6 +133,7 @@ export async function stopBridgeForProfile(profileId: ProfileId): Promise<void> 
   const handle = byProfile.get(profileId);
   if (!handle) return;
   byProfile.delete(profileId);
+  lastFailure.delete(profileId);
   await handle.close().catch(() => {});
 }
 
@@ -73,7 +142,14 @@ export async function stopAllBridges(): Promise<void> {
   await Promise.all(ids.map((id) => stopBridgeForProfile(id)));
 }
 
-async function startBridge(upstream: ProxyConfig): Promise<BridgeHandle> {
+interface BridgeEgress {
+  policy: EgressPolicy;
+  /** How this browser has to be told: see {@link refuseConnect}. */
+  refuseByClosing: boolean;
+  onFailure: (blocked: boolean, target: string, reason: string) => void;
+}
+
+async function startBridge(upstream: ProxyConfig | null, egress?: BridgeEgress): Promise<BridgeHandle> {
   // Track accepted client sockets so close() can forcibly destroy them.
   // net.Server has no closeAllConnections(), and a still-open proxied socket
   // keeps server.close()'s callback pending forever — which would hang the
@@ -85,7 +161,7 @@ async function startBridge(upstream: ProxyConfig): Promise<BridgeHandle> {
     sock.on("error", () => {
       /* swallow — pipes / close handlers will tear down */
     });
-    handleSocksClient(sock, upstream).catch((e: unknown) => {
+    handleSocksClient(sock, upstream, egress).catch((e: unknown) => {
       const msg = (e as Error).message;
       if (
         /socket closed|ECONNRESET|EPIPE|This socket is closed|read ECONNRESET/i.test(
@@ -128,7 +204,11 @@ async function startBridge(upstream: ProxyConfig): Promise<BridgeHandle> {
   };
 }
 
-async function handleSocksClient(client: Socket, upstream: ProxyConfig): Promise<void> {
+async function handleSocksClient(
+  client: Socket,
+  upstream: ProxyConfig | null,
+  egress?: BridgeEgress,
+): Promise<void> {
   client.setNoDelay(true);
   const reader = new BufferedReader(client);
 
@@ -163,7 +243,7 @@ async function handleSocksClient(client: Socket, upstream: ProxyConfig): Promise
     const b = await reader.read(16);
     const groups: string[] = [];
     for (let i = 0; i < 16; i += 2) groups.push(b.readUInt16BE(i).toString(16));
-    targetHost = `[${groups.join(":")}]`;
+    targetHost = groups.join(":");
   } else {
     client.write(replyBuffer(0x08));
     client.end();
@@ -172,23 +252,41 @@ async function handleSocksClient(client: Socket, upstream: ProxyConfig): Promise
   const portBuf = await reader.read(2);
   const targetPort = portBuf.readUInt16BE(0);
 
-  // 3. Open the upstream tunnel.
+  // 3. The policy's word on this CONNECT, before anything is dialed.
+  const decision = egress
+    ? await checkConnect(egress.policy, targetHost, targetPort, upstream)
+    : undefined;
+  if (decision && !decision.allowed) {
+    egress?.onFailure(!decision.unresolved, `${targetHost}:${targetPort}`, decision.reason ?? "");
+    // Host unreachable, or connection not allowed by ruleset.
+    refuseConnect(client, decision.unresolved ? 0x04 : 0x02, egress);
+    return;
+  }
+  const pinned = decision?.connectTo && pinnedLookup(decision.connectTo);
+
+  // 4. Open the upstream tunnel, or for a direct profile the connection itself.
   let upstreamSock: Socket;
   try {
-    upstreamSock =
-      upstream.type === "socks5"
-        ? await connectViaSocks5(targetHost, targetPort, upstream)
-        : await connectViaHttpConnect(targetHost, targetPort, upstream);
+    upstreamSock = !upstream
+      ? await openTcp(targetHost, targetPort, pinned)
+      : upstream.type === "socks5"
+        ? await connectViaSocks5(targetHost, targetPort, upstream, pinned)
+        : await connectViaHttpConnect(targetHost, targetPort, upstream, pinned);
   } catch (e) {
-    client.write(replyBuffer(0x05)); // connection refused
-    client.end();
+    egress?.onFailure(false, `${targetHost}:${targetPort}`, (e as Error).message);
+    refuseConnect(client, 0x05, egress); // connection refused
     throw e;
   }
+  // It may have given up while this connected, and then nothing would end this connection.
+  if (client.destroyed) {
+    upstreamSock.destroy();
+    return;
+  }
 
-  // 4. Tell the SOCKS5 client we're ready.
+  // 5. Tell the SOCKS5 client we're ready.
   client.write(replyBuffer(0x00));
 
-  // 5. Hand control over to byte-piping. Detach the buffered reader so
+  // 6. Hand control over to byte-piping. Detach the buffered reader so
   //    Chromium's TLS bytes flow straight through; flush anything we
   //    already buffered.
   upstreamSock.setNoDelay(true);
@@ -206,6 +304,49 @@ async function handleSocksClient(client: Socket, upstream: ProxyConfig): Promise
   client.once("close", cleanup);
   upstreamSock.once("error", cleanup);
   upstreamSock.once("close", cleanup);
+}
+
+/**
+ * Ends a CONNECT that won't go anywhere. Normally with its SOCKS failure reply. But on any of
+ * those Chromium reconnects to the proxy at once, without backing off, some 3000 times a second
+ * for anything from 100 ms to 6 s per request, and a late reply only makes the request hang
+ * longer (measured on CloakBrowser 146). Under a policy a page could point any number of
+ * requests at that, each attempt another lookup or connection from here. There, "connected"
+ * and then closed ends a request at once, after one attempt, with nothing dialed. Firefox gets
+ * the reply: it doesn't spin on one, trying a refused fetch twice where it tries a closed one
+ * twenty times (measured on Camoufox).
+ */
+function refuseConnect(client: Socket, status: number, egress?: BridgeEgress): void {
+  client.write(replyBuffer(egress?.refuseByClosing ? 0x00 : status));
+  client.end();
+}
+
+/**
+ * For a proxied profile the target gets the no-lookup check, and what is dialed is the
+ * upstream proxy: its own address is checked each time, as a name can change its answer.
+ */
+async function checkConnect(
+  policy: EgressPolicy,
+  host: string,
+  port: number,
+  upstream: ProxyConfig | null,
+): Promise<EgressDecision> {
+  if (!upstream) return policy.checkDirect(host, port);
+  const target = policy.checkProxied(host, port);
+  return target.allowed ? policy.checkUpstream(upstream) : target;
+}
+
+/**
+ * Makes a connection go to the addresses just checked and nowhere else. Node then tries
+ * them in turn, as for any name, and the OS resolver isn't asked again: its second answer
+ * is the whole of a DNS rebinding attack. A literal host never reaches a lookup.
+ */
+function pinnedLookup(addresses: readonly string[]): LookupFunction {
+  const all = addresses.map((address) => ({ address, family: isIP(address) }));
+  return (_host, options, callback) => {
+    if (options.all) callback(null, all);
+    else callback(null, all[0]!.address, all[0]!.family);
+  };
 }
 
 function replyBuffer(status: number): Buffer {
@@ -227,12 +368,14 @@ async function connectViaHttpConnect(
   targetHost: string,
   targetPort: number,
   upstream: ProxyConfig,
+  pinned?: LookupFunction,
 ): Promise<Socket> {
-  const sock = await openTcp(upstream.host, upstream.port);
+  const sock = await openTcp(upstream.host, upstream.port, pinned);
   const reader = new BufferedReader(sock);
+  const authority = isIP(targetHost) === 6 ? `[${targetHost}]` : targetHost;
   const lines: string[] = [
-    `CONNECT ${targetHost}:${targetPort} HTTP/1.1`,
-    `Host: ${targetHost}:${targetPort}`,
+    `CONNECT ${authority}:${targetPort} HTTP/1.1`,
+    `Host: ${authority}:${targetPort}`,
   ];
   if (upstream.username) {
     const token = Buffer.from(
@@ -268,6 +411,7 @@ async function connectViaSocks5(
   targetHost: string,
   targetPort: number,
   upstream: ProxyConfig,
+  pinned?: LookupFunction,
 ): Promise<Socket> {
   const info = await SocksClient.createConnection({
     proxy: {
@@ -279,13 +423,14 @@ async function connectViaSocks5(
     },
     command: "connect",
     destination: { host: targetHost, port: targetPort },
+    ...(pinned ? { socket_options: { port: upstream.port, lookup: pinned } } : {}),
   });
   return info.socket as Socket;
 }
 
-function openTcp(host: string, port: number): Promise<Socket> {
+function openTcp(host: string, port: number, pinned?: LookupFunction): Promise<Socket> {
   return new Promise((resolve, reject) => {
-    const sock = netConnect({ host, port });
+    const sock = netConnect({ host, port, ...(pinned ? { lookup: pinned } : {}) });
     sock.once("connect", () => {
       sock.off("error", reject);
       resolve(sock);

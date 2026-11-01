@@ -9,6 +9,7 @@ import {
   type CreateTokenInput,
   type ToolGroup,
 } from "@multizen/mcp-server";
+import { EGRESS_MODES, isEgressMode, parseEgressAllowEntry, type EgressMode } from "@multizen/browser-runtime";
 import type { BrowserEngine, DisplayModeSetting } from "@multizen/types";
 import { DISPLAY_MODES, isBrowserEngine, isDisplayMode } from "@multizen/types";
 
@@ -32,6 +33,10 @@ export interface ServerConfig {
   displayMode: DisplayModeSetting;
   /** No windows, whatever a profile has saved. An explicit request for one is refused. */
   headless: boolean;
+  /** Where browsers may connect. A server blocks private addresses unless told otherwise. */
+  egressPolicy: EgressMode;
+  /** Exceptions to `block-private`: IPs, CIDRs, names, `*.suffix`, each with an optional `:port`. */
+  egressAllow: string[];
   /** Bound to a loopback address. */
   loopback: boolean;
   /** Host header values to accept besides the bind address and loopback. */
@@ -280,6 +285,27 @@ function displayFields(flags: ParsedFlags, env: Env): Pick<ServerConfig, "displa
   return { displayMode: mode, headless: flags.isSet("headless") || env.MULTIZEN_HEADLESS === "1" };
 }
 
+const EGRESS_OPTIONS: NonNullable<ParseArgsConfig["options"]> = {
+  "egress-policy": { type: "string" },
+  "egress-allow": { type: "string" },
+};
+
+function egressFields(flags: ParsedFlags, env: Env): Pick<ServerConfig, "egressPolicy" | "egressAllow"> {
+  const egressPolicy = flags.flag("egress-policy") ?? env.MULTIZEN_EGRESS_POLICY ?? "block-private";
+  if (!isEgressMode(egressPolicy)) {
+    throw new UsageError(`--egress-policy must be one of ${EGRESS_MODES.join(", ")}, got "${egressPolicy}"`);
+  }
+  const egressAllow = commaList(flags.flag("egress-allow") ?? env.MULTIZEN_EGRESS_ALLOW);
+  for (const entry of egressAllow) {
+    try {
+      parseEgressAllowEntry(entry);
+    } catch (e) {
+      throw new UsageError((e as Error).message);
+    }
+  }
+  return { egressPolicy, egressAllow };
+}
+
 function uploadsRootField(flags: ParsedFlags, env: Env): { uploadsRoot?: string } {
   const uploadsRoot = flags.flag("uploads-root") ?? env.MULTIZEN_UPLOADS_ROOT;
   return uploadsRoot ? { uploadsRoot: resolve(uploadsRoot) } : {};
@@ -396,6 +422,7 @@ export function parseServeConfig(
     "uploads-root": { type: "string" },
     ...BROWSER_LIMIT_OPTIONS,
     ...DISPLAY_OPTIONS,
+    ...EGRESS_OPTIONS,
   });
   rejectPositionals(flags.positionals);
   const idleTtl = flags.flag("session-idle-ttl-ms") ?? env.MULTIZEN_SESSION_IDLE_TTL_MS;
@@ -414,13 +441,14 @@ export function parseServeConfig(
     ...uploadsRootField(flags, env),
     ...browserLimitFields(flags, env),
     ...displayFields(flags, env),
+    ...egressFields(flags, env),
   };
 }
 
 export type StdioConfig =
   | ({ kind: "local"; dataDir: string; defaultEngine?: BrowserEngine; uploadsRoot?: string } & Pick<
       ServerConfig,
-      "maxBrowsers" | "browserQueueTimeoutMs" | "displayMode" | "headless"
+      "maxBrowsers" | "browserQueueTimeoutMs" | "displayMode" | "headless" | "egressPolicy" | "egressAllow"
     >)
   | { kind: "connect"; url: string; tokenFile?: string };
 
@@ -436,6 +464,7 @@ export function parseStdioConfig(
     "uploads-root": { type: "string" },
     ...BROWSER_LIMIT_OPTIONS,
     ...DISPLAY_OPTIONS,
+    ...EGRESS_OPTIONS,
   });
   rejectPositionals(flags.positionals);
 
@@ -450,6 +479,7 @@ export function parseStdioConfig(
       ...uploadsRootField(flags, env),
       ...browserLimitFields(flags, env),
       ...displayFields(flags, env),
+      ...egressFields(flags, env),
     };
   }
 
@@ -461,6 +491,8 @@ export function parseStdioConfig(
     "browser-queue-timeout-ms",
     "display-mode",
     "headless",
+    "egress-policy",
+    "egress-allow",
   ];
   if (browserFlags.some((flag) => flags.isSet(flag))) {
     throw new UsageError(

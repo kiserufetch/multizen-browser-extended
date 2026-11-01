@@ -1,4 +1,5 @@
 import { MultizenError, type BrowserDriver, type LaunchedProfile, type ProfileId } from "@multizen/types";
+import type { ProfileManager } from "@multizen/profile-manager";
 import type { Principal } from "./auth/principal.js";
 import type { LeaseHolder } from "./LeaseRegistry.js";
 import { MUTEX_WAIT_MS, type MutexRunOptions } from "./ProfileMutex.js";
@@ -54,6 +55,18 @@ export function visibleTools<T extends { name: string }>(
   });
 }
 
+/**
+ * The app's egress policy, as far as tools see it. It lives in the browser runtime, which
+ * this package doesn't depend on. Each assert throws EGRESS_BLOCKED. `cdp_send` and
+ * `cdp_send_no_safety` don't come through here: the `raw` group can defeat the policy.
+ */
+export interface EgressGate {
+  readonly enforced: boolean;
+  /** `proxied`: this profile's names resolve at its proxy, and must not be looked up here. */
+  assertUrlAllowed(url: string, ctx: { proxied: boolean }): Promise<void>;
+  assertProxyAllowed(proxy: { host: string; port: number }): Promise<void>;
+}
+
 export interface GateContext {
   principal: Principal;
   /** The MCP session. A transport with none (stdio) has the one session anyway. */
@@ -62,6 +75,9 @@ export interface GateContext {
   signal?: AbortSignal;
   shared: SharedMcpState;
   driver: BrowserDriver;
+  egress?: EgressGate;
+  /** Says which profiles are proxied, for `egress`. */
+  profiles?: Pick<ProfileManager, "get">;
 }
 
 export function leaseHolder(principal: Principal, sessionId: string): LeaseHolder {
@@ -111,6 +127,30 @@ function pollingDriver(
 }
 
 /**
+ * Before any queue, since what the policy refuses now it would refuse later. A malformed
+ * argument passes: the tool's own validation reports it.
+ */
+async function assertEgressAllowed(
+  policy: ToolPolicy,
+  args: Record<string, unknown>,
+  ctx: GateContext,
+): Promise<void> {
+  if (!ctx.egress?.enforced) return;
+  const url = policy.urlArg ? args[policy.urlArg] : undefined;
+  if (typeof url === "string") {
+    const proxied = Boolean(ctx.profiles?.get(String(args.profile_id))?.proxy);
+    await ctx.egress.assertUrlAllowed(url, { proxied });
+  }
+  const proxy = (policy.proxyArg ? args[policy.proxyArg] : undefined) as
+    | { host?: unknown; port?: unknown }
+    | null
+    | undefined;
+  if (typeof proxy?.host === "string" && typeof proxy.port === "number") {
+    await ctx.egress.assertProxyAllowed({ host: proxy.host, port: proxy.port });
+  }
+}
+
+/**
  * Every tools/call goes through here, before the tool's own validation, so a
  * caller learns nothing about a tool it may not use. No policy means refused, for
  * every principal. `run` gets the driver the tool should use.
@@ -143,10 +183,12 @@ async function admitted(
     throw new MultizenError("FORBIDDEN", `${tool} needs a token that isn't limited to some profiles`);
   }
   const { profile_id: profileId } = args;
-  if (policy.scope !== "profile" || typeof profileId !== "string") return run(ctx.driver);
-  if (!mayUseProfile(ctx.principal, profileId)) {
+  const scoped = policy.scope === "profile" && typeof profileId === "string";
+  if (scoped && !mayUseProfile(ctx.principal, profileId)) {
     throw new MultizenError("FORBIDDEN", `This token may not use profile ${profileId}`);
   }
+  await assertEgressAllowed(policy, args, ctx);
+  if (!scoped) return run(ctx.driver);
 
   const { mutex, leases } = ctx.shared;
   const admit = (): void => {

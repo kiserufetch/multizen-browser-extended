@@ -834,7 +834,7 @@ test("a proxy password through MCP: sealed in the real DB and WAL, kept across r
         name: "create_profile",
         arguments: {
           name: "proxied",
-          proxy: { type: "socks5", host: "127.0.0.1", port: 1, username: "u", password },
+          proxy: { type: "socks5", host: "203.0.113.1", port: 1, username: "u", password },
         },
       }),
     );
@@ -856,7 +856,7 @@ test("a proxy password through MCP: sealed in the real DB and WAL, kept across r
     const listed = toolText(await again.callTool({ name: "list_profiles", arguments: {} }));
     const [row] = listed.profiles as Array<{ id: string; proxy: Record<string, unknown> }>;
     assert.equal(row?.id, created.id);
-    assert.equal(row?.proxy.host, "127.0.0.1");
+    assert.equal(row?.proxy.host, "203.0.113.1");
     await again.close();
   } finally {
     serve.stop();
@@ -873,7 +873,7 @@ test("an encrypted database with its key gone refuses the start, saying what to 
     name: "create_profile",
     arguments: {
       name: "proxied",
-      proxy: { type: "socks5", host: "127.0.0.1", port: 1, username: "u", password: "pw" },
+      proxy: { type: "socks5", host: "203.0.113.1", port: 1, username: "u", password: "pw" },
     },
   });
   await client.close();
@@ -901,7 +901,7 @@ test("secrets rotate: refused while a server runs, works once it is gone", async
       name: "create_profile",
       arguments: {
         name: "proxied",
-        proxy: { type: "socks5", host: "127.0.0.1", port: 1, username: "u", password: "pw" },
+        proxy: { type: "socks5", host: "203.0.113.1", port: 1, username: "u", password: "pw" },
       },
     }),
   );
@@ -950,6 +950,43 @@ test("the key in the environment never reaches the logs or a key file", async ()
   } finally {
     running.child.kill();
     await running.exited;
+    removeDir(dir);
+  }
+});
+
+test("egress: a server blocks private addresses unless told otherwise, and says which it does", async () => {
+  const dir = newDataDir();
+  const metadataProxy = { type: "socks5", host: "169.254.169.254", port: 1 };
+  const createWithProxy = async (serve: Serve): Promise<{ isError?: boolean; text: string }> => {
+    const client = await httpClient(serve.url, readFileSync(serve.tokenFile, "utf8"));
+    const res = (await client.callTool({
+      name: "create_profile",
+      arguments: { name: "pivot", proxy: metadataProxy },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    await client.close();
+    return { isError: res.isError, text: res.content[0]!.text };
+  };
+  let serve = await startServe(dir);
+  try {
+    assert.ok(jsonLogs(serve.stdout()).some((l) => l.msg === "listening" && l.egressPolicy === "block-private"));
+    const refused = await createWithProxy(serve);
+    assert.equal(refused.isError, true);
+    assert.equal((JSON.parse(refused.text) as { error: { code: string } }).error.code, "EGRESS_BLOCKED");
+    serve.stop();
+    await serve.exited;
+
+    serve = await startServe(dir, ["--egress-policy", "allow-all"]);
+    assert.match(serve.stdout(), /egress policy allow-all/);
+    assert.equal((await createWithProxy(serve)).isError, undefined);
+    serve.stop();
+    await serve.exited;
+
+    const bad = runCli(["serve", "--data-dir", dir, "--port", "1", "--egress-allow", "10.0.0.0/99"]);
+    assert.equal(bad.status, 2, bad.stdout);
+    assert.match(bad.stdout, /--egress-allow takes/);
+  } finally {
+    serve.stop();
+    await serve.exited;
     removeDir(dir);
   }
 });

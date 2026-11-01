@@ -33,7 +33,7 @@ import {
 } from "./errorMapping.js";
 import type { HumanHandoff } from "./handoff.js";
 import { createSharedMcpState, type SharedMcpState } from "./sharedState.js";
-import { runGated, visibleTools } from "./toolGate.js";
+import { runGated, visibleTools, type EgressGate } from "./toolGate.js";
 import { EXTENSION_DEFS, EXTENSION_HANDLERS, type ToolContext } from "./tools/index.js";
 
 export type { BrowserDriver };
@@ -63,6 +63,8 @@ export interface MultizenMcpServerOptions {
   uploadsRoot?: string;
   /** Largest base64 upload and inline download. Defaults to 16 MiB. */
   maxInlineFileBytes?: number;
+  /** Refuses addresses at the tool level. The drivers enforce it at the network level. */
+  egress?: EgressGate;
 }
 
 export interface MultizenMcpServer {
@@ -276,6 +278,7 @@ const MULTIZEN_MCP_INSTRUCTIONS = [
   "- Page actions go to the profile's one active tab: list_tabs shows it, new_tab and activate_tab change it. Sessions on the same profile share it, unless you hold a lease.",
   "- Each profile opens in a display mode: headed (a visible window), headless (no window), or xvfb (Linux: a window on a private virtual display nobody sees). list_profiles shows the saved mode and, while running, the running one. launch_profile takes an optional display_mode; a running profile keeps its mode, so asking for another gives PROFILE_ALREADY_RUNNING until you close_profile. Without a visible window, read the page with screenshot and extract. A server started with --headless runs everything headless and refuses any other display_mode with INVALID_INPUT.",
   "- Camoufox has no CDP: cdp_send and cdp_send_no_safety refuse on it with UNSUPPORTED_ON_ENGINE. Refs and every page tool work on both engines. On Camoufox extract gives the tree as ariaSnapshot text, with refs like 'p3.e7'.",
+  "- A server may keep its browsers off private, loopback and cloud metadata addresses. navigate and new_tab to one, a navigation redirected to one, and a proxy at one give EGRESS_BLOCKED, which a retry won't change. A page's own requests to them just fail.",
   "- On a CAPTCHA, 2FA prompt, or other human-verification wall, do not attempt to solve or bypass it yourself — pause and let the user handle it, then continue. The session carries over.",
   "- Do not create or launch profiles in bulk to farm accounts; this tool supports autonomous execution of authorized workflows.",
 ].join("\n");
@@ -326,7 +329,15 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
       const result = await runGated(
         name,
         args,
-        { principal, sessionId, signal: callSignal(extra), shared, driver: browserDriver },
+        {
+          principal,
+          sessionId,
+          signal: callSignal(extra),
+          shared,
+          driver: browserDriver,
+          egress: opts.egress,
+          profiles: profileManager,
+        },
         (driver) =>
           dispatch(name, args, {
             profileManager,

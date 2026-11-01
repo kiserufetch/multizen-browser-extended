@@ -49,6 +49,10 @@
  * of a reverse proxy on loopback, and a proxy password encrypted on disk that still gets a
  * browser through a local SOCKS proxy. It needs openssl for its certificate.
  *
+ * Every server here runs the production egress policy, with the fixtures' hosts let through by
+ * --egress-allow, so every profile goes through the bridge as it would in production. What the
+ * policy itself does is checked by scripts/egress-live.ts.
+ *
  * --engine camoufox runs the same flows on Camoufox, minus what is CDP's or CloakBrowser's:
  * there are no OOPIF targets, cdp_send refuses, its pid is unknown (so nothing is killed
  * from outside), and no chrome:// pages. Its engine installs into the data dir.
@@ -106,7 +110,9 @@ const IS_CAMOUFOX = values.engine === "camoufox";
 const FORCED_HEADLESS = values.headless === true;
 /** A server installs its default engine on start: this keeps CloakBrowser out of this run. */
 const ENGINE_FLAGS = IS_CAMOUFOX ? ["--default-engine", "camoufox"] : [];
-const SERVER_FLAGS = [...ENGINE_FLAGS, ...(FORCED_HEADLESS ? ["--headless"] : [])];
+/** The production default stays on: only these hosts' fixtures are let through. */
+const EGRESS_FLAGS = ["--egress-allow", "127.0.0.1,localhost,127.0.0.2"];
+const SERVER_FLAGS = [...ENGINE_FLAGS, ...EGRESS_FLAGS, ...(FORCED_HEADLESS ? ["--headless"] : [])];
 const ENGINE_INSTALL_BUDGET_MS = 15 * 60_000;
 const CTRL_C_EXIT_BUDGET_MS = 30_000;
 const results: Array<{ check: string; observed: string }> = [];

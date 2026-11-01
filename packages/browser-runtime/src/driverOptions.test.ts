@@ -4,7 +4,7 @@ import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { createServer, type AddressInfo } from "node:net";
+import { connect, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -16,9 +16,11 @@ import {
   focusFirstPage,
   type ChromiumBrowserDriverOptions,
 } from "./ChromiumBrowserDriver.ts";
+import { EgressPolicy, type EgressLookup } from "./egressPolicy.ts";
 import type { EngineRegistry } from "./engineRegistry.ts";
 import { EngineRouter } from "./engineRouter.ts";
 import type { RuntimeHost } from "./host.ts";
+import { startBridgeForProfile, stopAllBridges } from "./socks5Bridge.ts";
 
 const host: RuntimeHost = {
   userDataDir: () => "unused",
@@ -615,6 +617,7 @@ async function launchArgv(
   id: ProfileId,
   dir: string,
   displayMode?: DisplayMode,
+  overrides: Partial<ChromiumBrowserDriverOptions> = {},
 ): Promise<string[]> {
   let captured: string[] = [];
   const spawnMock = mock.method(childProcess, "spawn", (_bin: string, args: readonly string[]) => {
@@ -624,7 +627,7 @@ async function launchArgv(
   syncBuiltinESMExports();
   try {
     await assert.rejects(
-      driverFor(pm, join(dir, "x.exe")).launch(id, displayMode ? { displayMode } : undefined),
+      driverFor(pm, join(dir, "x.exe"), overrides).launch(id, displayMode ? { displayMode } : undefined),
       /stop before a real spawn/,
     );
   } finally {
@@ -661,6 +664,192 @@ test("headless adds exactly the two flags, before the positional URL, and change
     ]);
     assert.deepEqual(headless.filter((a) => !added.includes(a)), headed);
     assert.equal(headless.at(-1), headed.at(-1), "the positional URL stays last");
+  });
+});
+
+// ── egress ───────────────────────────────────────────────────────────────────
+
+const noLookup: EgressLookup = () => {
+  throw new Error("nothing here should resolve a name");
+};
+
+const blockPrivate = (allow: string[] = []): EgressPolicy =>
+  new EgressPolicy({ mode: "block-private", allow, lookup: noLookup });
+
+/** Bridge ports differ from launch to launch. */
+const withoutBridgePort = (argv: string[]): string[] =>
+  argv.map((a) => a.replace(/^(--proxy-server=socks5:\/\/127\.0\.0\.1:)\d+$/, "$1PORT"));
+
+const PROXIED_HARDENING = [
+  "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+  "--dns-over-https-mode=off",
+  "--dns-prefetch-disable",
+  "--disable-async-dns",
+  "--no-prerender",
+  "--disable-background-networking",
+  "--disable-component-update",
+  "--disable-domain-reliability",
+  "--disable-client-side-phishing-detection",
+];
+
+test("no policy and allow-all: the desktop's argv, flag for flag, direct and proxied", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const warn = mock.method(console, "warn", () => {});
+    try {
+      const plain = await launchArgv(pm, id, dir);
+      assert.deepEqual(
+        await launchArgv(pm, id, dir, undefined, { egress: new EgressPolicy({ mode: "allow-all" }) }),
+        plain,
+      );
+      assert.equal(plain.some((a) => a.startsWith("--proxy")), false);
+      assert.equal(plain.some((a) => a.startsWith("--webrtc")), false);
+      await stopAllBridges();
+
+      pm.update(id, { proxy: { type: "socks5", host: "127.0.0.1", port: 1 } });
+      const proxied = await launchArgv(pm, id, dir);
+      await stopAllBridges();
+      assert.equal(proxied.some((a) => a.startsWith("--proxy-bypass-list")), false);
+      assert.deepEqual(
+        withoutBridgePort(
+          await launchArgv(pm, id, dir, undefined, { egress: new EgressPolicy({ mode: "allow-all" }) }),
+        ),
+        withoutBridgePort(proxied),
+      );
+    } finally {
+      warn.mock.restore();
+      await stopAllBridges();
+    }
+  });
+});
+
+test("enforced, direct: exactly the three flags, and none of the proxied hardening", async () => {
+  await withProfile(async (pm, id, dir) => {
+    try {
+      const plain = await launchArgv(pm, id, dir);
+      const bridged = await launchArgv(pm, id, dir, undefined, { egress: blockPrivate() });
+      const added = bridged.filter((a) => !plain.includes(a));
+      assert.equal(added.length, 3, added.join(" "));
+      assert.match(added[0]!, /^--proxy-server=socks5:\/\/127\.0\.0\.1:\d+$/);
+      assert.equal(added[1], "--webrtc-ip-handling-policy=disable_non_proxied_udp");
+      assert.equal(added[2], "--proxy-bypass-list=<-loopback>");
+      assert.deepEqual(bridged.filter((a) => !added.includes(a)), plain, "nothing else moved or changed");
+      assert.ok(bridged.includes("--disable-features=Translate"), "no proxy-only features");
+      for (const flag of PROXIED_HARDENING.slice(1)) assert.ok(!bridged.includes(flag), flag);
+    } finally {
+      await stopAllBridges();
+    }
+  });
+});
+
+test("enforced, proxied: the proxied argv plus <-loopback> and nothing else", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const warn = mock.method(console, "warn", () => {});
+    try {
+      pm.update(id, { proxy: { type: "socks5", host: "127.0.0.1", port: 1 } });
+      const plain = withoutBridgePort(await launchArgv(pm, id, dir));
+      await stopAllBridges();
+      const enforced = withoutBridgePort(
+        await launchArgv(pm, id, dir, undefined, { egress: blockPrivate(["127.0.0.1:1"]) }),
+      );
+      assert.deepEqual(enforced.filter((a) => !plain.includes(a)), ["--proxy-bypass-list=<-loopback>"]);
+      assert.deepEqual(enforced.filter((a) => a !== "--proxy-bypass-list=<-loopback>"), plain);
+      for (const flag of PROXIED_HARDENING) assert.ok(enforced.includes(flag), flag);
+    } finally {
+      warn.mock.restore();
+      await stopAllBridges();
+    }
+  });
+});
+
+test("a proxy the policy refuses stops the launch before the geo probe or anything else", async () => {
+  const proxy = createServer();
+  let connections = 0;
+  proxy.on("connection", (socket) => {
+    connections += 1;
+    socket.destroy();
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", () => resolve()));
+  const port = (proxy.address() as AddressInfo).port;
+  try {
+    await withProfile(async (pm, id, dir) => {
+      pm.update(id, { proxy: { type: "socks5", host: "127.0.0.1", port } });
+      const openedBefore = pm.get(id)!.lastOpenedAt;
+      let spawned = 0;
+      const spawnMock = mock.method(childProcess, "spawn", () => {
+        spawned += 1;
+        throw new Error("no browser should start");
+      });
+      syncBuiltinESMExports();
+      try {
+        const driver = driverFor(pm, join(dir, "x.exe"), { egress: blockPrivate() });
+        await assert.rejects(driver.launch(id), (e: MultizenError) => {
+          assert.equal(e.code, "EGRESS_BLOCKED");
+          assert.ok(e.message.includes(`127.0.0.1:${port}`));
+          return true;
+        });
+      } finally {
+        spawnMock.mock.restore();
+        syncBuiltinESMExports();
+      }
+      assert.equal(connections, 0, "the geo probe never connected to it");
+      assert.equal(spawned, 0);
+      assert.equal(pm.get(id)!.lastOpenedAt, openedBefore);
+    });
+  } finally {
+    await new Promise((resolve) => proxy.close(resolve));
+  }
+});
+
+test("navigate: a load the bridge refused is EGRESS_BLOCKED; another failure stays as it was", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const warn = mock.method(console, "warn", () => {});
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    const failed = new MultizenError("NAVIGATION_FAILED", "Navigation to http://x/ failed: net::ERR_SOCKET_NOT_CONNECTED");
+    graftRunning(driver, id, { navigate: async () => Promise.reject(failed) });
+    try {
+      assert.equal(await driver.navigate(id, "http://x/").catch((e: unknown) => e), failed, "no block yet");
+
+      const url = await startBridgeForProfile(id, null, blockPrivate());
+      const socket = connect(Number(new URL(url).port), "127.0.0.1");
+      await new Promise<void>((resolve) => {
+        socket.once("connect", () => socket.write(Buffer.from([5, 1, 0])));
+        socket.once("data", () => {
+          socket.write(Buffer.from([5, 1, 0, 1, 169, 254, 169, 254, 0, 80]));
+          socket.once("data", () => resolve());
+        });
+      });
+      socket.destroy();
+
+      const typed = (await driver.navigate(id, "http://x/").catch((e: unknown) => e)) as MultizenError;
+      assert.equal(typed.code, "EGRESS_BLOCKED");
+      assert.match(typed.message, /169\.254\.169\.254:80/);
+    } finally {
+      warn.mock.restore();
+      await stopAllBridges();
+    }
+  });
+});
+
+test("the router hands the egress policy to the Firefox driver it constructs", async () => {
+  await withProfile(async (pm, id, dir) => {
+    pm.update(id, { engine: "camoufox" });
+    const egress = blockPrivate();
+    let lookups = 0;
+    const once = {
+      get: (profileId: ProfileId) => (lookups++ < 2 ? pm.get(profileId) : null),
+      markOpened: () => {},
+    } as unknown as ProfileManager;
+    const router = new EngineRouter({
+      profileManager: once,
+      engineRegistry: fakeRegistry(join(dir, "unused.exe")),
+      getDefaultEngine: () => "cloakbrowser",
+      chromiumDriver: driverFor(pm, join(dir, "unused.exe")),
+      firefoxOptions: { egress },
+      displayEnvironment: { platform: "win32", env: {}, hasXvfb: () => false },
+    });
+    await assert.rejects(router.launch(id), /not found/);
+    const constructed = (router as unknown as { firefoxDriver: { egress: unknown } }).firefoxDriver;
+    assert.equal(constructed.egress, egress);
   });
 });
 

@@ -13,6 +13,7 @@ export * from "./engineRouter.ts";
 export * from "./displayMode.ts";
 export * from "./xvfb.ts";
 export * from "./browserLimiter.ts";
+export * from "./egressPolicy.ts";
 export * from "./socks5Bridge.ts";
 export * from "./proxyGeo.ts";
 export * from "./launchGeo.ts";

@@ -14,6 +14,7 @@ export { TokenStore } from "./auth/TokenStore.js";
 export { AuthFailureLimiter, clientAddress } from "./auth/AuthFailureLimiter.js";
 export { policedToolNames } from "./toolPolicy.js";
 export type { Principal, ToolGroup } from "./auth/principal.js";
+export type { EgressGate } from "./toolGate.js";
 export type { HumanHandoff, PendingHandoff } from "./handoff.js";
 export type { SharedMcpState } from "./sharedState.js";
 export type { ActivityEvent } from "./ActivityLog.js";

@@ -202,6 +202,7 @@ test("initialize: autonomy within the product's limits, and how display modes wo
     assert.match(instructions, /CAPTCHA.*do not attempt to solve or bypass it yourself/);
     assert.match(instructions, /Do not create or launch profiles in bulk to farm accounts/);
     assert.match(instructions, /authorized workflows/);
+    assert.match(instructions, /EGRESS_BLOCKED/);
 
     assert.doesNotMatch(instructions, /no headless mode/i);
     assert.doesNotMatch(instructions, /always open as visible/i);

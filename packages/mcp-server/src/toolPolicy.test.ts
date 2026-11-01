@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { MultizenError, type ProxyConfig } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
 
 import { LOGGED_ARGS } from "./ActivityLog.js";
@@ -17,7 +18,7 @@ import {
 import { MockBrowserDriver } from "./MockBrowserDriver.js";
 import { createMultizenMcpServer, TOOL_DEFINITIONS } from "./server.js";
 import { createSharedMcpState } from "./sharedState.js";
-import { runGated, visibleTools } from "./toolGate.js";
+import { runGated, visibleTools, type EgressGate } from "./toolGate.js";
 import { leaseBinds, policedToolNames, policyFor } from "./toolPolicy.js";
 import { EXTENSION_DEFS } from "./tools/index.js";
 
@@ -289,6 +290,173 @@ test("a principal scoped to some profiles can't reach the others", async () => {
   assert.equal(ok.isError, undefined);
   assert.equal(driver.actions.length, 1);
   await client.close();
+});
+
+// ── egress ───────────────────────────────────────────────────────────────────
+
+/** Refuses what names `blocked`, and notes what it was asked. */
+function fakeGate(enforced = true): EgressGate & {
+  urls: Array<{ url: string; proxied: boolean }>;
+  proxies: Array<{ host: string; port: number }>;
+} {
+  const urls: Array<{ url: string; proxied: boolean }> = [];
+  const proxies: Array<{ host: string; port: number }> = [];
+  const refuse = (what: string): void => {
+    if (what.includes("blocked")) throw new MultizenError("EGRESS_BLOCKED", `blocked: ${what}`);
+  };
+  return {
+    enforced,
+    urls,
+    proxies,
+    assertUrlAllowed: async (url, { proxied }) => {
+      urls.push({ url, proxied });
+      refuse(url);
+    },
+    assertProxyAllowed: async (proxy) => {
+      proxies.push(proxy);
+      refuse(proxy.host);
+    },
+  };
+}
+
+class CountingDriver extends MockBrowserDriver {
+  readonly navigations: string[] = [];
+  readonly cdpCalls: Array<{ method: string }> = [];
+  override navigate(id: string, url: string): Promise<{ url: string }> {
+    this.navigations.push(url);
+    return super.navigate(id, url);
+  }
+  override cdpSend(id: string, method: string, ...rest: [Record<string, unknown>?, string?, { safe?: boolean }?]): Promise<unknown> {
+    this.cdpCalls.push({ method });
+    return super.cdpSend(id, method, ...rest);
+  }
+}
+
+async function connectGated(
+  egress: EgressGate | undefined,
+  principal?: Principal,
+): Promise<{ client: Client; driver: CountingDriver }> {
+  const driver = new CountingDriver();
+  const proxies: Record<string, ProxyConfig> = { proxied: { type: "socks5", host: "p", port: 1 } };
+  const { server } = createMultizenMcpServer({
+    profileManager: {
+      list: () => [],
+      get: (id: string) => ({ id, proxy: proxies[id] }),
+      create: (input: { name: string }) => ({ id: "new", name: input.name, fingerprint: {} }),
+      update: (id: string) => ({ id, name: "n", fingerprint: {} }),
+    } as unknown as ProfileManager,
+    browserDriver: driver,
+    principal,
+    egress,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "0.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  await driver.launch("direct");
+  await driver.launch("proxied");
+  return { client, driver };
+}
+
+test("navigate and new_tab: the gate answers before the driver, and knows who is proxied", async () => {
+  const gate = fakeGate();
+  const { client, driver } = await connectGated(gate);
+  const navigations = (): number => driver.navigations.length;
+
+  assert.equal(
+    await errorCode(client, "navigate", { profile_id: "direct", url: "http://blocked/" }),
+    "EGRESS_BLOCKED",
+  );
+  assert.equal(
+    await errorCode(client, "new_tab", { profile_id: "proxied", url: "http://blocked/" }),
+    "EGRESS_BLOCKED",
+  );
+  assert.equal(navigations(), 0);
+  assert.deepEqual(gate.urls, [
+    { url: "http://blocked/", proxied: false },
+    { url: "http://blocked/", proxied: true },
+  ]);
+
+  const fine = await client.callTool({ name: "navigate", arguments: { profile_id: "direct", url: "http://ok/" } });
+  assert.equal(fine.isError, undefined);
+  assert.equal(navigations(), 1);
+  const blank = await client.callTool({ name: "new_tab", arguments: { profile_id: "direct" } });
+  assert.equal(blank.isError, undefined, "a new_tab with no URL opens nothing to check");
+  assert.equal(gate.urls.length, 3);
+  await client.close();
+});
+
+test("create_profile and update_profile: a proxy the policy refuses isn't saved", async () => {
+  const gate = fakeGate();
+  const { client } = await connectGated(gate);
+  const blocked = { type: "socks5", host: "blocked", port: 1 };
+  const fine = { type: "socks5", host: "ok", port: 1 };
+  assert.equal(await errorCode(client, "create_profile", { name: "n", proxy: blocked }), "EGRESS_BLOCKED");
+  assert.equal(await errorCode(client, "update_profile", { profile_id: "direct", proxy: blocked }), "EGRESS_BLOCKED");
+
+  const created = await client.callTool({ name: "create_profile", arguments: { name: "n", proxy: fine } });
+  assert.equal(created.isError, undefined);
+  const updated = await client.callTool({ name: "update_profile", arguments: { profile_id: "direct", proxy: fine } });
+  assert.equal(updated.isError, undefined);
+  const cleared = await client.callTool({ name: "update_profile", arguments: { profile_id: "direct", proxy: null } });
+  assert.equal(cleared.isError, undefined, "clearing a proxy has nothing to check");
+  assert.deepEqual(
+    gate.proxies.map((p) => p.host),
+    ["blocked", "blocked", "ok", "ok"],
+  );
+  await client.close();
+});
+
+test("malformed arguments go on to the tool's own validation", async () => {
+  const gate = fakeGate();
+  const { client } = await connectGated(gate);
+  assert.equal(await errorCode(client, "navigate", { profile_id: "direct", url: 5 }), "INVALID_INPUT");
+  assert.equal(await errorCode(client, "create_profile", { name: "n", proxy: "blocked" }), "INVALID_INPUT");
+  assert.equal(await errorCode(client, "create_profile", { name: "n", proxy: { host: "blocked" } }), "INVALID_INPUT");
+  assert.deepEqual(gate.urls, []);
+  assert.deepEqual(gate.proxies, []);
+  await client.close();
+});
+
+test("a token learns nothing about the policy from a profile it can't use", async () => {
+  const gate = fakeGate();
+  const { client } = await connectGated(gate, limited(["act"], { profiles: ["direct"] }));
+  assert.equal(await errorCode(client, "navigate", { profile_id: "proxied", url: "http://blocked/" }), "FORBIDDEN");
+  assert.deepEqual(gate.urls, []);
+  await client.close();
+});
+
+test("cdp_send and cdp_send_no_safety aren't gated: raw can defeat the policy, and this says so", async () => {
+  const gate = fakeGate();
+  const { client, driver } = await connectGated(gate);
+  for (const name of ["cdp_send", "cdp_send_no_safety"]) {
+    assert.equal(policyFor(name)!.urlArg, undefined, name);
+    assert.equal(policyFor(name)!.proxyArg, undefined, name);
+    const res = await client.callTool({
+      name,
+      arguments: {
+        profile_id: "direct",
+        method: "Target.createBrowserContext",
+        params: { proxyServer: "direct://blocked" },
+      },
+    });
+    assert.equal(res.isError, undefined, name);
+  }
+  assert.deepEqual(gate.urls, []);
+  assert.deepEqual(gate.proxies, []);
+  assert.ok(driver.cdpCalls.some((c) => c.method === "Target.createBrowserContext"));
+  await client.close();
+});
+
+test("no gate, or one not enforcing: nothing is asked, as on the desktop", async () => {
+  const idle = fakeGate(false);
+  for (const egress of [undefined, idle]) {
+    const { client } = await connectGated(egress);
+    const res = await client.callTool({ name: "navigate", arguments: { profile_id: "direct", url: "http://blocked/" } });
+    assert.equal(res.isError, undefined);
+    await client.close();
+  }
+  assert.deepEqual(idle.urls, []);
 });
 
 test("with no principal anywhere, a client sees every tool, as on the desktop", async () => {

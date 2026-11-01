@@ -67,7 +67,7 @@ export interface EngineRouterOptions {
   /** The already-constructed Chromium driver (owns companion-install wiring). */
   chromiumDriver: ChromiumBrowserDriver;
   /** Passed to the Firefox driver, which the router itself constructs lazily. */
-  firefoxOptions?: Pick<FirefoxBrowserDriverOptions, "launchExtras" | "extraPrefs">;
+  firefoxOptions?: Pick<FirefoxBrowserDriverOptions, "launchExtras" | "extraPrefs" | "egress">;
   /**
    * A launch while the engine is still installing. `wait` (the default, the desktop
    * with its progress UI) blocks until it is ready. `reject` (the server) answers at

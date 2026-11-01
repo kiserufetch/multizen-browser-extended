@@ -67,6 +67,7 @@ async function runLocal(
     serverVersion: SERVER_VERSION,
     getDefaultEngine: runtime.getDefaultEngine,
     uploadsRoot: config.uploadsRoot,
+    egress: runtime.egress,
   });
   const transport = new StdioServerTransport(process.stdin, protocolStdout);
   transport.onclose = () => void shutdown.run("transport-closed", 0);
@@ -81,6 +82,8 @@ async function runLocal(
     dataDir: config.dataDir,
     defaultEngine: runtime.getDefaultEngine(),
     displayMode: config.headless ? "headless (forced)" : config.displayMode,
+    egressPolicy: config.egressPolicy,
+    egressAllow: config.egressAllow,
     version: SERVER_VERSION,
   });
 }

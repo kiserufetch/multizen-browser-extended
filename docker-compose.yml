@@ -35,6 +35,9 @@ services:
       MULTIZEN_ALLOW_INSECURE_REMOTE: "1"
       MULTIZEN_ALLOWED_HOSTS: "localhost:${MULTIZEN_HOST_PORT:-7777},127.0.0.1:${MULTIZEN_HOST_PORT:-7777}"
       MULTIZEN_DATA_DIR: /data
+      # Browsers can't reach private addresses, this network's included. A comma-separated
+      # list of exceptions (an IP, a CIDR, a name, *.suffix, each with an optional :port) goes in
+      # MULTIZEN_EGRESS_ALLOW.
     volumes:
       - multizen-data:/data
     healthcheck:

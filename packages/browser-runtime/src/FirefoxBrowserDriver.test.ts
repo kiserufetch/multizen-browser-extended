@@ -2,15 +2,19 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MultizenError, ProfileId } from "@multizen/types";
+import { EgressPolicy } from "./egressPolicy.ts";
 import {
   camoufoxDisplayOptions,
+  EGRESS_FIREFOX_PREFS,
   FirefoxBrowserDriver,
   openStartPage,
   persistentContextOptions,
 } from "./FirefoxBrowserDriver.ts";
+import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge.ts";
 
 const ID: ProfileId = "p";
 
@@ -549,6 +553,92 @@ test("navigate: a failed load is NAVIGATION_FAILED, in its own words", async (t)
     "Navigation to http://127.0.0.1:1/ failed: NS_ERROR_CONNECTION_REFUSED",
   );
   assert.deepEqual((failed as MultizenError).details, { error_text: "NS_ERROR_CONNECTION_REFUSED" });
+});
+
+test("the egress prefs are the nine of the plan, and win over a caller's", () => {
+  assert.deepEqual(EGRESS_FIREFOX_PREFS, {
+    "network.proxy.allow_hijacking_localhost": true,
+    "network.proxy.no_proxies_on": "",
+    "network.proxy.socks_remote_dns": true,
+    "network.trr.mode": 5,
+    "network.dns.disablePrefetch": true,
+    "network.prefetch-next": false,
+    "network.http.speculative-parallel-limit": 0,
+    "network.http.http3.enable": false,
+    "network.webtransport.enabled": false,
+  });
+  const options = persistentContextOptions(
+    { firefoxUserPrefs: { "network.trr.mode": 2, kept: true } },
+    { downloadsPath: "d", proxy: { server: "socks5://127.0.0.1:1" }, extraPrefs: EGRESS_FIREFOX_PREFS },
+  );
+  assert.equal(options.firefoxUserPrefs?.["network.trr.mode"], 5);
+  assert.equal(options.firefoxUserPrefs?.kept, true);
+  assert.deepEqual(options.proxy, { server: "socks5://127.0.0.1:1" });
+});
+
+test("navigate: a load the bridge refused is EGRESS_BLOCKED, whatever Firefox calls it", async (t) => {
+  const { driver, page } = rig(t);
+  const url = await startBridgeForProfile(ID, null, new EgressPolicy({ mode: "block-private" }));
+  t.after(() => stopBridgeForProfile(ID));
+  t.mock.method(console, "warn", () => {});
+
+  page.gotoImpl = () => Promise.reject(new Error("page.goto: NS_ERROR_CONNECTION_REFUSED"));
+  const before = (await driver.navigate(ID, "http://x/").catch((e) => e)) as MultizenError;
+  assert.equal(before.code, "NAVIGATION_FAILED", "no block recorded yet");
+
+  const socket = connect(Number(new URL(url).port), "127.0.0.1");
+  await new Promise<void>((resolve) => {
+    socket.once("connect", () => socket.write(Buffer.from([5, 1, 0])));
+    socket.once("data", () => {
+      socket.write(Buffer.from([5, 1, 0, 1, 169, 254, 169, 254, 0, 80]));
+      socket.once("data", () => resolve());
+    });
+  });
+  socket.destroy();
+
+  const typed = (await driver.navigate(ID, "http://x/").catch((e) => e)) as MultizenError;
+  assert.equal(typed.code, "EGRESS_BLOCKED");
+  assert.match(typed.message, /169\.254\.169\.254:80/);
+
+  page.gotoImpl = () => Promise.reject(new Error("page.goto: NS_ERROR_NET_TIMEOUT"));
+  const other = (await driver.navigate(ID, "http://x/").catch((e) => e)) as MultizenError;
+  assert.equal(other.code, "NAVIGATION_FAILED", "not the proxy's refusal");
+});
+
+test("navigate: a failed load comes back only once its error page has committed", async (t) => {
+  const { driver, page } = rig(t);
+  const order: string[] = [];
+  page.gotoImpl = async () => {
+    // A child frame's commit says nothing about the page's.
+    setTimeout(() => page.emit("framenavigated", { parentFrame: () => ({}) }), 5);
+    setTimeout(() => {
+      order.push("error page committed");
+      page.emit("framenavigated", { parentFrame: () => null });
+    }, 40);
+    throw new Error("page.goto: NS_ERROR_CONNECTION_REFUSED");
+  };
+  await driver.navigate(ID, "http://x/").catch(() => order.push("navigate failed"));
+  assert.deepEqual(order, ["error page committed", "navigate failed"]);
+  assert.equal(page.listenerCount("framenavigated"), 0);
+});
+
+test("navigate: the wait for an error page that never commits is bounded", async (t) => {
+  const { driver, page } = rig(t);
+  page.gotoImpl = () => Promise.reject(new Error("page.goto: NS_ERROR_CONNECTION_REFUSED"));
+  const startedAt = Date.now();
+  await assert.rejects(driver.navigate(ID, "http://x/"), hasCode("NAVIGATION_FAILED"));
+  const waited = Date.now() - startedAt;
+  assert.ok(waited >= 900 && waited < 3_000, `${waited} ms`);
+});
+
+test("navigate: a timeout or a download has no error page to wait for", async (t) => {
+  const { driver, page } = rig(t);
+  const startedAt = Date.now();
+  page.gotoImpl = () => Promise.reject(namedError("TimeoutError", "page.goto: Timeout 30000ms exceeded."));
+  await assert.rejects(driver.navigate(ID, "http://x/"), hasCode("TIMEOUT"));
+  page.gotoImpl = () => Promise.reject(new Error("page.goto: Download is starting"));
+  await assert.rejects(driver.navigate(ID, "http://x/"), hasCode("NAVIGATION_FAILED"));
+  assert.ok(Date.now() - startedAt < 500, `${Date.now() - startedAt} ms`);
 });
 
 test("navigate to a URL serving a file says where the file went", async (t) => {
@@ -1181,7 +1271,7 @@ test("xvfb: the display stops when the browser goes by itself", async (t) => {
 test("the start page: launch waits for its commit, so a navigate right after can't be aborted by it", async () => {
   const order: string[] = [];
   let commit = (): void => {};
-  const page = {
+  const page = Object.assign(new EventEmitter(), {
     goto: (url: string, opts: { waitUntil: string }) => {
       order.push(`goto ${url} ${opts.waitUntil}`);
       return new Promise<null>((resolve) => {
@@ -1191,7 +1281,7 @@ test("the start page: launch waits for its commit, so a navigate right after can
         };
       });
     },
-  };
+  });
   const opening = openStartPage(page as never, "about:blank").then(() => order.push("returned"));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(order, ["goto about:blank commit"]);
@@ -1201,11 +1291,13 @@ test("the start page: launch waits for its commit, so a navigate right after can
 });
 
 test("the start page: a slow one doesn't hold up the launch, and a failed one doesn't fail it", async () => {
-  const never = { goto: () => new Promise<null>(() => {}) };
+  const never = Object.assign(new EventEmitter(), { goto: () => new Promise<null>(() => {}) });
   const startedAt = Date.now();
   await openStartPage(never as never, "http://slow/", 30);
   assert.ok(Date.now() - startedAt < 2_000);
 
-  const broken = { goto: () => Promise.reject(new Error("net::ERR_PROXY_CONNECTION_FAILED")) };
+  const broken = Object.assign(new EventEmitter(), {
+    goto: () => Promise.reject(new Error("net::ERR_PROXY_CONNECTION_FAILED")),
+  });
   await openStartPage(broken as never, "http://down/");
 });
