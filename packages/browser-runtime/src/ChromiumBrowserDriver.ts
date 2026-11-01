@@ -1338,9 +1338,16 @@ function buildCloakBrowserFingerprintArgs(profileId: ProfileId, fp: FingerprintC
     `--fingerprint-timezone=${fp.timezone}`,
     `--fingerprint-screen-width=${fp.screen.width}`,
     `--fingerprint-screen-height=${fp.screen.height}`,
+  ];
+  // CloakBrowser draws a taskbar for a Windows persona itself (48 px) and none for a Linux one,
+  // whose screen.availHeight and outerHeight then equal the screen's: CreepJS's noTaskbar and
+  // hasVvpScreenRes. The persona's available area says how much its panel takes.
+  const panel = fp.availScreen ? fp.screen.height - fp.availScreen.height : 0;
+  if (cloakBrowserPlatform(fp) === "linux" && panel > 0) args.push(`--fingerprint-taskbar-height=${panel}`);
+  args.push(
     `--fingerprint-hardware-concurrency=${fp.hardwareConcurrency}`,
     `--fingerprint-device-memory=${deviceMemoryApiValue(fp.deviceMemory)}`,
-  ];
+  );
   // Explicitly set WebGL vendor/renderer instead of relying on seed-derived
   // auto-generation. Browserscan flags "WebGL exception" when CloakBrowser's
   // seed-derived GPU pool produces inconsistent values for the current

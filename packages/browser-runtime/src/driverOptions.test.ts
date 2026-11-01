@@ -8,8 +8,8 @@ import { connect, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { ProfileManager } from "@multizen/profile-manager";
-import { MultizenError, type ChromiumStatus, type DisplayMode, type ProfileId } from "@multizen/types";
+import { generateFingerprint, ProfileManager, reconcileFingerprint } from "@multizen/profile-manager";
+import { MultizenError, type ChromiumStatus, type DeviceFamily, type DisplayMode, type ProfileId } from "@multizen/types";
 import {
   browserDataDirForEngine,
   ChromiumBrowserDriver,
@@ -631,6 +631,7 @@ const HEADED_FLAGS = [
   "--fingerprint-timezone",
   "--fingerprint-screen-width",
   "--fingerprint-screen-height",
+  "--fingerprint-taskbar-height",
   "--fingerprint-hardware-concurrency",
   "--fingerprint-device-memory",
   "--fingerprint-gpu-vendor",
@@ -692,6 +693,22 @@ test("headless adds exactly the two flags, before the positional URL, and change
     ]);
     assert.deepEqual(headless.filter((a) => !added.includes(a)), headed);
     assert.equal(headless.at(-1), headed.at(-1), "the positional URL stays last");
+  });
+});
+
+test("a Linux persona's panel reaches CloakBrowser as its taskbar, a Windows persona's doesn't", async () => {
+  await withProfile(async (pm, _id, dir) => {
+    const persona = (device: DeviceFamily) =>
+      reconcileFingerprint(generateFingerprint("taskbar", { hostFilter: false }), { device });
+    const argvOf = async (device: DeviceFamily): Promise<string[]> =>
+      launchArgv(pm, pm.create({ name: device, fingerprint: persona(device) }).id, dir);
+    const linux = persona("linux-laptop-nvidia");
+    const panel = linux.screen.height - (linux.availScreen?.height ?? linux.screen.height);
+    assert.ok(panel > 0, "a Linux persona leaves room for a panel");
+    assert.ok((await argvOf("linux-laptop-nvidia")).includes(`--fingerprint-taskbar-height=${panel}`));
+    // CloakBrowser's own Windows taskbar is what the desktop baseline measured: left alone.
+    const windows = await argvOf("windows-desktop-nvidia");
+    assert.equal(windows.some((a) => a.startsWith("--fingerprint-taskbar-height")), false);
   });
 });
 
