@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { jpegSize } from "@multizen/cdp-driver";
 import type { MultizenError, ProfileId } from "@multizen/types";
 import { EgressPolicy } from "./egressPolicy.ts";
 import {
@@ -50,6 +51,9 @@ class FakeLocator {
   }
   click(): Promise<void> {
     return this.act("click");
+  }
+  focus(): Promise<void> {
+    return this.act("focus");
   }
   fill(text: string): Promise<void> {
     return this.act("fill", text);
@@ -116,6 +120,19 @@ class FakeDownload {
   async saveAs(path: string): Promise<void> {
     writeFileSync(path, await this.saving());
   }
+  deleted = 0;
+  async delete(): Promise<void> {
+    this.deleted += 1;
+  }
+}
+
+/** Just the markers a size reader walks: SOI, an APP0, then a baseline start of frame. */
+function jpegOf(width: number, height: number): Buffer {
+  return Buffer.from([
+    0xff, 0xd8,
+    0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+    0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x03,
+  ]);
 }
 
 class FakePage extends EventEmitter {
@@ -139,11 +156,37 @@ class FakePage extends EventEmitter {
     },
     insertText: async (text: string): Promise<void> => void this.calls.push(`insert ${text}`),
     type: async (text: string): Promise<void> => void this.calls.push(`key ${text}`),
+    down: async (key: string): Promise<void> => {
+      if (key === "Process") throw new Error('Unknown key: "Process"');
+      this.calls.push(`keydown ${key}`);
+    },
+    up: async (key: string): Promise<void> => void this.calls.push(`keyup ${key}`),
   };
   mouse = {
     move: async (x: number, y: number): Promise<void> => void this.calls.push(`move ${x},${y}`),
     wheel: async (x: number, y: number): Promise<void> => void this.calls.push(`wheel ${x},${y}`),
+    down: async (o: unknown): Promise<void> => void this.calls.push(`down ${JSON.stringify(o)}`),
+    up: async (o: unknown): Promise<void> => void this.calls.push(`up ${JSON.stringify(o)}`),
   };
+  viewport: { width: number; height: number } | null = null;
+  viewportSize(): { width: number; height: number } | null {
+    return this.viewport;
+  }
+  /** Child frames, as boxes on the page. */
+  childFrames: Array<{ x: number; y: number; width: number; height: number; name: string }> = [];
+  frames(): unknown[] {
+    const main = { parentFrame: () => null };
+    return [
+      main,
+      ...this.childFrames.map((box) => ({
+        parentFrame: () => main,
+        frameElement: async () => ({
+          boundingBox: async () => box,
+          focus: async () => void this.calls.push(`focus frame ${box.name}`),
+        }),
+      })),
+    ];
+  }
   isClosed(): boolean {
     return this.closed;
   }
@@ -171,6 +214,7 @@ class FakePage extends EventEmitter {
   }
   async screenshot(opts: unknown): Promise<Buffer> {
     this.calls.push(`screenshot ${JSON.stringify(opts)}`);
+    if ((opts as { type: string }).type === "jpeg") return jpegOf(1280, 720);
     return Buffer.from("png");
   }
   async bringToFront(): Promise<void> {
@@ -679,7 +723,7 @@ test("press_key: ControlOrMeta is Command on a macOS persona; a target is clicke
     key: "ControlOrMeta+A",
     target: { ref: "p1.e1" },
   });
-  assert.deepEqual(page.calls, ["click aria-ref=e1", "press Meta+KeyA"]);
+  assert.deepEqual(page.calls, ["click aria-ref=e1", "focus aria-ref=e1", "press Meta+KeyA"]);
 });
 
 test("press_key: a glyph with no physical key is inserted", async (t) => {
@@ -694,7 +738,7 @@ test("type_ref clicks, then sends real keys one by one", async (t) => {
   await extract(driver);
   page.calls.length = 0;
   await driver.typeRef(ID, "p1.e1", "Hi");
-  assert.deepEqual(page.calls, ["click aria-ref=e1", "key H", "key i"]);
+  assert.deepEqual(page.calls, ["click aria-ref=e1", "focus aria-ref=e1", "key H", "key i"]);
 });
 
 test("type by selector stays fill", async (t) => {
@@ -794,11 +838,9 @@ test("screenshot leaves the caret alone: the default injects a style into the DO
   assert.deepEqual(page.calls, ['screenshot {"type":"png","caret":"initial"}']);
 });
 
-test("cdp_send and the handoff panel's verbs refuse by code; nothing else does", async (t) => {
+test("cdp_send refuses by code; nothing else does", async (t) => {
   const { driver } = rig(t);
   await assert.rejects(driver.cdpSend(), hasCode("UNSUPPORTED_ON_ENGINE"));
-  await assert.rejects(driver.captureFrame(), hasCode("UNSUPPORTED_ON_ENGINE"));
-  await assert.rejects(driver.dispatchInput(), hasCode("UNSUPPORTED_ON_ENGINE"));
   assert.deepEqual(await driver.listDownloads(ID), []);
   assert.deepEqual(await driver.listDialogs(ID), []);
   assert.deepEqual(await driver.setDialogPolicy(ID, { mode: "auto" }), { ok: true });
@@ -1386,4 +1428,180 @@ test("the start page: a slow one doesn't hold up the launch, and a failed one do
     goto: () => Promise.reject(new Error("net::ERR_PROXY_CONNECTION_FAILED")),
   });
   await openStartPage(broken as never, "http://down/");
+});
+
+// ── the handoff panel: frames, input, handoff mode ───────────────────────────
+
+test("jpegSize reads a start of frame, past other markers and not fooled by the rest", () => {
+  assert.deepEqual(jpegSize(jpegOf(1280, 720)), { width: 1280, height: 720 });
+  assert.equal(jpegSize(Buffer.from([0xff, 0xd8])), null);
+  assert.equal(jpegSize(Buffer.from([0xff, 0xd8, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88])), null);
+});
+
+test("a frame leaves the DOM alone, and takes its size from the image, not from the page", async (t) => {
+  const { driver, page } = rig(t);
+  page.currentUrl = "http://t/page";
+  const frame = await driver.captureFrame(ID);
+  assert.deepEqual(frame.viewport, { width: 1280, height: 720 });
+  assert.equal(frame.url, "http://t/page");
+  assert.equal(frame.targetId, "1");
+  assert.deepEqual(page.calls, [
+    'screenshot {"type":"jpeg","quality":60,"caret":"initial","animations":"allow","scale":"css","timeout":5000}',
+  ]);
+  await driver.captureFrame(ID, { quality: 30 });
+  assert.match(page.calls[1]!, /"quality":30/);
+});
+
+test("a frame with a dialog open says DIALOG_OPEN, with the dialog", async (t) => {
+  const { driver, page } = rig(t);
+  await driver.setHandoffMode(ID, true);
+  page.emit("dialog", new FakeDialog("confirm", "Sure?", page));
+  await assert.rejects(driver.captureFrame(ID), (e: MultizenError) => {
+    assert.equal(e.code, "DIALOG_OPEN");
+    assert.equal(e.details?.message, "Sure?");
+    return true;
+  });
+  assert.deepEqual(page.calls, [], "the page is never asked");
+});
+
+test("human mouse input lands at the fraction of the last frame's size", async (t) => {
+  const { driver, page } = rig(t);
+  await driver.captureFrame(ID);
+  page.calls.length = 0;
+  await driver.dispatchInput(ID, { kind: "mouse", action: "move", x: 0.5, y: 0.25, button: "none", buttons: 0 });
+  await driver.dispatchInput(ID, { kind: "mouse", action: "down", x: 0.5, y: 0.25, button: "left", buttons: 1, clickCount: 2 });
+  await driver.dispatchInput(ID, { kind: "mouse", action: "up", x: 0.5, y: 0.25, button: "left", buttons: 0, clickCount: 2 });
+  await driver.dispatchInput(ID, { kind: "wheel", x: 0, y: 1, deltaX: 3, deltaY: 120 });
+  assert.deepEqual(page.calls, [
+    "move 640,180",
+    "move 640,180",
+    'down {"button":"left","clickCount":2}',
+    "move 640,180",
+    'up {"button":"left","clickCount":2}',
+    "move 0,720",
+    "wheel 3,120",
+  ]);
+});
+
+test("human keys press what Playwright knows, insert what it doesn't, and skip what means nothing", async (t) => {
+  const { driver, page } = rig(t);
+  const key = (action: "down" | "up", name: string, text?: string) =>
+    driver.dispatchInput(ID, { kind: "key", action, key: name, code: "", keyCode: 0, modifiers: 0, ...(text ? { text } : {}) });
+  await key("down", "a", "a");
+  await key("up", "a");
+  await key("down", "Enter", "\r");
+  await key("up", "Enter");
+  await key("down", "ф", "ф");
+  await key("up", "ф");
+  await key("down", "😀", "😀");
+  await key("down", "Process");
+  await driver.dispatchInput(ID, { kind: "text", text: "你好 🎉" });
+  assert.deepEqual(page.calls, [
+    "keydown a",
+    "keyup a",
+    "keydown Enter",
+    "keyup Enter",
+    "insert ф",
+    "insert 😀",
+    "insert 你好 🎉",
+  ]);
+});
+
+test("handoff mode holds a dialog open whatever the policy, and gives it back to the policy after", async (t) => {
+  const { driver, page } = rig(t);
+  await driver.setHandoffMode(ID, true);
+  const held = new FakeDialog("confirm", "Sure?", page);
+  page.emit("dialog", held);
+  assert.deepEqual(held.answers, [], "auto mode would have answered it");
+  assert.equal((await driver.listDialogs(ID))[0]?.message, "Sure?");
+  await driver.setDialogPolicy(ID, { mode: "auto", confirm: "accept" });
+  assert.deepEqual(held.answers, [], "a policy set meanwhile waits for the end");
+  await driver.setHandoffMode(ID, false);
+  assert.deepEqual(held.answers, [["accept", undefined]]);
+  assert.deepEqual(await driver.listDialogs(ID), []);
+
+  const after = new FakeDialog("alert", "after", page);
+  page.emit("dialog", after);
+  assert.deepEqual(after.answers, [["accept", undefined]], "back to auto");
+});
+
+test("handoff mode catches choosers on every page, popups included, and stops when it ends", async (t) => {
+  const { driver, page, context } = rig(t);
+  assert.equal(page.listenerCount("filechooser"), 0, "no handoff, no listener: the browser's own dialog");
+  await driver.setHandoffMode(ID, true);
+  assert.equal(page.listenerCount("filechooser"), 1);
+  const popup = context.addPage();
+  assert.equal(popup.listenerCount("filechooser"), 1);
+
+  const files: string[][] = [];
+  const chooser = (multiple: boolean) => ({
+    isMultiple: () => multiple,
+    setFiles: async (paths: string[]): Promise<void> => void files.push(paths),
+  });
+  page.emit("filechooser", chooser(false));
+  popup.emit("filechooser", chooser(true));
+  const open = await driver.listFileChoosers(ID);
+  assert.deepEqual(open.map((c) => [c.targetId, c.multiple]), [["1", false], ["2", true]]);
+  assert.equal("chooser" in open[0]!, false);
+
+  page.emit("filechooser", chooser(true));
+  assert.equal((await driver.listFileChoosers(ID)).length, 2, "clicking again replaces it");
+
+  const [first, second] = await driver.listFileChoosers(ID);
+  await driver.respondFileChooser(ID, second!.id, ["C:/inbox/a.txt"]);
+  assert.deepEqual(files, [["C:/inbox/a.txt"]]);
+  await assert.rejects(driver.respondFileChooser(ID, second!.id, ["x"]), hasCode("INVALID_INPUT"));
+  await driver.dismissFileChooser(ID, first!.id);
+  assert.deepEqual(await driver.listFileChoosers(ID), []);
+
+  page.emit("filechooser", chooser(false));
+  await driver.setHandoffMode(ID, false);
+  assert.deepEqual(await driver.listFileChoosers(ID), []);
+  assert.equal(page.listenerCount("filechooser"), 0);
+  assert.equal(popup.listenerCount("filechooser"), 0);
+});
+
+test("the panel's verbs on a stopped profile report PROFILE_NOT_RUNNING", async (t) => {
+  const { driver, context } = rig(t);
+  await context.close();
+  await assert.rejects(driver.captureFrame(ID), hasCode("PROFILE_NOT_RUNNING"));
+  await assert.rejects(driver.dispatchInput(ID, { kind: "text", text: "x" }), hasCode("PROFILE_NOT_RUNNING"));
+  await assert.rejects(driver.setHandoffMode(ID, true), hasCode("PROFILE_NOT_RUNNING"));
+});
+
+test("a press over a frame gives its owner focus first, or the press only focuses the frame", async (t) => {
+  const { driver, page } = rig(t);
+  await driver.captureFrame(ID);
+  page.childFrames = [
+    { name: "outer", x: 100, y: 100, width: 400, height: 200 },
+    { name: "inner", x: 150, y: 150, width: 100, height: 50 },
+  ];
+  page.calls.length = 0;
+  const press = (x: number, y: number) =>
+    driver.dispatchInput(ID, { kind: "mouse", action: "down", x: x / 1280, y: y / 720, button: "left", buttons: 1 });
+
+  await press(160, 160);
+  assert.deepEqual(page.calls.slice(0, 2), ["focus frame inner", "move 160,160"], "the deepest, before the press");
+  page.calls.length = 0;
+  await press(110, 110);
+  assert.equal(page.calls[0], "focus frame outer");
+  page.calls.length = 0;
+  await press(10, 10);
+  assert.equal(page.calls[0], "move 10,10", "over the page itself, nothing moves focus early");
+  page.calls.length = 0;
+  await driver.dispatchInput(ID, { kind: "mouse", action: "move", x: 160 / 1280, y: 160 / 720, button: "none", buttons: 0 });
+  await driver.dispatchInput(ID, { kind: "mouse", action: "up", x: 160 / 1280, y: 160 / 720, button: "left", buttons: 0 });
+  assert.ok(!page.calls.some((c) => c.startsWith("focus")), "only a press moves it");
+});
+
+test("keys after a click make sure the element has focus: a frame may only have taken it", async (t) => {
+  const { driver, page } = rig(t);
+  withButton(page);
+  await extract(driver);
+  page.calls.length = 0;
+  await driver.typeRef(ID, "p1.e1", "x");
+  assert.deepEqual(page.calls, ["click aria-ref=e1", "focus aria-ref=e1", "key x"]);
+  page.calls.length = 0;
+  await driver.performAction(ID, { type: "press_key", key: "Enter", target: { ref: "p1.e1" } });
+  assert.deepEqual(page.calls.slice(0, 2), ["click aria-ref=e1", "focus aria-ref=e1"]);
 });

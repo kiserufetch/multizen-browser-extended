@@ -11,6 +11,8 @@ const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|c
 /** On Windows the browser or a scanner can still hold a file just reported complete. */
 const RENAME_ATTEMPTS = 8;
 const RENAME_RETRY_MS = 250;
+/** What a server lets one profile's downloads take. */
+export const DOWNLOAD_QUOTA_BYTES = 2 * 1024 ** 3;
 
 /**
  * A safe file name from one a web server suggested: no directories, nothing a
@@ -46,6 +48,13 @@ export class DownloadTracker {
   private readonly idByGuid = new Map<string, string>();
   /** Renames and index writes, one at a time, in event order. */
   private queue: Promise<void> = Promise.resolve();
+  /**
+   * What this profile's downloads may take. Over it a download is stopped and deleted.
+   * Default none: a person's downloads on a desktop aren't ours to stop.
+   */
+  quotaBytes = Infinity;
+  /** Stops a download in the browser, by its guid. Set by the driver that runs it. */
+  stopDownload: ((guid: string) => void) | null = null;
 
   private constructor(readonly dir: string) {}
 
@@ -95,6 +104,10 @@ export class DownloadTracker {
     if (!entry || entry.state !== "in_progress") return;
     entry.bytesReceived = event.receivedBytes;
     entry.bytesTotal = event.totalBytes > 0 ? event.totalBytes : null;
+    if (event.state !== "canceled" && this.usedBytes() > this.quotaBytes) {
+      this.refuseOverQuota(entry);
+      return;
+    }
     if (event.state === "completed") {
       this.enqueue(async () => {
         await this.finish(entry);
@@ -107,6 +120,48 @@ export class DownloadTracker {
         await this.save();
       });
     }
+  }
+
+  /**
+   * For an engine whose downloads report no progress: the bytes all of them have on disk so
+   * far. Past the quota every one under way is stopped, since which is at fault can't be told.
+   */
+  reportBytesUnderWay(bytes: number): void {
+    if (this.completedBytes() + bytes <= this.quotaBytes) return;
+    for (const entry of this.entries.values()) {
+      if (entry.state === "in_progress") this.refuseOverQuota(entry);
+    }
+  }
+
+  private completedBytes(): number {
+    let total = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.state === "completed") total += entry.bytesReceived;
+    }
+    return total;
+  }
+
+  /** A download of known size counts in full from its first report: why fetch what can't stay. */
+  private usedBytes(): number {
+    let total = this.completedBytes();
+    for (const entry of this.entries.values()) {
+      if (entry.state === "in_progress") total += Math.max(entry.bytesReceived, entry.bytesTotal ?? 0);
+    }
+    return total;
+  }
+
+  private refuseOverQuota(entry: Entry): void {
+    entry.state = "canceled";
+    entry.canceledBy = "quota";
+    this.stopDownload?.(entry.guid);
+    this.enqueue(async () => {
+      await rm(join(this.dir, entry.guid), {
+        force: true,
+        maxRetries: RENAME_ATTEMPTS,
+        retryDelay: RENAME_RETRY_MS,
+      }).catch(() => {});
+      await this.save();
+    });
   }
 
   private enqueue(job: () => Promise<void>): void {

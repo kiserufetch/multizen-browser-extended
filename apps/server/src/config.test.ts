@@ -576,3 +576,44 @@ test("secrets rotate", () => {
   assert.throws(() => parseSecretsCommand(["other"], {}, LINUX), /needs "rotate"/);
   assert.throws(() => parseSecretsCommand(["rotate", "x"], {}, LINUX), /Unexpected argument/);
 });
+
+// ── handoff flags ────────────────────────────────────────────────────────────
+
+test("the webhook, its secret and the TTL come from flags or the environment", () => {
+  const fromFlags = parseServeConfig(
+    ["--handoff-webhook", "https://hooks.example/x", "--handoff-webhook-secret", "s", "--handoff-ttl-ms", "5000"],
+    {},
+    LINUX,
+  );
+  assert.equal(fromFlags.handoffWebhook, "https://hooks.example/x");
+  assert.equal(fromFlags.handoffWebhookSecret, "s");
+  assert.equal(fromFlags.handoffTtlMs, 5000);
+
+  const fromEnv = parseServeConfig(
+    [],
+    {
+      MULTIZEN_HANDOFF_WEBHOOK: "http://127.0.0.1:9/h",
+      MULTIZEN_HANDOFF_WEBHOOK_SECRET: "s2",
+      MULTIZEN_HANDOFF_TTL_MS: "60000",
+      MULTIZEN_DOWNLOAD_QUOTA_BYTES: "1000",
+    },
+    LINUX,
+  );
+  assert.equal(fromEnv.handoffWebhook, "http://127.0.0.1:9/h");
+  assert.equal(fromEnv.handoffWebhookSecret, "s2");
+  assert.equal(fromEnv.handoffTtlMs, 60000);
+  assert.equal(fromEnv.downloadQuotaBytes, 1000);
+
+  const plain = parseServeConfig([], {}, LINUX);
+  assert.equal(plain.handoffWebhook, undefined);
+  assert.equal(plain.handoffTtlMs, undefined);
+  assert.equal(plain.downloadQuotaBytes, 2 * 1024 ** 3);
+});
+
+test("a webhook must be http(s), and a secret needs a webhook", () => {
+  assert.throws(() => parseServeConfig(["--handoff-webhook", "file:///x"], {}, LINUX), UsageError);
+  assert.throws(() => parseServeConfig(["--handoff-webhook", "nope"], {}, LINUX), UsageError);
+  assert.throws(() => parseServeConfig(["--handoff-webhook-secret", "s"], {}, LINUX), UsageError);
+  assert.throws(() => parseServeConfig(["--handoff-ttl-ms", "0"], {}, LINUX), UsageError);
+  assert.throws(() => parseServeConfig(["--download-quota-bytes", "x"], {}, LINUX), UsageError);
+});

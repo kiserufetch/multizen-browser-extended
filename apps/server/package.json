@@ -14,7 +14,7 @@
     "build": "node scripts/build.mjs",
     "dev": "tsx src/cli.ts serve",
     "e2e": "tsx scripts/e2e.ts",
-    "test": "node --import tsx --test src/config.test.ts src/log.test.ts src/nodeHost.test.ts src/shutdown.test.ts src/runtime.test.ts src/bundle.test.ts src/secretKey.test.ts src/integration.test.ts src/concurrency.test.ts src/sandboxPreflight.test.ts src/relayKeepAlive.test.ts",
+    "test": "node --import tsx --test src/config.test.ts src/log.test.ts src/nodeHost.test.ts src/shutdown.test.ts src/runtime.test.ts src/bundle.test.ts src/secretKey.test.ts src/integration.test.ts src/concurrency.test.ts src/sandboxPreflight.test.ts src/relayKeepAlive.test.ts src/handoffWebhook.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

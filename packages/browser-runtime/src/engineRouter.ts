@@ -20,6 +20,7 @@ import type {
   DownloadRecord,
   DriverAction,
   HumanInputEvent,
+  OpenFileChooser,
   LaunchedProfile,
   LaunchOptions,
   OpenDialog,
@@ -69,7 +70,7 @@ export interface EngineRouterOptions {
   /** Passed to the Firefox driver, which the router itself constructs lazily. */
   firefoxOptions?: Pick<
     FirefoxBrowserDriverOptions,
-    "launchExtras" | "extraPrefs" | "egress" | "processJournal" | "xvfbRunDir"
+    "launchExtras" | "extraPrefs" | "egress" | "processJournal" | "xvfbRunDir" | "downloadQuotaBytes"
   >;
   /**
    * A launch while the engine is still installing. `wait` (the default, the desktop
@@ -479,6 +480,18 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   }
   dispatchInput(profileId: ProfileId, event: HumanInputEvent): Promise<void> {
     return this.require(profileId).dispatchInput(profileId, event);
+  }
+  async setHandoffMode(profileId: ProfileId, active: boolean): Promise<void> {
+    await this.require(profileId).setHandoffMode?.(profileId, active);
+  }
+  async listFileChoosers(profileId: ProfileId): Promise<OpenFileChooser[]> {
+    return (await this.require(profileId).listFileChoosers?.(profileId)) ?? [];
+  }
+  async respondFileChooser(profileId: ProfileId, chooserId: string, paths: string[]): Promise<void> {
+    await this.require(profileId).respondFileChooser?.(profileId, chooserId, paths);
+  }
+  async dismissFileChooser(profileId: ProfileId, chooserId: string): Promise<void> {
+    await this.require(profileId).dismissFileChooser?.(profileId, chooserId);
   }
   hasOpenDialog(profileId: ProfileId): boolean {
     return this.bindings.get(profileId)?.hasOpenDialog?.(profileId) ?? false;

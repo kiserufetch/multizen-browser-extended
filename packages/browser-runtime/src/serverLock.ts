@@ -169,7 +169,10 @@ function parseRecord(raw: string): ServerLockRecord | null {
  * no proof on its own, since compose fixes it. When the OS cannot answer, the lock
  * counts as held: refusing is recoverable, two servers on one dir are not.
  */
-async function holderIsAlive(record: ServerLockRecord, deps: ServerLockDeps): Promise<boolean> {
+export async function holderIsAlive(
+  record: Pick<ServerLockRecord, "hostname" | "pid" | "startTime" | "cmdline">,
+  deps: ServerLockDeps,
+): Promise<boolean> {
   if (record.hostname !== deps.hostname()) return false;
   if (record.pid === deps.pid) return false;
   let identity: ProcessIdentity | null;

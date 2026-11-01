@@ -11,6 +11,8 @@ Usage:
                         [--public-url <url>] [--trust-proxy]
                         [--session-idle-ttl-ms <ms>] [--max-sessions <n>]
                         [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
+                        [--handoff-webhook <url>] [--handoff-webhook-secret <secret>]
+                        [--handoff-ttl-ms <ms>] [--download-quota-bytes <n>]
   multizen-server stdio [--data-dir <dir>] [--default-engine cloakbrowser|camoufox]
                         [--uploads-root <dir>] [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
                         [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
@@ -30,7 +32,9 @@ MULTIZEN_BROWSER_QUEUE_TIMEOUT_MS, MULTIZEN_ARCHIVE_PASSPHRASE, MULTIZEN_ALLOW_R
 MULTIZEN_ALLOW_INSECURE_REMOTE=1, MULTIZEN_TLS_CERT, MULTIZEN_TLS_KEY, MULTIZEN_ALLOWED_HOSTS,
 MULTIZEN_ALLOWED_ORIGINS, MULTIZEN_PUBLIC_URL, MULTIZEN_TRUST_PROXY=1,
 MULTIZEN_SESSION_IDLE_TTL_MS, MULTIZEN_MAX_SESSIONS, MULTIZEN_SECRET_KEY,
-MULTIZEN_SECRET_KEY_NEW (secrets rotate only), MULTIZEN_EGRESS_POLICY, MULTIZEN_EGRESS_ALLOW.
+MULTIZEN_SECRET_KEY_NEW (secrets rotate only), MULTIZEN_EGRESS_POLICY, MULTIZEN_EGRESS_ALLOW,
+MULTIZEN_HANDOFF_WEBHOOK, MULTIZEN_HANDOFF_WEBHOOK_SECRET, MULTIZEN_HANDOFF_TTL_MS,
+MULTIZEN_DOWNLOAD_QUOTA_BYTES.
 
 --max-browsers counts both engines and defaults to what the machine's memory allows.
 
@@ -48,6 +52,16 @@ metadata addresses, at their network level and with EGRESS_BLOCKED from navigate
 pointing at one. --egress-allow names exceptions: an IP, a CIDR, a name or *.suffix, each with an
 optional :port. A token with the raw group can defeat this policy: cdp_send can open a browser
 context with its own proxy. Don't give raw to anything you are using this policy against.
+
+When an agent calls request_human, a person takes over at <server>/panel, signing in with a token
+that holds the operator group: they see the page, type into it and answer its dialogs, then press
+Resume or Abort. Until then the agent's page actions get HUMAN_IN_CONTROL. A handoff expires after
+15 minutes unless --handoff-ttl-ms says otherwise. --handoff-webhook is told about each new one, by a
+POST of JSON, with an HMAC of the body in X-MultiZen-Signature if a secret is set (prefer
+MULTIZEN_HANDOFF_WEBHOOK_SECRET: the command line is readable by others). A failure only costs a log
+line. A profile's downloads may take 2 GB unless --download-quota-bytes says otherwise; past that the
+download is stopped and deleted. One too large for get_download is at the path its error names, with
+the same token.
 
 Proxy passwords are encrypted with MULTIZEN_SECRET_KEY (hex or base64, 32 bytes) or
 <data-dir>/secret.key, which is created if neither exists.

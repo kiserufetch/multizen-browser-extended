@@ -170,3 +170,87 @@ test("an unreadable index starts empty and doesn't stop anything", async () => {
   await complete(tracker, "g", "a.txt");
   assert.ok(readdirSync(dir).includes("a.txt"));
 });
+
+// ── the quota ────────────────────────────────────────────────────────────────
+
+test("with no quota set, the desktop's way, any size goes", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  tracker.began({ guid: "g", url: "http://t/", suggestedFilename: "huge.bin" });
+  tracker.progress({ guid: "g", totalBytes: 1e12, receivedBytes: 1e11, state: "inProgress" });
+  assert.equal(tracker.list()[0]?.state, "in_progress");
+});
+
+test("a download that would go past the quota is stopped and deleted, saying why", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  tracker.quotaBytes = 100;
+  const stopped: string[] = [];
+  tracker.stopDownload = (guid) => stopped.push(guid);
+  await complete(tracker, "kept", "kept.bin", "x".repeat(40));
+
+  tracker.began({ guid: "big", url: "http://t/big", suggestedFilename: "big.bin" });
+  writeFileSync(join(tracker.dir, "big"), "partial");
+  tracker.progress({ guid: "big", totalBytes: 0, receivedBytes: 50, state: "inProgress" });
+  assert.equal(tracker.list().find((d) => d.fileName === "big.bin")?.state, "in_progress", "still fits");
+  tracker.progress({ guid: "big", totalBytes: 0, receivedBytes: 61, state: "inProgress" });
+  await tracker.settled();
+
+  const refused = tracker.list().find((d) => d.fileName === "big.bin")!;
+  assert.equal(refused.state, "canceled");
+  assert.equal(refused.canceledBy, "quota");
+  assert.deepEqual(stopped, ["big"]);
+  assert.equal(existsSync(join(tracker.dir, "big")), false);
+  assert.equal(tracker.get(refused.id)?.path, null);
+
+  // Later reports about it change nothing.
+  tracker.progress({ guid: "big", totalBytes: 61, receivedBytes: 61, state: "completed" });
+  await tracker.settled();
+  assert.equal(tracker.get(refused.id)?.state, "canceled");
+});
+
+test("a known size counts in full from the first report: why fetch what can't stay", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  tracker.quotaBytes = 100;
+  const stopped: string[] = [];
+  tracker.stopDownload = (guid) => stopped.push(guid);
+  tracker.began({ guid: "g", url: "http://t/", suggestedFilename: "big.bin" });
+  tracker.progress({ guid: "g", totalBytes: 101, receivedBytes: 1, state: "inProgress" });
+  assert.deepEqual(stopped, ["g"]);
+});
+
+test("a download that only reveals its size at the end still counts", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  tracker.quotaBytes = 100;
+  tracker.began({ guid: "g", url: "http://t/", suggestedFilename: "big.bin" });
+  writeFileSync(join(tracker.dir, "g"), "x".repeat(200));
+  tracker.progress({ guid: "g", totalBytes: 200, receivedBytes: 200, state: "completed" });
+  await tracker.settled();
+  assert.equal(tracker.list()[0]?.state, "canceled");
+  assert.equal(tracker.list()[0]?.canceledBy, "quota");
+  assert.deepEqual(readdirSync(tracker.dir).filter((f) => !f.startsWith(".")), []);
+});
+
+test("an engine with no progress reports its bytes under way, and every download stops at the quota", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  tracker.quotaBytes = 100;
+  const stopped: string[] = [];
+  tracker.stopDownload = (guid) => stopped.push(guid);
+  await complete(tracker, "kept", "kept.bin", "x".repeat(40));
+  tracker.began({ guid: "a", url: "http://t/a", suggestedFilename: "a.bin" });
+  tracker.began({ guid: "b", url: "http://t/b", suggestedFilename: "b.bin" });
+  tracker.reportBytesUnderWay(60);
+  assert.deepEqual(stopped, [], "exactly the quota still fits");
+  tracker.reportBytesUnderWay(61);
+  assert.deepEqual(stopped.sort(), ["a", "b"]);
+  await tracker.settled();
+  assert.equal(tracker.list().find((d) => d.fileName === "kept.bin")?.state, "completed", "what's kept stays");
+});
+
+test("a canceled download doesn't count against the quota", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  tracker.quotaBytes = 100;
+  tracker.began({ guid: "a", url: "http://t/a", suggestedFilename: "a.bin" });
+  tracker.progress({ guid: "a", totalBytes: 0, receivedBytes: 90, state: "canceled" });
+  await tracker.settled();
+  await complete(tracker, "b", "b.bin", "x".repeat(90));
+  assert.equal(tracker.list().find((d) => d.fileName === "b.bin")?.state, "completed");
+});

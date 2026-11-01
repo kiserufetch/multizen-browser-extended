@@ -22,6 +22,8 @@ export * from "./cdpReadiness.ts";
 export * from "./processTree.ts";
 export * from "./portProbe.ts";
 export * from "./serverLock.ts";
+export * from "./desktopLock.ts";
+export * from "./downloads.ts";
 export * from "./runState.ts";
 export * from "./firefoxFingerprint.ts";
 export * from "./startPage.ts";

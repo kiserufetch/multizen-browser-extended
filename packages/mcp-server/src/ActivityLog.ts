@@ -62,6 +62,24 @@ export class ActivityLog extends EventEmitter {
     this.emit("event", event);
   }
 
+  /**
+   * Something that happened to a handoff rather than a tool call, as `handoff.resumed` and
+   * the like, with who did it. Never a frame or anything a person typed: there's no field
+   * for it to go in.
+   */
+  recordLifecycle(name: string, fields: { profileId?: string; actor?: string; summary?: string }): void {
+    this.push({
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: new Date().toISOString(),
+      tool: name,
+      ...(fields.actor !== undefined ? { actor: fields.actor } : {}),
+      ...(fields.profileId !== undefined ? { profileId: fields.profileId } : {}),
+      args: {},
+      status: "ok",
+      ...(fields.summary !== undefined ? { summary: fields.summary } : {}),
+    });
+  }
+
   recent(limit = 200): ActivityEvent[] {
     return this.buffer.slice(-limit);
   }
@@ -120,10 +138,10 @@ export const LOGGED_ARGS: ReadonlyMap<string, readonly string[]> = new Map<strin
   ["type", ["profile_id", "selector", "text"]],
   ["click_ref", ["profile_id", "ref"]],
   ["type_ref", ["profile_id", "ref", "text"]],
-  ["request_human", ["profile_id", "reason"]],
-  ["wait_for_human", ["profile_id", "timeout_ms"]],
+  ["request_human", ["profile_id", "reason", "kind"]],
+  ["wait_for_human", ["profile_id", "timeout_ms", "handoff_id"]],
   ["resume_human", PROFILE],
-  ["get_human_status", PROFILE],
+  ["get_human_status", ["profile_id", "handoff_id"]],
   ["cdp_send", [...PROFILE_AND_SESSION, "method"]],
   ["cdp_send_no_safety", [...PROFILE_AND_SESSION, "method"]],
   ["evaluate_js", PROFILE_AND_SESSION],

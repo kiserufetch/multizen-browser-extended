@@ -65,6 +65,14 @@ export interface MultizenMcpServerOptions {
   maxInlineFileBytes?: number;
   /** Refuses addresses at the tool level. The drivers enforce it at the network level. */
   egress?: EgressGate;
+  /**
+   * While a handoff is pending, the profile is the person's: agents get HUMAN_IN_CONTROL,
+   * as toolPolicy.ts lays out per tool. For a server, whose panel can end a handoff. Off, the
+   * desktop's and plain stdio's way, a handoff only tells a person, and blocks no agent.
+   */
+  handoffGate?: boolean;
+  /** Where a download too large to send inline can be fetched from, without a trailing slash. */
+  downloadsBaseUrl?: string;
 }
 
 export interface MultizenMcpServer {
@@ -102,10 +110,6 @@ const ClickRefSchema = ProfileIdSchema.extend({ ref: z.string().min(1) });
 const TypeRefSchema = ProfileIdSchema.extend({
   ref: z.string().min(1),
   text: z.string(),
-});
-const RequestHumanSchema = ProfileIdSchema.extend({ reason: z.string().min(1) });
-const WaitForHumanSchema = ProfileIdSchema.extend({
-  timeout_ms: z.number().int().positive().optional(),
 });
 const ExtractSchema = ProfileIdSchema;
 
@@ -279,7 +283,7 @@ const MULTIZEN_MCP_INSTRUCTIONS = [
   "- Each profile opens in a display mode: headed (a visible window), headless (no window), or xvfb (Linux: a window on a private virtual display nobody sees). list_profiles shows the saved mode and, while running, the running one. launch_profile takes an optional display_mode; a running profile keeps its mode, so asking for another gives PROFILE_ALREADY_RUNNING until you close_profile. Without a visible window, read the page with screenshot and extract. A server started with --headless runs everything headless and refuses any other display_mode with INVALID_INPUT.",
   "- Camoufox has no CDP: cdp_send and cdp_send_no_safety refuse on it with UNSUPPORTED_ON_ENGINE. Refs and every page tool work on both engines. On Camoufox extract gives the tree as ariaSnapshot text, with refs like 'p3.e7'.",
   "- A server may keep its browsers off private, loopback and cloud metadata addresses. navigate and new_tab to one, a navigation redirected to one, and a proxy at one give EGRESS_BLOCKED, which a retry won't change. A page's own requests to them just fail.",
-  "- On a CAPTCHA, 2FA prompt, or other human-verification wall, do not attempt to solve or bypass it yourself — pause and let the user handle it, then continue. The session carries over.",
+  "- On a CAPTCHA, 2FA prompt, or other human-verification wall, do not attempt to solve or bypass it yourself — call request_human, wait until get_human_status or wait_for_human says resumed, then continue. The session carries over. A server may refuse your page actions with HUMAN_IN_CONTROL until then, and for a 2fa or login handoff your extract, screenshot and get_cookies too.",
   "- Do not create or launch profiles in bulk to farm accounts; this tool supports autonomous execution of authorized workflows.",
 ].join("\n");
 
@@ -337,6 +341,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
           driver: browserDriver,
           egress: opts.egress,
           profiles: profileManager,
+          handoffGate: opts.handoffGate ?? false,
         },
         (driver) =>
           dispatch(name, args, {
@@ -348,6 +353,8 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
             getDefaultEngine,
             uploadsRoot: opts.uploadsRoot,
             maxInlineFileBytes: opts.maxInlineFileBytes,
+            handoffGate: opts.handoffGate ?? false,
+            downloadsBaseUrl: opts.downloadsBaseUrl,
           }),
       );
       const image = asImageResult(result);
@@ -376,7 +383,7 @@ async function dispatch(
   args: Record<string, unknown>,
   deps: DispatchDeps,
 ): Promise<unknown> {
-  const { profileManager, browserDriver, handoff, getDefaultEngine } = deps;
+  const { profileManager, browserDriver, getDefaultEngine } = deps;
   switch (name) {
     case "list_profiles": {
       const defaultEngine = getDefaultEngine();
@@ -552,31 +559,6 @@ async function dispatch(
       const { profile_id, ref, text } = TypeRefSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
       return await browserDriver.typeRef(profile_id, ref, text);
-    }
-    case "request_human": {
-      const { profile_id, reason } = RequestHumanSchema.parse(args);
-      assertProfileRunning(browserDriver, profile_id);
-      handoff.request(profile_id, reason);
-      // Surface the window to the operator (best-effort; don't fail the call).
-      await browserDriver
-        .cdpSend(profile_id, "Page.bringToFront", {}, undefined, { safe: true })
-        .catch(() => {});
-      return {
-        status: "waiting_for_human",
-        reason,
-        note: "A human must complete this step (e.g. CAPTCHA/2FA) in the browser window. A profile running headless or under xvfb has no window they can reach: close it and launch it with display_mode headed if this machine has a display. Call wait_for_human to block until they resume.",
-      };
-    }
-    case "wait_for_human": {
-      const { profile_id, timeout_ms } = WaitForHumanSchema.parse(args);
-      assertProfileRunning(browserDriver, profile_id);
-      const { resumed } = await handoff.waitFor(profile_id, timeout_ms ?? 300_000);
-      return { resumed, timedOut: !resumed };
-    }
-    case "resume_human": {
-      const { profile_id } = ProfileIdSchema.parse(args);
-      handoff.resume(profile_id);
-      return { ok: true };
     }
     case "extract": {
       const { profile_id } = ExtractSchema.parse(args);
@@ -1046,7 +1028,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "request_human",
     description:
-      "Hand control to a human for a step the agent must NOT do itself — a CAPTCHA, a 2FA/OTP prompt, or any manual verification. Brings the browser window forward, on a profile that has a visible one, and marks the profile as awaiting a human in the app. Call wait_for_human next to block until the person is done. Never attempt to solve CAPTCHA or 2FA yourself.",
+      "Hand control to a human for a step the agent must NOT do itself — a CAPTCHA, a 2FA/OTP prompt, or any manual verification. Returns at once with a handoff_id and when it expires (15 min by default). Brings the browser window forward, on a profile that has a visible one, and marks the profile as awaiting a human in the app. A profile with no window (headless, xvfb) is worked on in the handoff panel at /panel on this server. Calling it again while one is pending returns the same handoff, keeping its kind and expiry. Say what it is with kind: for 2fa and login a server also refuses your extract, screenshot and get_cookies, since the page shows what the person types; for the others those keep working. Your page actions get HUMAN_IN_CONTROL on a server until it ends. Follow with wait_for_human or get_human_status. Never attempt to solve CAPTCHA or 2FA yourself.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "reason"],
@@ -1056,13 +1038,18 @@ export const TOOL_DEFINITIONS = [
           type: "string",
           description: "What the human needs to do, e.g. 'solve CAPTCHA' or 'enter 2FA code'",
         },
+        kind: {
+          type: "string",
+          enum: ["captcha", "2fa", "login", "confirm", "other"],
+          description: "What sort of step this is (default other).",
+        },
       },
     },
   },
   {
     name: "wait_for_human",
     description:
-      "Block until a human resumes the profile (after request_human) or the timeout elapses. Returns { resumed, timedOut }. If there is no pending handoff, returns immediately as resumed.",
+      "Wait until a handoff from request_human ends, or the timeout elapses. Returns { resumed, timedOut, status, handoff_id }; status is pending when the wait ran out, so call again, and resumed, aborted or expired when it ended. Only resumed means the person did the step. Waits at most 55 s per call. Pass handoff_id to wait for one in particular; an id this server doesn't know, as after a restart, gets HANDOFF_NOT_FOUND.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1070,15 +1057,16 @@ export const TOOL_DEFINITIONS = [
         profile_id: { type: "string" },
         timeout_ms: {
           type: "number",
-          description: "Max wait in ms (default 300000 = 5 min).",
+          description: "Max wait in ms (default 50000, at most 55000).",
         },
+        handoff_id: { type: "string", description: "Id from request_human" },
       },
     },
   },
   {
     name: "resume_human",
     description:
-      "Clear a pending human handoff for the profile (unblocks wait_for_human). Normally the operator triggers this from the app UI; exposed as a tool for automated/testing flows.",
+      "Clear a pending human handoff for the profile (unblocks wait_for_human as resumed). Needs a token with the operator group. Normally the operator triggers this from the app UI or the panel; exposed as a tool for automated/testing flows.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],

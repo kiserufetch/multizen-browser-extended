@@ -1232,3 +1232,115 @@ test("egress: a server blocks private addresses unless told otherwise, and says 
     removeDir(dir);
   }
 });
+
+// ── the panel's routes, and a live desktop ───────────────────────────────────
+
+function httpGet(url: string, headers: Record<string, string> = {}) {
+  return new Promise<{ status: number; headers: Record<string, unknown>; body: string }>((resolve, reject) => {
+    const req = httpRequest(url, { headers }, (res) => {
+      let body = "";
+      res.on("data", (c: Buffer) => (body += c.toString("utf8")));
+      res.on("end", () => resolve({ status: res.statusCode!, headers: res.headers, body }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+test("serve has a panel: a public shell behind a strict CSP, and an API behind its own session", async () => {
+  const dir = newDataDir();
+  const serve = await startServe(dir);
+  try {
+    const base = serve.url.replace(/\/mcp$/, "");
+    const shell = await httpGet(`${base}/panel`);
+    assert.equal(shell.status, 200);
+    assert.match(String(shell.headers["content-security-policy"]), /frame-ancestors 'none'/);
+    assert.equal(shell.headers["cache-control"], "no-store");
+    assert.match(shell.body, /app\.js/);
+
+    const api = await httpGet(`${base}/panel/api/handoffs`);
+    assert.equal(api.status, 401);
+
+    const token = readFileSync(serve.tokenFile, "utf8").trim();
+    const bearer = await httpGet(`${base}/panel/api/handoffs`, { authorization: `Bearer ${token}` });
+    assert.equal(bearer.status, 401, "a bearer token isn't a panel session");
+
+    const download = await httpGet(`${base}/files/downloads/x/y`);
+    assert.equal(download.status, 401, "a download takes a bearer token");
+    const withToken = await httpGet(`${base}/files/downloads/x/y`, { authorization: `Bearer ${token}` });
+    assert.equal(withToken.status, 404);
+
+    const listening = jsonLogs(serve.stdout()).find((l) => l.msg === "listening")!;
+    assert.equal(listening.panel, `${base}/panel`);
+    assert.equal(listening.handoffWebhook, false);
+  } finally {
+    serve.stop();
+    await serve.exited;
+    removeDir(dir);
+  }
+});
+
+test("a live desktop on the directory refuses serve and stdio; a stale lock doesn't", async () => {
+  const dir = newDataDir();
+  const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+  try {
+    const { hostname } = await import("node:os");
+    const { processIdentity } = await import("@multizen/browser-runtime");
+    const identity = (await processIdentity(holder.pid!))!;
+    writeFileSync(
+      join(dir, "desktop.lock"),
+      JSON.stringify({
+        hostname: hostname(),
+        pid: holder.pid,
+        startTime: identity.startTime,
+        cmdline: identity.cmdline,
+        acquiredAt: new Date().toISOString(),
+      }),
+    );
+
+    const port = String(await freePort());
+    const refusedServe = runCli(["serve", "--data-dir", dir, "--port", port]);
+    assert.equal(refusedServe.status, 1, refusedServe.stdout + refusedServe.stderr);
+    assert.match(refusedServe.stdout, /desktop app/);
+    assert.equal(existsSync(join(dir, "server.lock")), false, "the lock it took is given back");
+
+    const refusedStdio = runCli(["stdio", "--data-dir", dir]);
+    assert.equal(refusedStdio.status, 1, refusedStdio.stdout + refusedStdio.stderr);
+    assert.match(refusedStdio.stderr, /desktop app/);
+
+    const exited = new Promise((resolve) => holder.once("exit", resolve));
+    holder.kill();
+    await exited;
+    const serve = await startServe(dir);
+    serve.stop();
+    await serve.exited;
+  } finally {
+    holder.kill();
+    removeDir(dir);
+  }
+});
+
+test("with --no-auth the panel signs in with no token", async () => {
+  const dir = newDataDir();
+  const serve = await startServe(dir, ["--no-auth"]);
+  try {
+    const base = serve.url.replace(/\/mcp$/, "");
+    const me = await httpGet(`${base}/panel/api/me`);
+    assert.equal(me.status, 401);
+    assert.equal(JSON.parse(me.body).no_login, true);
+    const login = await fetch(`${base}/panel/api/login`, {
+      method: "POST",
+      headers: { origin: base, "content-type": "application/json" },
+      body: JSON.stringify({ token: "" }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+    const handoffs = await httpGet(`${base}/panel/api/handoffs`, { cookie });
+    assert.equal(handoffs.status, 200);
+    assert.deepEqual(JSON.parse(handoffs.body).handoffs, []);
+  } finally {
+    serve.stop();
+    await serve.exited;
+    removeDir(dir);
+  }
+});

@@ -27,6 +27,8 @@ export interface DownloadRecord {
   bytesReceived: number;
   bytesTotal: number | null;
   startedAt: string;
+  /** Set when this server stopped it: its downloads would have gone past their quota. */
+  canceledBy?: "quota";
 }
 
 export interface DownloadFile extends DownloadRecord {
@@ -79,7 +81,10 @@ export interface CapturedFrame {
   url: string;
 }
 
-/** Input from a human in the handoff panel. `x` and `y` are normalized to 0..1. */
+/**
+ * Input from a human in the handoff panel. `x` and `y` are normalized to 0..1.
+ * `modifiers` is CDP's bitmask: Alt 1, Ctrl 2, Meta 4, Shift 8.
+ */
 export type HumanInputEvent =
   | {
       kind: "mouse";
@@ -89,8 +94,16 @@ export type HumanInputEvent =
       button: "left" | "right" | "middle" | "none";
       buttons: number;
       clickCount?: number;
+      modifiers?: number;
     }
-  | { kind: "wheel"; x: number; y: number; deltaX: number; deltaY: number }
+  | {
+      kind: "wheel";
+      x: number;
+      y: number;
+      deltaX: number;
+      deltaY: number;
+      modifiers?: number;
+    }
   | {
       kind: "key";
       action: "down" | "up";
@@ -99,8 +112,19 @@ export type HumanInputEvent =
       keyCode: number;
       modifiers: number;
       text?: string;
+      /** KeyboardEvent.location: 3 is the numeric keypad. */
+      location?: number;
+      repeat?: boolean;
     }
   | { kind: "text"; text: string };
+
+/** A file chooser a page opened during a panel handoff, waiting for files from there. */
+export interface OpenFileChooser {
+  id: string;
+  multiple: boolean;
+  targetId: string;
+  openedAt: string;
+}
 
 export interface RunningInfo {
   pid: number;
@@ -167,6 +191,17 @@ export interface BrowserDriver {
   handleDialog(profileId: ProfileId, response: DialogResponse): Promise<{ ok: true }>;
   captureFrame(profileId: ProfileId, opts?: { quality?: number }): Promise<CapturedFrame>;
   dispatchInput(profileId: ProfileId, event: HumanInputEvent): Promise<void>;
+  /**
+   * While a person works on this profile through the panel: every dialog stays open for
+   * them, whatever the policy says, and a file chooser waits for {@link respondFileChooser}
+   * instead of opening a window nobody can reach. Ending it answers what the policy would.
+   */
+  setHandoffMode?(profileId: ProfileId, active: boolean): Promise<void>;
+  listFileChoosers?(profileId: ProfileId): Promise<OpenFileChooser[]>;
+  /** `paths` are host paths, which only the panel's own upload route produces. */
+  respondFileChooser?(profileId: ProfileId, chooserId: string, paths: string[]): Promise<void>;
+  /** Forgets a chooser the person decided against. The page sees nothing, as with a cancel. */
+  dismissFileChooser?(profileId: ProfileId, chooserId: string): Promise<void>;
   hasOpenDialog?(profileId: ProfileId): boolean;
   runningInfo?(profileId: ProfileId): RunningInfo | null;
   /** Null when it isn't running. */

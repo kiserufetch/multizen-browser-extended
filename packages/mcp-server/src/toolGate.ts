@@ -1,6 +1,7 @@
 import { MultizenError, type BrowserDriver, type LaunchedProfile, type ProfileId } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
 import type { Principal } from "./auth/principal.js";
+import { isSensitiveKind } from "./handoff.js";
 import type { LeaseHolder } from "./LeaseRegistry.js";
 import { MUTEX_WAIT_MS, type MutexRunOptions } from "./ProfileMutex.js";
 import type { SharedMcpState } from "./sharedState.js";
@@ -13,11 +14,11 @@ const POLL_MIN_LOCK_WAIT_MS = 1_000;
 
 const RAW_TOOLS = ["cdp_send", "cdp_send_no_safety"];
 
-function mayUse(principal: Principal, tool: string, policy: ToolPolicy): boolean {
+export function mayUse(principal: Principal, tool: string, policy: ToolPolicy): boolean {
   return principal.tools.groups.includes(policy.group) || principal.tools.names.includes(tool);
 }
 
-function mayUseProfile(principal: Principal, profileId: ProfileId): boolean {
+export function mayUseProfile(principal: Principal, profileId: ProfileId): boolean {
   return principal.profiles === "*" || principal.profiles.includes(profileId);
 }
 
@@ -78,6 +79,8 @@ export interface GateContext {
   egress?: EgressGate;
   /** Says which profiles are proxied, for `egress`. */
   profiles?: Pick<ProfileManager, "get">;
+  /** A pending handoff stops agents: see `handoffGate` in MultizenMcpServerOptions. */
+  handoffGate?: boolean;
 }
 
 export function leaseHolder(principal: Principal, sessionId: string): LeaseHolder {
@@ -150,6 +153,27 @@ async function assertEgressAllowed(
   }
 }
 
+/** What the policy says about a tool while a person holds this profile. */
+function assertNotInHumanHands(
+  tool: string,
+  policy: ToolPolicy,
+  profileId: ProfileId,
+  ctx: GateContext,
+): void {
+  if (!ctx.handoffGate || policy.humanGate === "allow") return;
+  const active = ctx.shared.handoff.activeForProfile(profileId);
+  if (!active) return;
+  if (policy.humanGate === "allow-unless-sensitive" && !isSensitiveKind(active.kind)) return;
+  throw new MultizenError(
+    "HUMAN_IN_CONTROL",
+    `A person is working on profile ${profileId} (${active.kind}), so ${tool} has to wait.`,
+    {
+      hint: "Call wait_for_human or get_human_status until the handoff ends, then retry.",
+      details: { handoff_id: active.id, kind: active.kind, expires_at: active.expiresAt },
+    },
+  );
+}
+
 /**
  * Every tools/call goes through here, before the tool's own validation, so a
  * caller learns nothing about a tool it may not use. No policy means refused, for
@@ -193,9 +217,12 @@ async function admitted(
   const { mutex, leases } = ctx.shared;
   const admit = (): void => {
     if (leaseBinds(policy)) leases.assertAccess(profileId, leaseHolder(ctx.principal, ctx.sessionId));
+    assertNotInHumanHands(tool, policy, profileId, ctx);
   };
   admit();
   if (policy.preempts) {
+    // Who ended it, before the browser going says only that it went.
+    ctx.shared.handoff.closeForProfile(profileId, ctx.principal.name);
     mutex.rejectWaiters(
       profileId,
       new MultizenError("PROFILE_NOT_RUNNING", `Profile ${profileId} was closed while this call waited.`),

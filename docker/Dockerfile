@@ -46,6 +46,9 @@ FROM build AS production-deps
 RUN corepack yarn workspaces focus @multizen/server --production
 
 FROM runtime-base
+# With no UTF-8 locale a browser can't open a file whose name isn't ASCII: upload_file and a
+# person's upload both give their file its real name, and the page then can't read it.
+ENV LANG=C.UTF-8
 WORKDIR /app
 # For "type": "module".
 COPY apps/server/package.json ./package.json

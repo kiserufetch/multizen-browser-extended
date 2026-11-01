@@ -1,9 +1,16 @@
-import { ActivityLog, createSharedMcpState, type SharedMcpState } from "@multizen/mcp-server";
+import {
+  ActivityLog,
+  bindHandoffToBrowser,
+  createSharedMcpState,
+  InMemoryHumanHandoff,
+  type SharedMcpState,
+} from "@multizen/mcp-server";
 import { ProfileManager } from "@multizen/profile-manager";
 import { defaultSettingsPath, SettingsStore } from "@multizen/settings-store";
 import { resolveEngine, type BrowserEngine, type ChromiumStatus, type ProfileId } from "@multizen/types";
 import {
   ChromiumBrowserDriver,
+  DOWNLOAD_QUOTA_BYTES,
   EgressPolicy,
   EngineRegistry,
   EngineRouter,
@@ -214,10 +221,13 @@ export async function buildRuntime(
     | "headless"
     | "egressPolicy"
     | "egressAllow"
-  >,
+  > & { handoffTtlMs?: number; downloadQuotaBytes?: number },
   processJournal?: ProcessJournal,
+  /** Whether people work on handoffs through a panel here. Plain stdio has none. */
+  panel = false,
 ): Promise<ServerRuntime> {
   const { extensionStoreRoot, xvfbRunDir } = dataPaths(cfg.dataDir);
+  const downloadQuotaBytes = cfg.downloadQuotaBytes ?? DOWNLOAD_QUOTA_BYTES;
   const settings = new SettingsStore(defaultSettingsPath(cfg.dataDir));
   const initialSettings = await settings.load();
   const getDefaultEngine = (): BrowserEngine => cfg.defaultEngine ?? initialSettings.browserEngine;
@@ -243,6 +253,7 @@ export async function buildRuntime(
     allocatePort: () => randomFreePort(),
     extraDisabledFeatures: serverDisabledFeatures(process.platform),
     armDownloadsAtLaunch: true,
+    downloadQuotaBytes,
     requireSandbox: true,
     ownsDataDir: true,
     egress,
@@ -259,6 +270,7 @@ export async function buildRuntime(
     firefoxOptions: {
       ...SERVER_FIREFOX_OPTIONS,
       extraPrefs: serverFirefoxPrefs(process.platform),
+      downloadQuotaBytes,
       egress,
       processJournal,
       xvfbRunDir,
@@ -285,6 +297,11 @@ export async function buildRuntime(
       ...(e.status === "error" ? { error: e.summary } : {}),
     });
   });
+
+  const handoff = new InMemoryHumanHandoff(
+    cfg.handoffTtlMs !== undefined ? { defaultTtlMs: cfg.handoffTtlMs } : {},
+  );
+  bindHandoffToBrowser({ handoff, driver, activityLog, panelDriven: () => panel });
 
   const startEngineBootstrap = (): void => {
     const engine = getDefaultEngine();
@@ -314,7 +331,7 @@ export async function buildRuntime(
     engineRegistry,
     driver,
     activityLog,
-    shared: createSharedMcpState(),
+    shared: createSharedMcpState({ handoff }),
     egress,
     getDefaultEngine,
     startEngineBootstrap,

@@ -19,6 +19,10 @@ export interface ToolContext {
   /** A directory `upload_file` may read from, besides the profile's own uploads dir. */
   uploadsRoot?: string;
   maxInlineFileBytes?: number;
+  /** A handoff stops agents here: see `handoffGate` in MultizenMcpServerOptions. */
+  handoffGate?: boolean;
+  /** Where a download too large to send inline can be fetched from, without a trailing slash. */
+  downloadsBaseUrl?: string;
 }
 
 /** A tool defined outside the `dispatch` switch, so upstream edits there don't collide. */

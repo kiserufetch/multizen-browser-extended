@@ -107,7 +107,8 @@ test("a ping that never answers counts as no answer", async () => {
   const { keepAlive, gone, answerWith } = rig({ timeoutMs: 5, attempts: 2 });
   answerWith(() => new Promise(() => {}));
   keepAlive.start();
-  await wait(60);
+  // Four timers in a row: on Windows each can take its 15 ms tick, more on a busy machine.
+  for (let i = 0; i < 100 && gone.length === 0; i++) await wait(10);
   assert.equal(gone.length, 1);
   assert.match(gone[0]!, /no answer within 5 ms/);
 });

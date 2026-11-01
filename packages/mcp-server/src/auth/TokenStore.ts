@@ -142,6 +142,13 @@ export class TokenStore {
     return token === undefined ? null : this.authenticate(token);
   }
 
+  /** A token's principal while it is valid. Like authenticate, it sees another process's revoke. */
+  principalById(id: string): Principal | null {
+    this.refresh();
+    const record = this.records.find((r) => r.id === id);
+    return record && this.statusOf(record) === "active" ? principalOf(record) : null;
+  }
+
   /** The new token in plaintext, for the caller to show once. It is not kept anywhere. */
   create(input: CreateTokenInput): { token: string; record: TokenRecord } {
     return this.withLock(() => {

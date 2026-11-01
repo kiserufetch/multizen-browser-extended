@@ -441,11 +441,15 @@ test("performAction reaches the session verb for each action", async () => {
   });
 });
 
-test("only the handoff panel's capture and input still refuse on this engine", async () => {
+test("the verbs that need a browser say so when there is none", async () => {
   await withProfile(async (pm, id, dir) => {
     const driver = driverFor(pm, join(dir, "x.exe"));
-    await assert.rejects(driver.captureFrame(), (e: MultizenError) => e.code === "UNSUPPORTED_ON_ENGINE");
-    await assert.rejects(driver.dispatchInput(), (e: MultizenError) => e.code === "UNSUPPORTED_ON_ENGINE");
+    await assert.rejects(driver.captureFrame(id), (e: MultizenError) => e.code === "PROFILE_NOT_RUNNING");
+    await assert.rejects(
+      driver.dispatchInput(id, { kind: "text", text: "x" }),
+      (e: MultizenError) => e.code === "PROFILE_NOT_RUNNING",
+    );
+    await assert.rejects(driver.setHandoffMode(id, true), (e: MultizenError) => e.code === "PROFILE_NOT_RUNNING");
     await assert.rejects(
       driver.performAction(id, { type: "hover", target: { ref: "e1" } }),
       (e: MultizenError) => e.code === "PROFILE_NOT_RUNNING",

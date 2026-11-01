@@ -21,9 +21,11 @@ import type {
   DisplayMode,
   DriverAction,
   FingerprintConfig,
+  HumanInputEvent,
   LaunchedProfile,
   LaunchOptions,
   OpenDialog,
+  OpenFileChooser,
   ProfileId,
 } from "@multizen/types";
 import {
@@ -242,6 +244,8 @@ export interface ChromiumBrowserDriverOptions {
    * until an agent asks.
    */
   armDownloadsAtLaunch?: boolean;
+  /** What one profile's downloads may take. Default: no limit. */
+  downloadQuotaBytes?: number;
   /**
    * Where a browser may connect. Not given, or `allow-all`, every launch has the flags it
    * always had. Enforcing, every profile runs through the bridge, which checks each
@@ -295,6 +299,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private readonly customAllocatePort?: () => Promise<number>;
   private readonly extraDisabledFeatures: readonly string[];
   private readonly armDownloadsAtLaunch: boolean;
+  private readonly downloadQuotaBytes: number | undefined;
   private readonly egress?: EgressPolicy;
 
   constructor(opts: ChromiumBrowserDriverOptions) {
@@ -316,6 +321,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     this.customAllocatePort = opts.allocatePort;
     this.extraDisabledFeatures = opts.extraDisabledFeatures ?? [];
     this.armDownloadsAtLaunch = opts.armDownloadsAtLaunch ?? false;
+    this.downloadQuotaBytes = opts.downloadQuotaBytes;
     this.egress = opts.egress;
   }
 
@@ -1188,6 +1194,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private armDownloads(profileId: ProfileId, r: RunningProcess): Promise<void> {
     r.downloadsArmed ??= (async () => {
       const tracker = await this.downloadTracker(profileId);
+      if (this.downloadQuotaBytes !== undefined) tracker.quotaBytes = this.downloadQuotaBytes;
+      tracker.stopDownload = (guid) => {
+        void r.session.cdpSend("Browser.cancelDownload", { guid }).catch(() => {});
+      };
       await r.session.enableDownloads(tracker.dir, tracker);
     })().catch((e: unknown) => {
       r.downloadsArmed = undefined; // The next call tries again.
@@ -1229,14 +1239,28 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return this.running.get(profileId)?.session.hasOpenDialog() ?? false;
   }
 
-  // The handoff panel's view and input, which a later change fills in. Until then
-  // each refuses by code, so a client sees a typed error rather than a missing method.
-  async captureFrame(): Promise<CapturedFrame> {
-    throw notAvailableYet("captureFrame");
+  async captureFrame(profileId: ProfileId, opts?: { quality?: number }): Promise<CapturedFrame> {
+    return this.requireSession(profileId).captureFrame(opts);
   }
 
-  async dispatchInput(): Promise<void> {
-    throw notAvailableYet("dispatchInput");
+  async dispatchInput(profileId: ProfileId, event: HumanInputEvent): Promise<void> {
+    await this.requireSession(profileId).dispatchInput(event);
+  }
+
+  async setHandoffMode(profileId: ProfileId, active: boolean): Promise<void> {
+    await this.requireSession(profileId).setHandoffMode(active);
+  }
+
+  async listFileChoosers(profileId: ProfileId): Promise<OpenFileChooser[]> {
+    return this.requireSession(profileId).listFileChoosers();
+  }
+
+  async respondFileChooser(profileId: ProfileId, chooserId: string, paths: string[]): Promise<void> {
+    await this.requireSession(profileId).respondFileChooser(chooserId, paths);
+  }
+
+  async dismissFileChooser(profileId: ProfileId, chooserId: string): Promise<void> {
+    this.requireSession(profileId).dismissFileChooser(chooserId);
   }
 
   /** A launch under way is abandoned, or its browser would outlive this process. */
@@ -1264,13 +1288,6 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       ? this.customAllocatePort()
       : firstFreePort(() => this.nextPort++);
   }
-}
-
-function notAvailableYet(what: string): MultizenError {
-  return new MultizenError(
-    "UNSUPPORTED_ON_ENGINE",
-    `${what} is not available on CloakBrowser in this build.`,
-  );
 }
 
 function buildCloakBrowserFingerprintArgs(profileId: ProfileId, fp: FingerprintConfig): string[] {

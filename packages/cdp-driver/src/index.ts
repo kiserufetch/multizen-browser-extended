@@ -1,3 +1,4 @@
+export { jpegSize } from "./jpeg.js";
 export { CdpSession, InputNotDeliveredError, randomRefBase } from "./CdpSession.js";
 export type { AccessibilityNode, ExtractContext } from "./types.js";
 export type { DownloadEventSink, TargetContext, TargetSender } from "./CdpSession.js";

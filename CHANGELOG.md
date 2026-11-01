@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
+### Fixed
+
+- **Camoufox: `type_ref` and `press_key` on an element in a cross-origin iframe no longer
+  lose their keys** when focus was in the page around it: the click only gave the frame focus.
+
 ### Added
 
 - **MCP `press_key`, `hover`, `select_option`, `scroll`, `upload_file`,
@@ -37,6 +42,23 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   its mode: `launch_profile` with no parameter stays idempotent, naming another mode is
   `PROFILE_ALREADY_RUNNING`, and `update_profile` refuses a real change while it runs.
   `headed` with no display and `xvfb` off Linux are `DISPLAY_UNAVAILABLE`.
+- **Human handoff over the network.** `request_human` now returns a `handoff_id`, takes a
+  `kind` (`captcha`, `2fa`, `login`, `confirm`, `other`) and expires by itself after 15
+  minutes. `get_human_status` asks without blocking, and `wait_for_human` waits at most 55 s
+  and says `pending`, `resumed`, `aborted` or `expired`: only `resumed` means the step was
+  done. On a server a person takes over at `/panel`, signing in with an `operator` token: a
+  live view of the page, its mouse, wheel and keyboard, a text box for pasted and composed
+  text, its tabs, its JavaScript dialogs and file pickers, then Resume or Abort. Permission
+  prompts belong to the browser and can't be answered there. Until it ends an agent's page
+  actions get `HUMAN_IN_CONTROL`, and for `2fa` and `login` also its `extract`, `screenshot`
+  and `get_cookies`. `--handoff-webhook` tells an endpoint of the owner's about each new one,
+  signed with `--handoff-webhook-secret`. Closing or crashing the browser aborts it.
+  Frames stay in memory and neither they nor anything typed reach a log. On the desktop
+  nothing blocks agents: a banner offers Resume and Abort, the OS notifies, and a profile
+  with no window opens the panel in a window of its own.
+- **Large downloads.** `get_download` on a file over its inline limit now names a path to
+  fetch it from with the same bearer token. A server's profile may keep 2 GB of downloads
+  (`--download-quota-bytes`); past that a download is stopped and deleted.
 - **`multizen-server`: named tokens, remote access and encrypted proxy passwords.**
   `token create`, `token list` and `token revoke` manage tokens that carry tool groups
   (`read`, `act`, `profile-admin`, `raw`, `operator`) or single tools, and a list of

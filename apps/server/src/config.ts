@@ -9,7 +9,13 @@ import {
   type CreateTokenInput,
   type ToolGroup,
 } from "@multizen/mcp-server";
-import { EGRESS_MODES, isEgressMode, parseEgressAllowEntry, type EgressMode } from "@multizen/browser-runtime";
+import {
+  DOWNLOAD_QUOTA_BYTES,
+  EGRESS_MODES,
+  isEgressMode,
+  parseEgressAllowEntry,
+  type EgressMode,
+} from "@multizen/browser-runtime";
 import type { BrowserEngine, DisplayModeSetting } from "@multizen/types";
 import { DISPLAY_MODES, isBrowserEngine, isDisplayMode } from "@multizen/types";
 
@@ -51,6 +57,14 @@ export interface ServerConfig {
   /** A session with no call in flight and no request for this long is closed. */
   sessionIdleTtlMs: number;
   maxSessions: number;
+  /** The owner's endpoint, told about each new handoff. Nothing an agent says reaches it. */
+  handoffWebhook?: string;
+  /** Signs the webhook's body. */
+  handoffWebhookSecret?: string;
+  /** How long a handoff waits for a person. Default: the registry's. */
+  handoffTtlMs?: number;
+  /** What one profile's downloads may take. */
+  downloadQuotaBytes: number;
 }
 
 export type Env = Record<string, string | undefined>;
@@ -412,6 +426,34 @@ function remoteFields(
 const DEFAULT_SESSION_IDLE_TTL_MS = 30 * 60_000;
 const DEFAULT_MAX_SESSIONS = 64;
 
+const HANDOFF_OPTIONS: NonNullable<ParseArgsConfig["options"]> = {
+  "handoff-webhook": { type: "string" },
+  "handoff-webhook-secret": { type: "string" },
+  "handoff-ttl-ms": { type: "string" },
+  "download-quota-bytes": { type: "string" },
+};
+
+function handoffFields(
+  flags: ParsedFlags,
+  env: Env,
+): Pick<
+  ServerConfig,
+  "handoffWebhook" | "handoffWebhookSecret" | "handoffTtlMs" | "downloadQuotaBytes"
+> {
+  const webhook = flags.flag("handoff-webhook") ?? env.MULTIZEN_HANDOFF_WEBHOOK;
+  const secret = flags.flag("handoff-webhook-secret") ?? env.MULTIZEN_HANDOFF_WEBHOOK_SECRET;
+  const ttl = flags.flag("handoff-ttl-ms") ?? env.MULTIZEN_HANDOFF_TTL_MS;
+  const quota = flags.flag("download-quota-bytes") ?? env.MULTIZEN_DOWNLOAD_QUOTA_BYTES;
+  if (secret && !webhook) throw new UsageError("--handoff-webhook-secret needs --handoff-webhook");
+  return {
+    ...(webhook ? { handoffWebhook: parseHttpUrl("--handoff-webhook", webhook).href } : {}),
+    ...(secret ? { handoffWebhookSecret: secret } : {}),
+    ...(ttl !== undefined ? { handoffTtlMs: parsePositiveInt("--handoff-ttl-ms", ttl) } : {}),
+    downloadQuotaBytes:
+      quota === undefined ? DOWNLOAD_QUOTA_BYTES : parsePositiveInt("--download-quota-bytes", quota),
+  };
+}
+
 export function parseServeConfig(
   argv: string[],
   env: Env = process.env,
@@ -427,6 +469,7 @@ export function parseServeConfig(
     ...BROWSER_LIMIT_OPTIONS,
     ...DISPLAY_OPTIONS,
     ...EGRESS_OPTIONS,
+    ...HANDOFF_OPTIONS,
   });
   rejectPositionals(flags.positionals);
   const idleTtl = flags.flag("session-idle-ttl-ms") ?? env.MULTIZEN_SESSION_IDLE_TTL_MS;
@@ -446,6 +489,7 @@ export function parseServeConfig(
     ...browserLimitFields(flags, env),
     ...displayFields(flags, env),
     ...egressFields(flags, env),
+    ...handoffFields(flags, env),
   };
 }
 

@@ -8,6 +8,7 @@ import type {
   DownloadRecord,
   DriverAction,
   HumanInputEvent,
+  OpenFileChooser,
   LaunchedProfile,
   LaunchOptions,
   OpenDialog,
@@ -36,6 +37,10 @@ export class MockBrowserDriver implements BrowserDriver {
   readonly actions: Array<{ profileId: ProfileId; action: DriverAction }> = [];
   readonly humanInput: Array<{ profileId: ProfileId; event: HumanInputEvent }> = [];
   readonly dialogPolicies = new Map<ProfileId, DialogPolicy>();
+  /** Each call of setHandoffMode, in order. */
+  readonly handoffModes: Array<{ profileId: ProfileId; active: boolean }> = [];
+  readonly fileChoosers = new Map<ProfileId, OpenFileChooser[]>();
+  readonly chooserAnswers: Array<{ profileId: ProfileId; chooserId: string; paths: string[] }> = [];
   /** Filled by whoever is exercising the tools: nothing downloads in a mock. */
   readonly downloads = new Map<ProfileId, DownloadFile[]>();
   /** Filled by whoever is exercising the tools: nothing opens a dialog in a mock. */
@@ -231,6 +236,29 @@ export class MockBrowserDriver implements BrowserDriver {
   async dispatchInput(profileId: ProfileId, event: HumanInputEvent): Promise<void> {
     if (!this.running.has(profileId)) throw new Error("not running");
     this.humanInput.push({ profileId, event });
+  }
+
+  async setHandoffMode(profileId: ProfileId, active: boolean): Promise<void> {
+    this.handoffModes.push({ profileId, active });
+  }
+
+  async listFileChoosers(profileId: ProfileId): Promise<OpenFileChooser[]> {
+    return this.fileChoosers.get(profileId) ?? [];
+  }
+
+  async respondFileChooser(profileId: ProfileId, chooserId: string, paths: string[]): Promise<void> {
+    this.chooserAnswers.push({ profileId, chooserId, paths });
+    this.fileChoosers.set(
+      profileId,
+      (this.fileChoosers.get(profileId) ?? []).filter((c) => c.id !== chooserId),
+    );
+  }
+
+  async dismissFileChooser(profileId: ProfileId, chooserId: string): Promise<void> {
+    this.fileChoosers.set(
+      profileId,
+      (this.fileChoosers.get(profileId) ?? []).filter((c) => c.id !== chooserId),
+    );
   }
 
   runningDisplayMode(profileId: ProfileId): DisplayMode | null {

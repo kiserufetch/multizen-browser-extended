@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import { acquireServerLock, ServerLockHeldError } from "@multizen/browser-runtime";
+import { acquireServerLock, assertNoLiveDesktop, ServerLockHeldError } from "@multizen/browser-runtime";
 import { createMultizenMcpServer } from "@multizen/mcp-server";
 import { dataDirPathWarning, type StdioConfig } from "../config.ts";
 import { errorFields, log, protocolStdout } from "../log.ts";
@@ -47,6 +47,7 @@ async function runLocal(
     throw e;
   }
   shutdown.add("lock", () => lock.release());
+  await assertNoLiveDesktop(config.dataDir);
 
   const runtime = await buildRuntime(config, await takeOverFromPreviousRun(config.dataDir));
   // A stdio client that exits gives its child about two seconds before killing

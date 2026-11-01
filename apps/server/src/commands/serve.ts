@@ -1,14 +1,19 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isIPv6 } from "node:net";
-import { acquireServerLock } from "@multizen/browser-runtime";
+import { acquireServerLock, assertNoLiveDesktop } from "@multizen/browser-runtime";
 import {
   AuthFailureLimiter,
+  createDownloadRoute,
   createMultizenMcpServer,
+  createPanelRoute,
+  FULL_PRINCIPAL,
   HttpTransport,
+  PanelSessions,
   TokenStore,
   TOOL_GROUPS,
 } from "@multizen/mcp-server";
 import { dataDirPathWarning, dataPaths, isWildcardHost, type ServerConfig } from "../config.ts";
+import { startHandoffWebhook } from "../handoffWebhook.ts";
 import { log } from "../log.ts";
 import { buildRuntime, enginesInUse, SERVER_VERSION, takeOverFromPreviousRun } from "../runtime.ts";
 import { preflightProcess, preflightUserNamespaces } from "../sandboxPreflight.ts";
@@ -51,10 +56,10 @@ export function ensureUsableToken(store: TokenStore, ownerTokenPath: string): vo
 }
 
 /** Where this machine reaches the server. A wildcard bind can't be connected to as such. */
-function localUrl(config: ServerConfig): string {
+function localBaseUrl(config: ServerConfig): string {
   const host = isWildcardHost(config.host) ? "127.0.0.1" : config.host;
   const name = isIPv6(host) ? `[${host}]` : host;
-  return `${config.tls ? "https" : "http"}://${name}:${config.port}/mcp`;
+  return `${config.tls ? "https" : "http"}://${name}:${config.port}`;
 }
 
 export async function runServe(config: ServerConfig, shutdown: ShutdownManager): Promise<void> {
@@ -63,13 +68,15 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
   preflightProcess(config.dataDir);
 
   const { ownerTokenPath, tokensPath } = dataPaths(config.dataDir);
-  const url = localUrl(config);
+  const base = localBaseUrl(config);
+  const url = `${base}/mcp`;
   const lock = await acquireServerLock(config.dataDir, {
     mode: "serve",
     url,
     tokenFile: config.noAuth ? undefined : ownerTokenPath,
   });
   shutdown.add("lock", () => lock.release());
+  await assertNoLiveDesktop(config.dataDir);
 
   let tokens: TokenStore | undefined;
   if (!config.noAuth) {
@@ -85,9 +92,36 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     });
   }
 
-  const runtime = await buildRuntime(config, await takeOverFromPreviousRun(config.dataDir));
+  const runtime = await buildRuntime(config, await takeOverFromPreviousRun(config.dataDir), true);
   shutdown.add("runtime", () => runtime.close(), RUNTIME_CLOSE_BUDGET_MS);
   preflightUserNamespaces(enginesInUse(runtime));
+
+  const reachableAt = config.publicUrl ?? base;
+  const limiter = new AuthFailureLimiter();
+  const panelSessions = new PanelSessions();
+  const panel = createPanelRoute({
+    handoff: runtime.shared.handoff,
+    driver: runtime.driver,
+    mutex: runtime.shared.mutex,
+    profiles: runtime.profileManager,
+    sessions: panelSessions,
+    authenticateToken: tokens ? (token) => tokens.authenticate(token) : () => FULL_PRINCIPAL,
+    principalById: tokens ? (id) => tokens.principalById(id) : () => FULL_PRINCIPAL,
+    limiter,
+    secureCookie: config.tls !== undefined || reachableAt.startsWith("https:"),
+    noLogin: config.noAuth,
+    activityLog: runtime.activityLog,
+    onError: (route, code) => log.warn("panel request failed", { route, code }),
+  });
+  if (config.handoffWebhook) {
+    startHandoffWebhook({
+      handoff: runtime.shared.handoff,
+      url: config.handoffWebhook,
+      ...(config.handoffWebhookSecret ? { secret: config.handoffWebhookSecret } : {}),
+      panelUrl: `${reachableAt}/panel`,
+      profileName: (id) => runtime.profileManager.get(id)?.name,
+    });
+  }
 
   const http = new HttpTransport({
     host: config.host,
@@ -102,7 +136,9 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
       : {}),
     sessionPolicy: { idleTtlMs: config.sessionIdleTtlMs, maxSessions: config.maxSessions },
     publicHealthz: true,
-    authFailureLimiter: new AuthFailureLimiter(),
+    publicRoutes: [panel],
+    authedRoutes: [createDownloadRoute({ driver: runtime.driver, profiles: runtime.profileManager })],
+    authFailureLimiter: limiter,
     trustProxy: config.trustProxy,
     readyState: () => {
       const engine = runtime.getDefaultEngine();
@@ -124,6 +160,8 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
         getDefaultEngine: runtime.getDefaultEngine,
         uploadsRoot: config.uploadsRoot,
         egress: runtime.egress,
+        handoffGate: true,
+        downloadsBaseUrl: reachableAt,
       }).server,
   });
   await http.start();
@@ -133,6 +171,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     // What a token held ends with it. Anything else tied to a token listens here too.
     tokens.onInvalidated((id) => {
       runtime.shared.leases.dropPrincipal(id);
+      panelSessions.dropPrincipal(id);
       void http.closeSessionsFor(id).then(() => log.info("token ended, sessions closed", { token: id }));
     });
     tokens.watch();
@@ -144,6 +183,8 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     dataDir: config.dataDir,
     auth: tokens ? "tokens" : "none",
     ...(config.publicUrl !== undefined ? { publicUrl: config.publicUrl } : {}),
+    panel: `${reachableAt}/panel`,
+    handoffWebhook: Boolean(config.handoffWebhook),
     defaultEngine: runtime.getDefaultEngine(),
     displayMode: config.headless ? "headless (forced)" : config.displayMode,
     maxBrowsers: config.maxBrowsers,

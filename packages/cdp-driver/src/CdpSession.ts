@@ -8,7 +8,10 @@ import {
   type DialogResponse,
   type DialogType,
   type ElementTarget,
+  type CapturedFrame,
+  type HumanInputEvent,
   type OpenDialog,
+  type OpenFileChooser,
 } from "@multizen/types";
 import type { AccessibilityNode, ExtractContext } from "./types.js";
 import {
@@ -19,6 +22,7 @@ import {
   type KeyDescriptor,
   type KeyPlatform,
 } from "./keyboard.js";
+import { jpegSize } from "./jpeg.js";
 import { TargetRegistry } from "./targetRegistry.js";
 
 /**
@@ -127,6 +131,12 @@ const OPERATION_DEADLINE_MS = 60_000;
 /** Typing is paced like a person's, so a verb that types gets this much more per key. */
 const OPERATION_MS_PER_KEY = 100;
 
+/** One frame for the panel. A page that can't paint must not hold its view hostage. */
+const FRAME_DEADLINE_MS = 5_000;
+const DEFAULT_FRAME_QUALITY = 60;
+/** One event from the panel. A mouse command on a hidden page alone can take about 5 s. */
+const HUMAN_INPUT_DEADLINE_MS = 15_000;
+
 /** The verbs that run as an operation, and how long each may take. */
 const typing = (textArg: number) => (args: unknown[], deadlineMs: number) =>
   deadlineMs + [...String(args[textArg])].length * OPERATION_MS_PER_KEY;
@@ -156,6 +166,10 @@ const OPERATION_BUDGETS: Readonly<Record<string, (args: unknown[], deadlineMs: n
   setDialogPolicy: flat,
   handleDialog: flat,
   enableDownloads: flat,
+  captureFrame: () => FRAME_DEADLINE_MS,
+  dispatchInput: () => HUMAN_INPUT_DEADLINE_MS,
+  setHandoffMode: flat,
+  respondFileChooser: flat,
   // Its own timeout says otherwise when given. Zero opts out, as it does per command.
   cdpSend: (args, deadlineMs) => {
     const timeoutMs = (args[3] as { timeoutMs?: number } | undefined)?.timeoutMs;
@@ -370,6 +384,11 @@ interface TrackedDialog extends OpenDialog {
   targetId: string;
 }
 
+interface TrackedChooser extends OpenFileChooser {
+  sessionId: string;
+  backendNodeId: number;
+}
+
 /** Browser download events, as {@link CdpSession.enableDownloads} passes them on. */
 export interface DownloadEventSink {
   began(event: { guid: string; url: string; suggestedFilename: string }): void;
@@ -491,6 +510,12 @@ export class CdpSession {
   private dialogSeq = 0;
   /** Operations that can't finish while a dialog blocks their tab's renderer. */
   private readonly dialogWatchers = new Set<{ targetId: string; fire: () => void }>();
+  /** A person is at the panel: see {@link setHandoffMode}. */
+  private handoffMode = false;
+  private readonly fileChoosers = new Map<string, TrackedChooser>();
+  private chooserSeq = 0;
+  /** Each tab's last frame, in CSS pixels: what a panel's coordinates are fractions of. */
+  private readonly frameViewports = new Map<string, { width: number; height: number }>();
   private downloadSink: DownloadEventSink | null = null;
 
   /** Flipped true when the underlying websocket drops (browser exited). Actions
@@ -716,6 +741,11 @@ export class CdpSession {
       }
     });
     client.on(
+      "Page.fileChooserOpened",
+      (p: { mode?: string; backendNodeId?: number }, sessionId?: string) =>
+        this.onFileChooserOpened(p, sessionId),
+    );
+    client.on(
       "Browser.downloadWillBegin",
       (p: { guid: string; url: string; suggestedFilename: string }) => this.downloadSink?.began(p),
     );
@@ -788,6 +818,10 @@ export class CdpSession {
   ): Promise<boolean> {
     const steps = (async () => {
       if (type === "page") await sendTo(client, "Page.enable", undefined, sessionId);
+      // A popup opened during a handoff can ask for a file too.
+      if (type === "page" && this.handoffMode) {
+        await sendTo(client, "Page.setInterceptFileChooserDialog", { enabled: true }, sessionId);
+      }
       await sendTo(
         client,
         "Target.setAutoAttach",
@@ -854,6 +888,10 @@ export class CdpSession {
     for (const [id, dialog] of this.openDialogs) {
       if (dialog.targetId === targetId) this.openDialogs.delete(id);
     }
+    for (const [id, chooser] of this.fileChoosers) {
+      if (chooser.targetId === targetId) this.fileChoosers.delete(id);
+    }
+    this.frameViewports.delete(targetId);
     const wasActive = this.targets.active() === targetId;
     this.targets.remove(targetId);
     if (wasActive && this.targets.active()) this.activeNeedsRaise = true;
@@ -867,6 +905,8 @@ export class CdpSession {
     this.refs.clear();
     this.refByNode.clear();
     this.openDialogs.clear();
+    this.fileChoosers.clear();
+    this.frameViewports.clear();
   }
 
   async close(): Promise<void> {
@@ -1284,7 +1324,7 @@ export class CdpSession {
     const tab = sessionId ? this.sessionTabs.get(sessionId) : undefined;
     // A session an agent attached and enabled sees the same dialog; this one answers.
     if (!tab || !sessionId || tab.sessionId !== sessionId) return;
-    if (this.dialogPolicy.mode === "auto") {
+    if (this.dialogPolicy.mode === "auto" && !this.handoffMode) {
       void this.answerDialog(client, sessionId, p.type, this.dialogPolicy);
       return;
     }
@@ -1330,10 +1370,93 @@ export class CdpSession {
   async setDialogPolicy(policy: DialogPolicy): Promise<void> {
     const client = this.require();
     this.dialogPolicy = policy;
-    if (policy.mode !== "auto") return;
+    if (policy.mode === "auto" && !this.handoffMode) await this.answerOpenDialogs(client);
+  }
+
+  private async answerOpenDialogs(client: CDP.Client): Promise<void> {
     const open = [...this.openDialogs.values()];
     this.openDialogs.clear();
-    await Promise.all(open.map((d) => this.answerDialog(client, d.sessionId, d.type, policy)));
+    await Promise.all(
+      open.map((d) => this.answerDialog(client, d.sessionId, d.type, this.dialogPolicy)),
+    );
+  }
+
+  /**
+   * For the length of a panel handoff. A dialog stays open for the person, since auto mode
+   * would answer one they need to see, and a file chooser is caught rather than opening a
+   * window nobody can reach. Only on the tab's own session: Page isn't enabled on an OOPIF
+   * session, so a chooser opened inside a cross-origin iframe isn't seen (a known limit).
+   * The flag is set before anything is awaited: a dialog opening right after a handoff
+   * starts must not be answered by the policy.
+   */
+  async setHandoffMode(active: boolean): Promise<void> {
+    if (this.handoffMode === active) return;
+    this.handoffMode = active;
+    const client = this.require();
+    if (!active) this.fileChoosers.clear();
+    await Promise.all(
+      [...this.tabs.values()].map((tab) =>
+        sendTo(
+          client,
+          "Page.setInterceptFileChooserDialog",
+          { enabled: active },
+          tab.sessionId,
+          FRAME_DEADLINE_MS,
+        ).catch(() => {}),
+      ),
+    );
+    if (!active && this.dialogPolicy.mode === "auto") await this.answerOpenDialogs(client);
+  }
+
+  private onFileChooserOpened(
+    p: { mode?: string; backendNodeId?: number },
+    sessionId: string | undefined,
+  ): void {
+    // Otherwise upload_file is waiting for this one itself.
+    if (!this.handoffMode || p.backendNodeId === undefined || !sessionId) return;
+    const tab = this.sessionTabs.get(sessionId);
+    if (!tab) return;
+    // Clicking again replaces the question: the person is only ever answering the last.
+    for (const [id, chooser] of this.fileChoosers) {
+      if (chooser.targetId === tab.targetId) this.fileChoosers.delete(id);
+    }
+    const id = `c${++this.chooserSeq}`;
+    this.fileChoosers.set(id, {
+      id,
+      multiple: p.mode === "selectMultiple",
+      targetId: tab.targetId,
+      openedAt: new Date().toISOString(),
+      sessionId,
+      backendNodeId: p.backendNodeId,
+    });
+  }
+
+  listFileChoosers(): OpenFileChooser[] {
+    return [...this.fileChoosers.values()].map(
+      ({ sessionId: _sessionId, backendNodeId: _backendNodeId, ...chooser }) => chooser,
+    );
+  }
+
+  async respondFileChooser(chooserId: string, paths: readonly string[]): Promise<void> {
+    const chooser = this.takeFileChooser(chooserId);
+    await this.send(
+      "DOM.setFileInputFiles",
+      { files: [...paths], backendNodeId: chooser.backendNodeId },
+      chooser.sessionId,
+    );
+  }
+
+  dismissFileChooser(chooserId: string): void {
+    this.takeFileChooser(chooserId);
+  }
+
+  private takeFileChooser(chooserId: string): TrackedChooser {
+    const chooser = this.fileChoosers.get(chooserId);
+    if (!chooser) {
+      throw new MultizenError("INVALID_INPUT", `No open file chooser ${chooserId}`);
+    }
+    this.fileChoosers.delete(chooserId);
+    return chooser;
   }
 
   listDialogs(): OpenDialog[] {
@@ -2259,9 +2382,11 @@ export class CdpSession {
       );
     } finally {
       opened.cancel();
-      await this.send("Page.setInterceptFileChooserDialog", { enabled: false }, el.sessionId).catch(
-        () => {},
-      );
+      await this.send(
+        "Page.setInterceptFileChooserDialog",
+        { enabled: this.handoffMode },
+        el.sessionId,
+      ).catch(() => {});
     }
   }
 
@@ -2286,6 +2411,128 @@ export class CdpSession {
       this.send<{ data: string }>("Page.captureScreenshot", { format: "png" }, tab.sessionId),
     );
     return { pngBase64: data };
+  }
+
+  /** One frame of the active tab for the panel. DIALOG_OPEN when a dialog blocks its painting. */
+  async captureFrame(opts: { quality?: number } = {}): Promise<CapturedFrame> {
+    const tab = this.activeTab();
+    await this.raiseActive();
+    return this.pageOp(tab, async () => {
+      const [metrics, shot, info] = await Promise.all([
+        this.send<{
+          cssVisualViewport: { clientWidth: number; clientHeight: number };
+          visualViewport?: { clientWidth: number };
+        }>("Page.getLayoutMetrics", undefined, tab.sessionId),
+        this.send<{ data: string }>(
+          "Page.captureScreenshot",
+          {
+            format: "jpeg",
+            quality: opts.quality ?? DEFAULT_FRAME_QUALITY,
+            optimizeForSpeed: true,
+          },
+          tab.sessionId,
+        ),
+        this.send<{ targetInfo?: { url?: string } }>("Target.getTargetInfo", {
+          targetId: tab.targetId,
+        }),
+      ]);
+      const jpeg = Buffer.from(shot.data, "base64");
+      const view = metrics.cssVisualViewport;
+      // The image has the scrollbar in it, and the metrics leave it out. A person clicks on
+      // the image, so its size is the one that puts a click where they saw it. The image is
+      // in device pixels, which the layout's old field gives the scale of.
+      const scale = metrics.visualViewport ? metrics.visualViewport.clientWidth / view.clientWidth : 1;
+      const image = jpegSize(jpeg);
+      const viewport = image
+        ? { width: Math.round(image.width / scale), height: Math.round(image.height / scale) }
+        : { width: view.clientWidth, height: view.clientHeight };
+      this.frameViewports.set(tab.targetId, viewport);
+      return {
+        jpeg,
+        viewport,
+        targetId: tab.targetId,
+        url: info.targetInfo?.url ?? "",
+      };
+    });
+  }
+
+  /**
+   * One event from a person at the panel, on the active tab. A real person, so no paced
+   * delays and no delivery probe. An event that opens a dialog counts as delivered: the
+   * command can't finish until someone answers, and that someone is the same person.
+   */
+  async dispatchInput(event: HumanInputEvent): Promise<void> {
+    const tab = this.activeTab();
+    await this.raiseActive();
+    this.assertNoDialog(tab);
+    await this.untilDialog(tab, this.sendHumanInput(tab, event));
+  }
+
+  /** A fraction of the frame the person is looking at, as a point in the page. */
+  private async humanPoint(tab: TabSession, x: number, y: number): Promise<{ x: number; y: number }> {
+    const frame = this.frameViewports.get(tab.targetId);
+    if (frame) return { x: x * frame.width, y: y * frame.height };
+    const { cssVisualViewport: css } = await this.send<{
+      cssVisualViewport: { clientWidth: number; clientHeight: number };
+    }>("Page.getLayoutMetrics", undefined, tab.sessionId);
+    return { x: x * css.clientWidth, y: y * css.clientHeight };
+  }
+
+  private async sendHumanInput(tab: TabSession, event: HumanInputEvent): Promise<void> {
+    if (event.kind === "text") {
+      await this.send("Input.insertText", { text: event.text }, tab.sessionId);
+      return;
+    }
+    if (event.kind === "key") {
+      await this.send(
+        "Input.dispatchKeyEvent",
+        {
+          type: event.action === "up" ? "keyUp" : event.text ? "keyDown" : "rawKeyDown",
+          key: event.key,
+          code: event.code,
+          windowsVirtualKeyCode: event.keyCode,
+          nativeVirtualKeyCode: event.keyCode,
+          modifiers: event.modifiers,
+          ...(event.text ? { text: event.text, unmodifiedText: event.text } : {}),
+          ...(event.location ? { location: event.location } : {}),
+          ...(event.location === 3 ? { isKeypad: true } : {}),
+          ...(event.repeat ? { autoRepeat: true } : {}),
+        },
+        tab.sessionId,
+      );
+      return;
+    }
+    const point = await this.humanPoint(tab, event.x, event.y);
+    if (event.kind === "wheel") {
+      await this.send(
+        "Input.dispatchMouseEvent",
+        {
+          type: "mouseWheel",
+          ...point,
+          deltaX: event.deltaX,
+          deltaY: event.deltaY,
+          modifiers: event.modifiers ?? 0,
+          pointerType: "mouse",
+        },
+        tab.sessionId,
+      );
+      return;
+    }
+    await this.send(
+      "Input.dispatchMouseEvent",
+      {
+        type: { move: "mouseMoved", down: "mousePressed", up: "mouseReleased" }[event.action],
+        ...point,
+        button: event.button,
+        buttons: event.buttons,
+        modifiers: event.modifiers ?? 0,
+        // As a physical mouse reports it: a pressure of 0 during a press is a tell.
+        force: event.buttons !== 0 ? 0.5 : 0,
+        pointerType: "mouse",
+        ...(event.action !== "move" ? { clickCount: event.clickCount ?? 1 } : {}),
+      },
+      tab.sessionId,
+    );
   }
 
   async evaluate<T = unknown>(expression: string): Promise<T> {

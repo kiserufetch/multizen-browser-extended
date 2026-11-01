@@ -498,7 +498,10 @@ test("get_download: unfinished returns the state, too large and unknown are erro
     { profile_id: "p", download_id: "big" },
     "FILE_TOO_LARGE",
   );
-  assert.deepEqual(big.details, { size_bytes: 5, max_bytes: 3 });
+  assert.equal(big.details.size_bytes, 5);
+  assert.equal(big.details.max_bytes, 3);
+  assert.equal(big.details.path, "/files/downloads/p/big", "where to fetch it instead");
+  assert.equal(big.details.url, undefined, "no address known here");
 
   await assertCode(
     client,

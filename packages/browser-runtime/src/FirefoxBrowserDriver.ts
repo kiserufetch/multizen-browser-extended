@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { rm, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,12 +9,14 @@ import {
   type BrowserContext,
   type Dialog,
   type Download,
+  type FileChooser,
   type Frame,
+  type Keyboard,
   type Locator,
   type Page,
 } from "playwright-core";
 import { launchOptions } from "camoufox-js";
-import { parseChord, randomRefBase, TargetRegistry, type KeyPlatform } from "@multizen/cdp-driver";
+import { jpegSize, parseChord, randomRefBase, TargetRegistry, type KeyPlatform } from "@multizen/cdp-driver";
 import type { BrowserDriver } from "@multizen/types";
 import type {
   CapturedFrame,
@@ -26,9 +28,11 @@ import type {
   DownloadRecord,
   DriverAction,
   ElementTarget,
+  HumanInputEvent,
   LaunchedProfile,
   LaunchOptions,
   OpenDialog,
+  OpenFileChooser,
   Profile,
   ProfileId,
 } from "@multizen/types";
@@ -93,6 +97,11 @@ const ERROR_PAGE_COMMIT_MS = 1_000;
 const OPERATION_DEADLINE_MS = 60_000;
 /** Typing is paced like a person's, so a verb that types gets this much more per key. */
 const OPERATION_MS_PER_KEY = 100;
+/** One frame for the panel. A page that can't paint must not hold its view hostage. */
+const FRAME_DEADLINE_MS = 5_000;
+const DEFAULT_FRAME_QUALITY = 60;
+/** One event from the panel. */
+const HUMAN_INPUT_DEADLINE_MS = 15_000;
 /** After this a close gives up on Firefox answering: the slot must not stay taken forever. */
 const CLOSE_DEADLINE_MS = 15_000;
 /** How long closing waits for a finished download to be copied out. */
@@ -100,6 +109,8 @@ const DOWNLOAD_DRAIN_MS = 3_000;
 /** Under the downloads dir: Playwright's working copies, which it deletes on close. A
  *  kept file can't collide with this: its sanitized name never starts with a dot. */
 const PLAYWRIGHT_DOWNLOADS_DIR = ".playwright";
+/** How often a download's bytes are looked at. Playwright reports nothing until it ends. */
+const DOWNLOAD_QUOTA_POLL_MS = 1_000;
 /**
  * Differs between two documents in a frame, and stays through pushState and hash
  * changes. Read in the main world, as `extract` reads the text: a page that tampers
@@ -144,6 +155,9 @@ const OPERATION_BUDGETS: Readonly<Record<string, (args: unknown[], deadlineMs: n
   performAction: flat,
   setDialogPolicy: flat,
   handleDialog: flat,
+  captureFrame: () => FRAME_DEADLINE_MS,
+  dispatchInput: () => HUMAN_INPUT_DEADLINE_MS,
+  respondFileChooser: flat,
 };
 
 /** Set once a verb was given up on: its next input stays unsent. */
@@ -157,6 +171,10 @@ function assertNotGivenUp(): void {
 interface OpenFirefoxDialog extends OpenDialog {
   pageId: string;
   dialog: Dialog;
+}
+
+interface OpenFirefoxChooser extends OpenFileChooser {
+  chooser: FileChooser;
 }
 
 interface ResolvedElement {
@@ -189,6 +207,14 @@ interface RunningFirefox {
   openDialogs: Map<string, OpenFirefoxDialog>;
   dialogSeq: number;
   dialogWatchers: Set<{ pageId: string; fire: () => void }>;
+  /** A person is at the panel: see {@link FirefoxBrowserDriver.setHandoffMode}. */
+  handoffMode: boolean;
+  fileChoosers: Map<string, OpenFirefoxChooser>;
+  chooserSeq: number;
+  /** While this listens, Playwright takes a page's choosers instead of the browser showing them. */
+  chooserListeners: Map<Page, (chooser: FileChooser) => void>;
+  /** The last frame's size per tab: what a panel's coordinates are fractions of. */
+  frameViewports: Map<string, { width: number; height: number }>;
   /** Downloads on their way out of Playwright's directory, which closing empties. */
   savingDownloads: Set<Promise<void>>;
   /** Ends each verb in flight, so nothing waits out a deadline on a gone browser. */
@@ -229,6 +255,8 @@ export interface FirefoxBrowserDriverOptions {
   closeDeadlineMs?: number;
   /** Enforcing, every profile runs through the bridge. Otherwise launches stay as they were. */
   egress?: EgressPolicy;
+  /** What one profile's downloads may take. Default: no limit. */
+  downloadQuotaBytes?: number;
   /** Told about each process as it starts and ends, for the next start's reaper. Default: none. */
   processJournal?: ProcessJournal;
   /** Where Xvfb's auth files go. Default: the system's temp directory. */
@@ -404,6 +432,10 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     }
   }
 
+  private readonly downloadQuotaBytes: number | undefined;
+  /** What can still be stopped, by the guid the tracker knows it by. */
+  private readonly activeDownloads = new Map<string, Download>();
+
   constructor(opts: FirefoxBrowserDriverOptions) {
     super();
     this.profileManager = opts.profileManager;
@@ -412,6 +444,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     this.launchExtras = opts.launchExtras;
     this.extraPrefs = opts.extraPrefs;
     this.refBase = opts.refBase;
+    this.downloadQuotaBytes = opts.downloadQuotaBytes;
     this.operationDeadlineMs = opts.operationDeadlineMs ?? OPERATION_DEADLINE_MS;
     this.closeDeadlineMs = opts.closeDeadlineMs ?? CLOSE_DEADLINE_MS;
     this.egress = opts.egress;
@@ -692,6 +725,11 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       openDialogs: new Map(),
       dialogSeq: 0,
       dialogWatchers: new Set(),
+      handoffMode: false,
+      fileChoosers: new Map(),
+      chooserSeq: 0,
+      chooserListeners: new Map(),
+      frameViewports: new Map(),
       savingDownloads: new Set(),
       operations: new Set(),
       refBase: this.refBase ?? randomRefBase(),
@@ -766,6 +804,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     page.on("dialog", (dialog: Dialog) => this.onDialog(r, pageId, dialog));
     page.on("download", (download: Download) => this.onDownload(r, profileId, download));
     page.on("close", () => this.onPageClosed(r, pageId, page));
+    // A popup opened during a handoff can ask for a file too.
+    if (r.handoffMode) this.watchFileChoosers(r, page, pageId);
     return pageId;
   }
 
@@ -776,6 +816,11 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   private onPageClosed(r: RunningFirefox, pageId: string, page: Page): void {
     r.pageIds.delete(page);
     r.tabRefs.delete(pageId);
+    r.chooserListeners.delete(page);
+    r.frameViewports.delete(pageId);
+    for (const chooser of [...r.fileChoosers.values()]) {
+      if (chooser.targetId === pageId) r.fileChoosers.delete(chooser.id);
+    }
     for (const dialog of [...r.openDialogs.values()]) {
       if (dialog.pageId === pageId) r.openDialogs.delete(dialog.id);
     }
@@ -876,7 +921,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
    */
   private onDialog(r: RunningFirefox, pageId: string, dialog: Dialog): void {
     const type = dialog.type() as DialogType;
-    if (r.dialogPolicy.mode === "auto") {
+    if (r.dialogPolicy.mode === "auto" && !r.handoffMode) {
       void answerDialog(dialog, type, r.dialogPolicy);
       return;
     }
@@ -975,16 +1020,87 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     );
   }
 
+  /**
+   * A click in a frame that hasn't got focus only gives the frame focus (see focusFrameAt),
+   * and keys sent next would go to its body and be lost. Nothing happens when the click
+   * did its job. A dialog the click opened leaves this waiting, so it doesn't hold anything up.
+   */
+  private async focusAfterClick(r: RunningFirefox, el: ResolvedElement): Promise<void> {
+    await this.untilDialog(r, el.pageId, el.locator.focus({ timeout: DOCUMENT_READ_TIMEOUT_MS }).catch(() => {}));
+  }
+
   async setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }> {
     const r = this.require(profileId);
     r.dialogPolicy = policy;
     // Dialogs left open under manual mode are answered by the new policy if it is auto.
-    if (policy.mode === "auto") {
-      const open = [...r.openDialogs.values()];
-      r.openDialogs.clear();
-      await Promise.all(open.map((d) => answerDialog(d.dialog, d.type, policy)));
-    }
+    if (policy.mode === "auto" && !r.handoffMode) await this.answerOpenDialogs(r);
     return { ok: true };
+  }
+
+  private async answerOpenDialogs(r: RunningFirefox): Promise<void> {
+    const open = [...r.openDialogs.values()];
+    r.openDialogs.clear();
+    await Promise.all(open.map((d) => answerDialog(d.dialog, d.type, r.dialogPolicy)));
+  }
+
+  /**
+   * For the length of a panel handoff. A dialog stays open for the person, since auto mode
+   * would answer one they need to see, and a file chooser is caught rather than opening a
+   * window nobody can reach.
+   */
+  async setHandoffMode(profileId: ProfileId, active: boolean): Promise<void> {
+    const r = this.require(profileId);
+    if (r.handoffMode === active) return;
+    r.handoffMode = active;
+    if (active) {
+      for (const [page, pageId] of r.pageIds) this.watchFileChoosers(r, page, pageId);
+      return;
+    }
+    for (const [page, listener] of r.chooserListeners) page.off("filechooser", listener);
+    r.chooserListeners.clear();
+    r.fileChoosers.clear();
+    if (r.dialogPolicy.mode === "auto") await this.answerOpenDialogs(r);
+  }
+
+  private watchFileChoosers(r: RunningFirefox, page: Page, pageId: string): void {
+    const listener = (chooser: FileChooser): void => {
+      // Clicking again replaces the question: the person is only ever answering the last.
+      for (const open of [...r.fileChoosers.values()]) {
+        if (open.targetId === pageId) r.fileChoosers.delete(open.id);
+      }
+      const id = `c${++r.chooserSeq}`;
+      r.fileChoosers.set(id, {
+        id,
+        multiple: chooser.isMultiple(),
+        targetId: pageId,
+        openedAt: new Date().toISOString(),
+        chooser,
+      });
+    };
+    r.chooserListeners.set(page, listener);
+    page.on("filechooser", listener);
+  }
+
+  async listFileChoosers(profileId: ProfileId): Promise<OpenFileChooser[]> {
+    return [...this.require(profileId).fileChoosers.values()].map(
+      ({ chooser: _chooser, ...open }) => open,
+    );
+  }
+
+  async respondFileChooser(profileId: ProfileId, chooserId: string, paths: string[]): Promise<void> {
+    const { chooser } = this.takeFileChooser(this.require(profileId), chooserId);
+    await chooser.setFiles(paths);
+  }
+
+  async dismissFileChooser(profileId: ProfileId, chooserId: string): Promise<void> {
+    this.takeFileChooser(this.require(profileId), chooserId);
+  }
+
+  private takeFileChooser(r: RunningFirefox, chooserId: string): OpenFirefoxChooser {
+    const open = r.fileChoosers.get(chooserId);
+    if (!open) throw new MultizenError("INVALID_INPUT", `No open file chooser ${chooserId}`);
+    r.fileChoosers.delete(chooserId);
+    return open;
   }
 
   async listDialogs(profileId: ProfileId): Promise<OpenDialog[]> {
@@ -1035,6 +1151,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     const guid = randomUUID();
     tracker.began({ guid, url: download.url(), suggestedFilename: download.suggestedFilename() });
     const path = join(tracker.dir, guid);
+    const stopWatching = this.watchQuota(tracker, guid, download);
     try {
       // Waits for the download to finish, and fails if it fails.
       await download.saveAs(path);
@@ -1042,8 +1159,31 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       tracker.progress({ guid, totalBytes: size, receivedBytes: size, state: "completed" });
     } catch {
       tracker.progress({ guid, totalBytes: 0, receivedBytes: 0, state: "canceled" });
+    } finally {
+      stopWatching();
+      // What is kept was copied out, and this copy would count against nothing until closing.
+      await download.delete().catch(() => {});
     }
     await tracker.settled();
+  }
+
+  /** Playwright says nothing until a download ends, so its working directory is what tells. */
+  private watchQuota(tracker: DownloadTracker, guid: string, download: Download): () => void {
+    if (this.downloadQuotaBytes === undefined) return () => {};
+    tracker.quotaBytes = this.downloadQuotaBytes;
+    tracker.stopDownload = (id) => {
+      void this.activeDownloads.get(id)?.cancel().catch(() => {});
+    };
+    this.activeDownloads.set(guid, download);
+    const workingDir = join(tracker.dir, PLAYWRIGHT_DOWNLOADS_DIR);
+    const timer = setInterval(() => {
+      void bytesIn(workingDir).then((bytes) => tracker.reportBytesUnderWay(bytes));
+    }, DOWNLOAD_QUOTA_POLL_MS);
+    timer.unref?.();
+    return () => {
+      clearInterval(timer);
+      this.activeDownloads.delete(guid);
+    };
   }
 
   private async downloadTracker(profileId: ProfileId): Promise<DownloadTracker> {
@@ -1142,6 +1282,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     const el = await this.resolveRef(r, ref);
     await this.deliver(r, el, () => el.locator.click({ timeout: ACTION_TIMEOUT_MS }));
     this.assertNoDialog(r, el.pageId);
+    await this.focusAfterClick(r, el);
     const chars = [...text];
     const progress = { sent: 0, stopped: false };
     const outcome = await this.untilDialog(
@@ -1313,6 +1454,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     if (target) {
       const el = await this.resolveTarget(r, target);
       await this.deliver(r, el, () => el.locator.click({ timeout: ACTION_TIMEOUT_MS }));
+      await this.focusAfterClick(r, el);
       tab = el;
     } else {
       tab = await this.foregroundTab(r);
@@ -1448,14 +1590,81 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     await opened.setFiles([...paths]);
   }
 
-  // The handoff panel's view and input, which a later change fills in. Until then
-  // each refuses by code, so a client sees a typed error rather than a missing method.
-  async captureFrame(): Promise<CapturedFrame> {
-    throw notAvailableYet("captureFrame");
+  /**
+   * One frame of the active tab for the panel. DIALOG_OPEN when a dialog blocks its painting.
+   * `caret: "initial"` because the default injects a style into the DOM. At CSS scale the
+   * image's size is the viewport's, which saves asking the page.
+   */
+  async captureFrame(profileId: ProfileId, opts: { quality?: number } = {}): Promise<CapturedFrame> {
+    const r = this.require(profileId);
+    const { page, pageId } = await this.foregroundTab(r);
+    return this.pageOp(r, pageId, async () => {
+      const jpeg = await page.screenshot({
+        type: "jpeg",
+        quality: opts.quality ?? DEFAULT_FRAME_QUALITY,
+        caret: "initial",
+        animations: "allow",
+        scale: "css",
+        timeout: FRAME_DEADLINE_MS,
+      });
+      const viewport = page.viewportSize() ?? jpegSize(jpeg);
+      if (viewport) r.frameViewports.set(pageId, viewport);
+      return {
+        jpeg,
+        viewport: viewport ?? { width: 0, height: 0 },
+        targetId: pageId,
+        url: page.url(),
+      };
+    });
   }
 
-  async dispatchInput(): Promise<void> {
-    throw notAvailableYet("dispatchInput");
+  /**
+   * One event from a person at the panel, on the active tab. An event that opens a dialog
+   * counts as delivered: Playwright can't finish it until someone answers.
+   */
+  async dispatchInput(profileId: ProfileId, event: HumanInputEvent): Promise<void> {
+    const r = this.require(profileId);
+    const { page, pageId } = await this.foregroundTab(r);
+    this.assertNoDialog(r, pageId);
+    await this.untilDialog(
+      r,
+      pageId,
+      this.sendHumanInput(r, page, pageId, event).catch((e: unknown) => {
+        throw pageError(e);
+      }),
+    );
+  }
+
+  private async sendHumanInput(
+    r: RunningFirefox,
+    page: Page,
+    pageId: string,
+    event: HumanInputEvent,
+  ): Promise<void> {
+    if (event.kind === "text") {
+      await page.keyboard.insertText(event.text);
+      return;
+    }
+    if (event.kind === "key") {
+      await sendHumanKey(page.keyboard, event);
+      return;
+    }
+    const view =
+      page.viewportSize() ??
+      r.frameViewports.get(pageId) ??
+      (await page.evaluate<{ width: number; height: number }>(
+        "({ width: innerWidth, height: innerHeight })",
+      ));
+    const x = event.x * view.width;
+    const y = event.y * view.height;
+    if (event.kind === "mouse" && event.action === "down") await focusFrameAt(page, x, y);
+    await page.mouse.move(x, y);
+    if (event.kind === "wheel") {
+      await page.mouse.wheel(event.deltaX, event.deltaY);
+    } else if (event.button !== "none" && event.action !== "move") {
+      const options = { button: event.button, clickCount: event.clickCount ?? 1 };
+      await (event.action === "down" ? page.mouse.down(options) : page.mouse.up(options));
+    }
   }
 
   /** Closing waits for a launch under way, whose browser would outlive this process. */
@@ -1465,15 +1674,62 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   }
 }
 
-function notAvailableYet(what: string): MultizenError {
-  return new MultizenError(
-    "UNSUPPORTED_ON_ENGINE",
-    `${what} is not available on Camoufox in this build.`,
-  );
+/**
+ * Playwright's keyboard knows the US layout. A character off it (another layout, an IME's
+ * result) has no key to press, so it goes in as text, on the way down only. Keys with no
+ * meaning here, like the "Process" of a composition, go nowhere.
+ */
+async function sendHumanKey(
+  keyboard: Keyboard,
+  event: Extract<HumanInputEvent, { kind: "key" }>,
+): Promise<void> {
+  const { key } = event;
+  if ([...key].length === 1 && !/^[\x20-\x7e]$/.test(key)) {
+    if (event.action === "down") await keyboard.insertText(key);
+    return;
+  }
+  try {
+    await (event.action === "down" ? keyboard.down(key) : keyboard.up(key));
+  } catch (e) {
+    if (!/Unknown key/.test(errorText(e))) throw e;
+  }
+}
+
+/**
+ * A press in a frame that hasn't got focus only gives the frame focus, not the element under
+ * it, and keys then go to the frame's body (measured on Camoufox with a cross-origin frame,
+ * after a click in the page around it). So the owner gets focus first: through Playwright's
+ * utility world, in the order a real press would cause it. Frames are parents first, so the
+ * last one containing the point is the deepest.
+ */
+async function focusFrameAt(page: Page, x: number, y: number): Promise<void> {
+  let owner: Awaited<ReturnType<Frame["frameElement"]>> | null = null;
+  for (const frame of page.frames()) {
+    if (!frame.parentFrame()) continue;
+    const element = await frame.frameElement().catch(() => null);
+    const box = await element?.boundingBox().catch(() => null);
+    if (element && box && x >= box.x && y >= box.y && x < box.x + box.width && y < box.y + box.height) {
+      owner = element;
+    }
+  }
+  await owner?.focus().catch(() => {});
 }
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function bytesIn(dir: string): Promise<number> {
+  const names = await readdir(dir).catch(() => [] as string[]);
+  const sizes = await Promise.all(
+    names.map((name) =>
+      stat(join(dir, name)).then(
+        (s) => s.size,
+        () => 0,
+      ),
+    ),
+  );
+  return sizes.reduce((sum, size) => sum + size, 0);
 }
 
 function randIn(min: number, max: number): number {

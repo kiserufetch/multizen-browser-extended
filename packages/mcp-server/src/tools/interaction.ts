@@ -171,7 +171,7 @@ function decodeBase64(fileName: string, data: string): Buffer {
   return decoded;
 }
 
-interface PlannedUpload {
+export interface PlannedUpload {
   fileName: string;
   size: number;
   /** Already on disk. */
@@ -181,7 +181,7 @@ interface PlannedUpload {
 }
 
 /** Checks every file before anything is written: a refused batch leaves nothing behind. */
-async function planUploads(
+export async function planUploads(
   files: ReadonlyArray<{ file_name: string; data_base64?: string }>,
   roots: readonly string[],
   maxBytes: number,
@@ -214,21 +214,18 @@ async function planUploads(
   return planned;
 }
 
-async function uploadFile(args: Record<string, unknown>, ctx: ToolContext): Promise<unknown> {
-  const input = UploadFileSchema.parse(args);
-  const id = input.profile_id;
-  assertProfileExists(ctx.profileManager, id);
-  assertProfileRunning(ctx.browserDriver, id);
-  const uploadsDir = join(ctx.profileManager.get(id)!.dataDir, PROFILE_UPLOADS_DIR);
-  const roots = ctx.uploadsRoot ? [uploadsDir, ctx.uploadsRoot] : [uploadsDir];
-  const planned = await planUploads(
-    input.files,
-    roots,
-    ctx.maxInlineFileBytes ?? DEFAULT_MAX_INLINE_FILE_BYTES,
-  );
-
-  const inbox = join(uploadsDir, UPLOAD_INBOX_DIR);
+/**
+ * Puts what came as base64 in the inbox, which is cleared when the browser is gone. Gives
+ * the path of each file in `planned`, and a way to take the written ones back.
+ */
+export async function saveToInbox(
+  inbox: string,
+  planned: readonly PlannedUpload[],
+): Promise<{ paths: string[]; cleanup: () => Promise<void> }> {
   const written: string[] = [];
+  const cleanup = async (): Promise<void> => {
+    await Promise.all(written.map((dir) => rm(dir, { recursive: true, force: true })));
+  };
   const paths: string[] = [];
   try {
     for (const file of planned) {
@@ -244,13 +241,35 @@ async function uploadFile(args: Record<string, unknown>, ctx: ToolContext): Prom
       await writeFile(path, file.bytes, { mode: 0o600, flag: "wx" });
       paths.push(path);
     }
+  } catch (e) {
+    await cleanup();
+    throw e;
+  }
+  return { paths, cleanup };
+}
+
+async function uploadFile(args: Record<string, unknown>, ctx: ToolContext): Promise<unknown> {
+  const input = UploadFileSchema.parse(args);
+  const id = input.profile_id;
+  assertProfileExists(ctx.profileManager, id);
+  assertProfileRunning(ctx.browserDriver, id);
+  const uploadsDir = join(ctx.profileManager.get(id)!.dataDir, PROFILE_UPLOADS_DIR);
+  const roots = ctx.uploadsRoot ? [uploadsDir, ctx.uploadsRoot] : [uploadsDir];
+  const planned = await planUploads(
+    input.files,
+    roots,
+    ctx.maxInlineFileBytes ?? DEFAULT_MAX_INLINE_FILE_BYTES,
+  );
+
+  const { paths, cleanup } = await saveToInbox(join(uploadsDir, UPLOAD_INBOX_DIR), planned);
+  try {
     await ctx.browserDriver.performAction(id, {
       type: "upload_file",
       target: targetOf(input)!,
       paths,
     });
   } catch (e) {
-    await Promise.all(written.map((dir) => rm(dir, { recursive: true, force: true })));
+    await cleanup();
     throw e;
   }
   return {

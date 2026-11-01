@@ -6,6 +6,11 @@ import { DEFAULT_MAX_INLINE_FILE_BYTES, ProfileIdSchema, type ExtensionTool } fr
 
 const GetDownloadSchema = ProfileIdSchema.extend({ download_id: z.string().min(1) });
 
+/** The HTTP route that serves a download whatever its size. */
+export function downloadPath(profileId: string, downloadId: string): string {
+  return `/files/downloads/${encodeURIComponent(profileId)}/${encodeURIComponent(downloadId)}`;
+}
+
 export const DOWNLOAD_TOOLS: ExtensionTool[] = [
   {
     definition: {
@@ -28,7 +33,7 @@ export const DOWNLOAD_TOOLS: ExtensionTool[] = [
     definition: {
       name: "get_download",
       description:
-        "Get a download by the id list_downloads gave it. A completed file comes back as data_base64, up to 16 MB by default; a larger one gets FILE_TOO_LARGE. An unfinished download returns its state with no data. Works on a stopped profile too.",
+        "Get a download by the id list_downloads gave it. A completed file comes back as data_base64, up to 16 MB by default; a larger one gets FILE_TOO_LARGE, whose details.path is where to GET it from this server with the same bearer token. An unfinished download returns its state with no data. Works on a stopped profile too.",
       inputSchema: {
         type: "object",
         required: ["profile_id", "download_id"],
@@ -50,7 +55,17 @@ export const DOWNLOAD_TOOLS: ExtensionTool[] = [
         throw new MultizenError(
           "FILE_TOO_LARGE",
           `Download ${downloadId} is ${size} bytes, over the inline limit of ${maxBytes}.`,
-          { details: { size_bytes: size, max_bytes: maxBytes } },
+          {
+            hint: "GET details.path on this server with your bearer token.",
+            details: {
+              size_bytes: size,
+              max_bytes: maxBytes,
+              path: downloadPath(id, downloadId),
+              ...(ctx.downloadsBaseUrl
+                ? { url: `${ctx.downloadsBaseUrl}${downloadPath(id, downloadId)}` }
+                : {}),
+            },
+          },
         );
       }
       return { ...record, data_base64: (await readFile(path)).toString("base64") };

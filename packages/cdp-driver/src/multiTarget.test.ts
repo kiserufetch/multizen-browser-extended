@@ -1554,3 +1554,248 @@ test("a dialog's click still finishes its release after the operation has answer
   const types = b.calls("Input.dispatchMouseEvent").map((c) => c.params.type);
   assert.deepEqual(types, ["mouseMoved", "mousePressed", "mouseReleased"]);
 });
+
+// ── the handoff panel: frames, input, handoff mode ───────────────────────────
+
+function withFrameAnswers(b: FakeBrowser): void {
+  b.handlers.set("Page.getLayoutMetrics", () => ({
+    cssVisualViewport: { clientWidth: 1000, clientHeight: 500 },
+  }));
+  b.handlers.set("Page.captureScreenshot", () => ({ data: Buffer.from("jpeg bytes").toString("base64") }));
+  b.handlers.set("Target.getTargetInfo", () => ({ targetInfo: { url: "http://t/page" } }));
+}
+
+test("a frame is a JPEG of the active tab, with its viewport and URL, and enables nothing", async () => {
+  const { b, s } = await connected(["A", "B"]);
+  withFrameAnswers(b);
+  await s.activateTab("B");
+  const frame = await s.captureFrame();
+  assert.equal(Buffer.from(frame.jpeg).toString(), "jpeg bytes");
+  assert.deepEqual(frame.viewport, { width: 1000, height: 500 });
+  assert.equal(frame.targetId, "B");
+  assert.equal(frame.url, "http://t/page");
+  const shot = b.calls("Page.captureScreenshot")[0]!;
+  assert.equal(shot.sessionId, "S-B");
+  assert.deepEqual(shot.params, { format: "jpeg", quality: 60, optimizeForSpeed: true });
+  await s.captureFrame({ quality: 30 });
+  assert.equal(b.calls("Page.captureScreenshot")[1]!.params.quality, 30);
+  assertStealth(b);
+});
+
+test("a frame with a dialog open says DIALOG_OPEN at once, with the dialog, and never asks the renderer", async () => {
+  const { b, s } = await connected(["A"]);
+  withFrameAnswers(b);
+  await s.setHandoffMode(true);
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "Sure?", url: "http://t/" }, "S-A");
+  const before = b.calls("Page.captureScreenshot").length;
+  const e = await assertMultizenCode(s.captureFrame(), "DIALOG_OPEN");
+  assert.equal(e.details?.type, "confirm");
+  assert.equal(e.details?.message, "Sure?");
+  assert.equal(b.calls("Page.captureScreenshot").length, before);
+});
+
+test("a dialog opening under a capture ends the wait: it would hang on Page.captureScreenshot", async () => {
+  const { b, s } = await connected(["A"]);
+  withFrameAnswers(b);
+  await s.setHandoffMode(true);
+  b.hang.add("Page.captureScreenshot");
+  const capture = s.captureFrame();
+  await settle();
+  b.event("Page.javascriptDialogOpening", { type: "alert", message: "hi" }, "S-A");
+  await assertMultizenCode(capture, "DIALOG_OPEN");
+});
+
+test("a capture that gets stuck for no visible reason times out, typed, in seconds", async (t) => {
+  const { b, s } = await connected(["A"]);
+  withFrameAnswers(b);
+  b.hang.add("Page.captureScreenshot");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const capture = s.captureFrame();
+  await Promise.resolve();
+  t.mock.timers.tick(5_001);
+  t.mock.timers.reset();
+  await assertMultizenCode(capture, "TIMEOUT");
+});
+
+test("human input goes straight to the active tab, at the viewport's scale, with no probe", async () => {
+  const { b, s } = await connected(["A", "B"]);
+  withFrameAnswers(b);
+  await s.activateTab("B");
+  await s.dispatchInput({ kind: "mouse", action: "move", x: 0.5, y: 0.25, button: "none", buttons: 0 });
+  await s.dispatchInput({ kind: "mouse", action: "down", x: 0.5, y: 0.25, button: "left", buttons: 1, clickCount: 2, modifiers: 8 });
+  await s.dispatchInput({ kind: "mouse", action: "up", x: 0.5, y: 0.25, button: "left", buttons: 0, clickCount: 2 });
+  await s.dispatchInput({ kind: "wheel", x: 0.1, y: 0.2, deltaX: 3, deltaY: 120 });
+  const mouse = b.calls("Input.dispatchMouseEvent");
+  assert.ok(mouse.every((c) => c.sessionId === "S-B"));
+  assert.deepEqual(mouse[0]!.params, {
+    type: "mouseMoved", x: 500, y: 125, button: "none", buttons: 0, modifiers: 0, force: 0, pointerType: "mouse",
+  });
+  assert.deepEqual(mouse[1]!.params, {
+    type: "mousePressed", x: 500, y: 125, button: "left", buttons: 1, modifiers: 8, force: 0.5, pointerType: "mouse", clickCount: 2,
+  });
+  assert.deepEqual(mouse[2]!.params, {
+    type: "mouseReleased", x: 500, y: 125, button: "left", buttons: 0, modifiers: 0, force: 0, pointerType: "mouse", clickCount: 2,
+  });
+  assert.deepEqual(mouse[3]!.params, {
+    type: "mouseWheel", x: 100, y: 100, deltaX: 3, deltaY: 120, modifiers: 0, pointerType: "mouse",
+  });
+  assert.equal(b.calls("Page.createIsolatedWorld").length, 0, "the human path has no delivery probe");
+  assertStealth(b);
+});
+
+test("human keys: text makes a keyDown, a named key a rawKeyDown, and text boxes insert", async () => {
+  const { b, s } = await connected(["A"]);
+  await s.dispatchInput({ kind: "key", action: "down", key: "ф", code: "KeyA", keyCode: 65, modifiers: 0, text: "ф" });
+  await s.dispatchInput({ kind: "key", action: "up", key: "ф", code: "KeyA", keyCode: 65, modifiers: 0 });
+  await s.dispatchInput({ kind: "key", action: "down", key: "Tab", code: "Tab", keyCode: 9, modifiers: 8, location: 0, repeat: true });
+  await s.dispatchInput({ kind: "key", action: "down", key: "1", code: "Numpad1", keyCode: 97, modifiers: 0, text: "1", location: 3 });
+  await s.dispatchInput({ kind: "text", text: "你好 🎉" });
+  const keys = b.calls("Input.dispatchKeyEvent").map((c) => c.params);
+  assert.deepEqual(keys[0], {
+    type: "keyDown", key: "ф", code: "KeyA", windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 0, text: "ф", unmodifiedText: "ф",
+  });
+  assert.equal(keys[1]!.type, "keyUp");
+  assert.equal(keys[1]!.text, undefined);
+  assert.equal(keys[2]!.type, "rawKeyDown");
+  assert.equal(keys[2]!.modifiers, 8);
+  assert.equal(keys[2]!.autoRepeat, true);
+  assert.equal(keys[3]!.isKeypad, true);
+  assert.deepEqual(b.calls("Input.insertText")[0]!.params, { text: "你好 🎉" });
+});
+
+test("human input refuses with a dialog open, and an event that opens one counts as delivered", async () => {
+  const { b, s } = await connected(["A"]);
+  withFrameAnswers(b);
+  await s.setHandoffMode(true);
+  b.hang.add("Input.dispatchMouseEvent");
+  const pressing = s.dispatchInput({ kind: "mouse", action: "down", x: 0, y: 0, button: "left", buttons: 1 });
+  await settle();
+  b.event("Page.javascriptDialogOpening", { type: "alert", message: "hi" }, "S-A");
+  await assert.doesNotReject(pressing);
+  await assertMultizenCode(s.dispatchInput({ kind: "text", text: "x" }), "DIALOG_OPEN");
+});
+
+test("handoff mode holds a dialog open whatever the policy, and gives it back to the policy after", async () => {
+  const { b, s } = await connected(["A"]);
+  await s.setDialogPolicy({ mode: "auto", confirm: "accept" });
+  const entering = s.setHandoffMode(true);
+  // Before anything has been answered by the browser: the flag is already up.
+  b.event("Page.javascriptDialogOpening", { type: "confirm", message: "Sure?" }, "S-A");
+  await entering;
+  assert.deepEqual(answers(b), [], "auto mode would have answered it");
+  assert.equal(s.listDialogs()[0]?.message, "Sure?");
+
+  await s.setDialogPolicy({ mode: "auto" });
+  assert.deepEqual(answers(b), [], "a policy set meanwhile takes effect at the end");
+
+  await s.handleDialog({ action: "dismiss" });
+  assert.deepEqual(answers(b), [{ accept: false }], "the person answers");
+
+  b.event("Page.javascriptDialogOpening", { type: "alert", message: "left open" }, "S-A");
+  await s.setHandoffMode(false);
+  assert.deepEqual(answers(b).at(-1), { accept: true }, "auto again: what was open is answered");
+  assert.equal(s.hasOpenDialog(), false);
+
+  b.event("Page.javascriptDialogOpening", { type: "alert", message: "after" }, "S-A");
+  await settle();
+  assert.equal(s.hasOpenDialog(), false, "back to auto");
+});
+
+test("a manual policy stays manual after a handoff, and its dialog stays for the agent", async () => {
+  const { b, s } = await connected(["A"]);
+  await s.setDialogPolicy({ mode: "manual" });
+  await s.setHandoffMode(true);
+  b.event("Page.javascriptDialogOpening", { type: "alert", message: "m" }, "S-A");
+  await s.setHandoffMode(false);
+  assert.deepEqual(answers(b), []);
+  assert.equal(s.hasOpenDialog(), true);
+});
+
+test("handoff mode catches choosers on every tab, popups included, and stops when it ends", async () => {
+  const { b, s } = await connected(["A", "B"]);
+  await s.setHandoffMode(true);
+  const on = b.calls("Page.setInterceptFileChooserDialog");
+  assert.deepEqual(on.map((c) => [c.sessionId, c.params.enabled]).sort(), [["S-A", true], ["S-B", true]]);
+
+  b.attachPage("POP", "S-POP");
+  await settle();
+  assert.ok(
+    b.calls("Page.setInterceptFileChooserDialog").some((c) => c.sessionId === "S-POP" && c.params.enabled === true),
+    "a popup opened during the handoff is covered too",
+  );
+
+  await s.setHandoffMode(false);
+  const off = b.calls("Page.setInterceptFileChooserDialog").filter((c) => c.params.enabled === false);
+  assert.deepEqual(off.map((c) => c.sessionId).sort(), ["S-A", "S-B", "S-POP"]);
+  assertStealth(b);
+});
+
+test("with no handoff, nothing about choosers is ever sent", async () => {
+  const { b } = await connected(["A"]);
+  assert.equal(b.calls("Page.setInterceptFileChooserDialog").length, 0);
+});
+
+test("a chooser opened during a handoff waits for files, on its own session", async () => {
+  const { b, s } = await connected(["A"]);
+  await s.setHandoffMode(true);
+  b.event("Page.fileChooserOpened", { frameId: "F", mode: "selectSingle", backendNodeId: 7 }, "S-A");
+  const [first] = s.listFileChoosers();
+  assert.equal(first?.multiple, false);
+  assert.equal(first?.targetId, "A");
+  assert.equal("backendNodeId" in first!, false);
+
+  // Clicking again replaces it.
+  b.event("Page.fileChooserOpened", { frameId: "F", mode: "selectMultiple", backendNodeId: 8 }, "S-A");
+  const [second] = s.listFileChoosers();
+  assert.equal(s.listFileChoosers().length, 1);
+  assert.equal(second?.multiple, true);
+
+  await s.respondFileChooser(second!.id, ["C:/inbox/a.txt"]);
+  const [call] = b.calls("DOM.setFileInputFiles");
+  assert.deepEqual(call?.params, { files: ["C:/inbox/a.txt"], backendNodeId: 8 });
+  assert.equal(call?.sessionId, "S-A");
+  assert.deepEqual(s.listFileChoosers(), []);
+  await assertMultizenCode(s.respondFileChooser(second!.id, ["x"]), "INVALID_INPUT");
+
+  b.event("Page.fileChooserOpened", { frameId: "F", mode: "selectSingle", backendNodeId: 9 }, "S-A");
+  s.dismissFileChooser(s.listFileChoosers()[0]!.id);
+  assert.deepEqual(s.listFileChoosers(), []);
+  assert.equal(b.calls("DOM.setFileInputFiles").length, 1, "dismissing touches nothing");
+  assertStealth(b);
+});
+
+test("what upload_file catches for itself isn't taken for the panel's, outside a handoff", async () => {
+  const { b, s } = await connected(["A"]);
+  b.event("Page.fileChooserOpened", { frameId: "F", mode: "selectSingle", backendNodeId: 7 }, "S-A");
+  assert.deepEqual(s.listFileChoosers(), []);
+});
+
+test("a tab closing takes its chooser along; ending the handoff forgets the rest", async () => {
+  const { b, s } = await connected(["A", "B"]);
+  await s.setHandoffMode(true);
+  b.event("Page.fileChooserOpened", { mode: "selectSingle", backendNodeId: 7 }, "S-A");
+  b.event("Page.fileChooserOpened", { mode: "selectSingle", backendNodeId: 8 }, "S-B");
+  b.event("Target.targetDestroyed", { targetId: "A" });
+  assert.deepEqual(s.listFileChoosers().map((c) => c.targetId), ["B"]);
+  await s.setHandoffMode(false);
+  assert.deepEqual(s.listFileChoosers(), []);
+});
+
+test("clicks land by the frame's image, which has the scrollbar the metrics leave out", async () => {
+  const { b, s } = await connected(["A"]);
+  withFrameAnswers(b);
+  const image = Buffer.from([
+    0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 743 * 2 >> 8, (743 * 2) & 0xff, 1536 * 2 >> 8, (1536 * 2) & 0xff, 0x03,
+  ]);
+  b.handlers.set("Page.captureScreenshot", () => ({ data: image.toString("base64") }));
+  b.handlers.set("Page.getLayoutMetrics", () => ({
+    cssVisualViewport: { clientWidth: 1521, clientHeight: 743 },
+    visualViewport: { clientWidth: 3042 },
+  }));
+  const frame = await s.captureFrame();
+  assert.deepEqual(frame.viewport, { width: 1536, height: 743 }, "CSS pixels, at a device scale of 2");
+  await s.dispatchInput({ kind: "mouse", action: "move", x: 1, y: 0.5, button: "none", buttons: 0 });
+  const [move] = b.calls("Input.dispatchMouseEvent");
+  assert.equal(move!.params.x, 1536);
+  assert.equal(move!.params.y, 371.5);
+});

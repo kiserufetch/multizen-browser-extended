@@ -120,8 +120,12 @@ const api = {
   },
   handoff: {
     pending: (): Promise<PendingHandoff[]> => ipcRenderer.invoke("handoff:pending"),
-    resume: (profileId: ProfileId): Promise<void> =>
-      ipcRenderer.invoke("handoff:resume", profileId),
+    resume: (profileId: ProfileId, handoffId?: string): Promise<void> =>
+      ipcRenderer.invoke("handoff:resume", profileId, handoffId),
+    abort: (handoffId: string): Promise<void> => ipcRenderer.invoke("handoff:abort", handoffId),
+    /** False when there is no panel to open: the MCP HTTP server is off or failed to bind. */
+    openPanel: (handoffId?: string): Promise<boolean> =>
+      ipcRenderer.invoke("handoff:openPanel", handoffId),
     onChanged: (cb: (pending: PendingHandoff[]) => void): (() => void) => {
       const listener = (_: unknown, p: PendingHandoff[]): void => cb(p);
       ipcRenderer.on("handoff:changed", listener);
