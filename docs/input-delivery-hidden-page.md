@@ -72,6 +72,15 @@ Camoufox goes through Playwright, so this probe doesn't apply, but it has the sa
 
 The window's position was not inspected: that the pref fixes it is what points at occlusion. `multizen-server` sets it, on Windows only (`serverFirefoxPrefs` in `apps/server/src/runtime.ts`). The desktop doesn't, so there the tools end in `TIMEOUT` until the window is raised, and the error's hint says so. Whether a page can tell the difference was not measured for this pref either.
 
+### Headless (2026-10-31, CloakBrowser 146.0.7680.177.5 and Camoufox 152.0.4-beta.30, Windows 11)
+
+The problem does not exist in headless. With no window there is nothing to occlude.
+
+- CloakBrowser in `--headless=new`: `visibilityState` read `visible` at every sample, right after load, on the first tab and on a new tab, also on the desktop, which doesn't disable `CalculateNativeWinOcclusion`, in a run where the app's own window on the same machine was painting nothing. No `INPUT_NOT_DELIVERED` in the whole flow suite: 94 checks with real input in the main frame, a same-process iframe, an OOPIF and one nested in that.
+- Paint entries come slightly later than `load`, in headless as in headed: none right after `navigate` returned and at 100 ms, `first-paint` and `first-contentful-paint` at 1 s. Input sent with no paint entry yet was delivered. So zero paint entries alone doesn't mean a dropped page: it is `hidden` plus zero that does.
+- `document.hasFocus()` varied on the first tab, false in some runs, and read true on a tab `new_tab` had just activated. Headed varied the same way. It is not specific to the mode.
+- Camoufox with `headless: true`: `visible`, `first-contentful-paint` already there right after load, focus true, 71 checks with no click hanging.
+
 ## Options weighed
 
 | Option | Evidence | Verdict |

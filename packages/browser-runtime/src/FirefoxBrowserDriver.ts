@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   firefox,
@@ -19,17 +20,20 @@ import type {
   DialogPolicy,
   DialogResponse,
   DialogType,
+  DisplayMode,
   DownloadFile,
   DownloadRecord,
   DriverAction,
   ElementTarget,
   LaunchedProfile,
+  LaunchOptions,
   OpenDialog,
   Profile,
   ProfileId,
 } from "@multizen/types";
 import { DEFAULT_DIALOG_ANSWERS, MultizenError, PROFILE_DOWNLOADS_DIR } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
+import { displayEnv } from "./displayMode.ts";
 import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
 import { osForDevice } from "./firefoxFingerprint.ts";
 import {
@@ -44,6 +48,7 @@ import { resolveProxyLaunchGeo } from "./launchGeo";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { sanitizeStartUrl } from "./startPage";
 import type { RunningStateChange } from "./ChromiumBrowserDriver.ts";
+import { startXvfb, type XvfbHandle } from "./xvfb.ts";
 
 /**
  * BrowserDriver for the Firefox-family engine (Camoufox). Drives the browser
@@ -74,6 +79,7 @@ const SELECT_OPTION_TIMEOUT_MS = 3_000;
 const FILE_CHOOSER_TIMEOUT_MS = 5_000;
 const DOCUMENT_READ_TIMEOUT_MS = 5_000;
 const WHEEL_AFTER_MOVE_MS = 150;
+const START_PAGE_COMMIT_MS = 3_000;
 /**
  * Ceiling for one verb, first call to last. Playwright's actions have their own timeouts,
  * but evaluate, title, keyboard and the like have none, and whoever holds the profile
@@ -171,6 +177,9 @@ interface RunningFirefox {
   /** Polls for zero open windows and closes the context when the user shuts the
    *  last window (macOS keeps the browser alive otherwise). Set after launch. */
   windowWatcher?: NodeJS.Timeout;
+  displayMode: DisplayMode;
+  /** Its private display, in xvfb mode. Ends when the browser does. */
+  xvfb?: XvfbHandle;
 }
 
 interface FirefoxDriverEvents {
@@ -266,6 +275,39 @@ function minimalChildEnv(): Record<string, string> {
     if (typeof v === "string") out[key] = v;
   }
   return out;
+}
+
+/**
+ * Starts the first tab on its way to the start page, and waits for that to commit. A commit
+ * arriving after a client's own navigate aborts it with "interrupted by another navigation",
+ * which is what a client calling navigate right after launch_profile would otherwise get.
+ * Only the commit, and only for so long: a slow start page loads on in the background.
+ */
+export async function openStartPage(
+  page: Pick<Page, "goto">,
+  url: string,
+  budgetMs = START_PAGE_COMMIT_MS,
+): Promise<void> {
+  const committed = page.goto(url, { waitUntil: "commit" }).catch(() => {});
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    committed,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, budgetMs);
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
+/** What a display mode decides among camoufox's options. Its binary can't start in a test. */
+export function camoufoxDisplayOptions(
+  displayMode: DisplayMode,
+  xvfb?: XvfbHandle,
+): { headless: boolean; env: Record<string, string> } {
+  return {
+    headless: displayMode === "headless",
+    env: displayEnv(minimalChildEnv(), displayMode, xvfb),
+  };
 }
 
 export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver {
@@ -376,19 +418,27 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   }
 
   /** Idempotent: a running profile answers as it is, and parallel calls share one launch. */
-  async launch(profileId: ProfileId): Promise<LaunchedProfile> {
+  async launch(profileId: ProfileId, opts: LaunchOptions = {}): Promise<LaunchedProfile> {
     const existing = this.running.get(profileId);
     if (existing) {
-      return { id: profileId, cdpEndpoint: "", pid: existing.pid, startedAt: existing.startedAt };
+      return {
+        id: profileId,
+        cdpEndpoint: "",
+        pid: existing.pid,
+        startedAt: existing.startedAt,
+        displayMode: existing.displayMode,
+      };
     }
     const underway = this.launching.get(profileId);
     if (underway) return underway;
-    const launch = this.doLaunch(profileId).finally(() => this.launching.delete(profileId));
+    const launch = this.doLaunch(profileId, opts.displayMode ?? "headed").finally(() =>
+      this.launching.delete(profileId),
+    );
     this.launching.set(profileId, launch);
     return launch;
   }
 
-  private async doLaunch(profileId: ProfileId): Promise<LaunchedProfile> {
+  private async doLaunch(profileId: ProfileId, displayMode: DisplayMode): Promise<LaunchedProfile> {
     const profile = this.profileManager.get(profileId);
     if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
     this.profileManager.markOpened(profileId);
@@ -411,6 +461,18 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       const localProxyUrl = await startBridgeForProfile(profileId, profile.proxy);
       proxy = { server: localProxyUrl };
       hasProxyBridge = true;
+    }
+
+    let xvfb: XvfbHandle | undefined;
+    if (displayMode === "xvfb") {
+      xvfb = await startXvfb({
+        width: fingerprint.screen.width,
+        height: fingerprint.screen.height,
+        runDir: tmpdir(),
+      }).catch((e: unknown) => {
+        if (hasProxyBridge) stopBridgeForProfile(profileId);
+        throw e;
+      });
     }
 
     // We deliberately do NOT pass executable_path. camoufox-js's launchOptions
@@ -438,9 +500,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     // profiles, matching the Chromium engine's non-proxied-UDP hardening. A page
     // otherwise leaks the operator's real address via STUN outside the proxy.
     const config: Record<string, unknown> = {
-      headless: false,
+      ...camoufoxDisplayOptions(displayMode, xvfb),
       exclude_addons: ["UBO"],
-      env: minimalChildEnv(),
       ...(proxy ? { block_webrtc: true } : {}),
       ...(this.buildFingerprintConfig
         ? this.buildFingerprintConfig({ ...profile, fingerprint })
@@ -466,6 +527,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
         }),
       );
     } catch (e) {
+      await xvfb?.stop().catch(() => {});
       if (hasProxyBridge) stopBridgeForProfile(profileId);
       throw e;
     }
@@ -476,6 +538,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       context,
       hasProxyBridge,
       osForDevice(profile.fingerprint.device),
+      displayMode,
+      xvfb,
     );
 
     // Open the profile's start page on EVERY launch. Unlike Chromium (which
@@ -483,13 +547,20 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     // Firefox doesn't restore the session, so a relaunch would otherwise come up
     // on a blank page. Navigating to the start page each time gives a consistent
     // landing instead. sanitizeStartUrl rejects non-http(s)/about URLs and falls
-    // back to the app default, like the Chromium path. Fire-and-forget: a nav
-    // failure (bad proxy/network) must not throw out of launch().
+    // back to the app default, like the Chromium path. A nav failure (bad
+    // proxy/network) must not throw out of launch().
     const startUrl = sanitizeStartUrl(profile.startUrl);
-    void context.pages()[0]?.goto(startUrl).catch(() => {});
+    const startPage = context.pages()[0];
+    if (startPage) await openStartPage(startPage, startUrl);
 
     this.emit("running-changed", { kind: "launched", profileId });
-    return { id: profileId, cdpEndpoint: "", pid: record.pid, startedAt: record.startedAt };
+    return {
+      id: profileId,
+      cdpEndpoint: "",
+      pid: record.pid,
+      startedAt: record.startedAt,
+      displayMode,
+    };
   }
 
   /** Takes over a started browser: its tabs, and every event that outlives launch(). */
@@ -498,6 +569,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     context: BrowserContext,
     hasProxyBridge: boolean,
     platform: KeyPlatform,
+    displayMode: DisplayMode = "headed",
+    xvfb?: XvfbHandle,
   ): RunningFirefox {
     const record: RunningFirefox = {
       context,
@@ -520,6 +593,8 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       savingDownloads: new Set(),
       operations: new Set(),
       refBase: this.refBase ?? randomRefBase(),
+      displayMode,
+      ...(xvfb ? { xvfb } : {}),
     };
     for (const p of context.pages()) {
       record.targets.upsert({ targetId: this.trackPage(record, profileId, p), type: "page" });
@@ -565,6 +640,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     if (this.running.get(profileId) !== r) return;
     if (r.windowWatcher) clearInterval(r.windowWatcher);
     if (r.hasProxyBridge) stopBridgeForProfile(profileId);
+    void r.xvfb?.stop().catch(() => {});
     this.running.delete(profileId);
     this.failOperations(r);
     this.emit("running-changed", {
@@ -630,10 +706,15 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       return;
     }
     await Promise.allSettled(r.savingDownloads);
+    await r.xvfb?.stop().catch(() => {});
   }
 
   isRunning(profileId: ProfileId): boolean {
     return this.running.has(profileId);
+  }
+
+  runningDisplayMode(profileId: ProfileId): DisplayMode | null {
+    return this.running.get(profileId)?.displayMode ?? null;
   }
 
   private require(profileId: ProfileId): RunningFirefox {

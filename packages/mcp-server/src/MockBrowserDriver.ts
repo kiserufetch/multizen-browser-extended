@@ -3,11 +3,13 @@ import type {
   CapturedFrame,
   DialogPolicy,
   DialogResponse,
+  DisplayMode,
   DownloadFile,
   DownloadRecord,
   DriverAction,
   HumanInputEvent,
   LaunchedProfile,
+  LaunchOptions,
   OpenDialog,
   ProfileId,
   RunningInfo,
@@ -27,7 +29,7 @@ const MOCK_FRAME_JPEG = Buffer.from(
 export class MockBrowserDriver implements BrowserDriver {
   private readonly running = new Map<
     ProfileId,
-    { url: string; pid: number; port: number; startedAt: string }
+    { url: string; pid: number; port: number; startedAt: string; displayMode: DisplayMode }
   >();
   private port = 9222;
   /** What reached the driver, in order, so a client can check it end to end. */
@@ -39,7 +41,7 @@ export class MockBrowserDriver implements BrowserDriver {
   /** Filled by whoever is exercising the tools: nothing opens a dialog in a mock. */
   readonly openDialogs = new Map<ProfileId, OpenDialog[]>();
 
-  async launch(profileId: ProfileId): Promise<LaunchedProfile> {
+  async launch(profileId: ProfileId, opts: LaunchOptions = {}): Promise<LaunchedProfile> {
     const existing = this.running.get(profileId);
     if (existing) {
       return {
@@ -47,17 +49,20 @@ export class MockBrowserDriver implements BrowserDriver {
         cdpEndpoint: `ws://localhost:${existing.port}/devtools/browser/mock-${profileId}`,
         pid: existing.pid,
         startedAt: new Date().toISOString(),
+        displayMode: existing.displayMode,
       };
     }
     this.port += 1;
     const pid = Math.floor(Math.random() * 100000) + 1000;
     const startedAt = new Date().toISOString();
-    this.running.set(profileId, { url: "about:blank", pid, port: this.port, startedAt });
+    const displayMode = opts.displayMode ?? "headed";
+    this.running.set(profileId, { url: "about:blank", pid, port: this.port, startedAt, displayMode });
     return {
       id: profileId,
       cdpEndpoint: `ws://localhost:${this.port}/devtools/browser/mock-${profileId}`,
       pid,
       startedAt,
+      displayMode,
     };
   }
 
@@ -226,6 +231,10 @@ export class MockBrowserDriver implements BrowserDriver {
   async dispatchInput(profileId: ProfileId, event: HumanInputEvent): Promise<void> {
     if (!this.running.has(profileId)) throw new Error("not running");
     this.humanInput.push({ profileId, event });
+  }
+
+  runningDisplayMode(profileId: ProfileId): DisplayMode | null {
+    return this.running.get(profileId)?.displayMode ?? null;
   }
 
   runningInfo(profileId: ProfileId): RunningInfo | null {

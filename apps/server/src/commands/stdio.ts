@@ -77,6 +77,7 @@ async function runLocal(
   log.info("stdio ready", {
     dataDir: config.dataDir,
     defaultEngine: runtime.getDefaultEngine(),
+    displayMode: config.headless ? "headless (forced)" : config.displayMode,
     version: SERVER_VERSION,
   });
 }

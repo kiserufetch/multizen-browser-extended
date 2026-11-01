@@ -236,6 +236,31 @@ test("a launch whose binary can't spawn is a tool error, and the server stays up
   }
 });
 
+test("serve --headless: asking for a window by name is INVALID_INPUT, through the real bundle", async () => {
+  const dir = newDataDir();
+  const serve = await startServe(dir, ["--headless"]);
+  try {
+    const client = await httpClient(serve.url, readFileSync(serve.tokenFile, "utf8"));
+    assert.match(serve.stdout(), /"displayMode":"headless \(forced\)"/);
+    const profile = toolText(
+      await client.callTool({ name: "create_profile", arguments: { name: "forced", display_mode: "headed" } }),
+    );
+    assert.equal(profile.displayMode, "headed", "saving it is fine: --headless decides at launch");
+
+    const refused = (await client.callTool({
+      name: "launch_profile",
+      arguments: { profile_id: profile.id, display_mode: "headed" },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(refused.isError, true);
+    assert.equal(JSON.parse(refused.content[0]!.text).error.code, "INVALID_INPUT");
+    await client.close();
+  } finally {
+    serve.stop();
+    await serve.exited;
+    removeDir(dir);
+  }
+});
+
 test("serve refuses zero tokens: an owner-token file with no valid token", () => {
   const dir = newDataDir();
   try {

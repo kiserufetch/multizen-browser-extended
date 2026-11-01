@@ -34,6 +34,7 @@ class FakeProfileManager {
       tags: p.tags,
       isRunning: false,
       engine: p.engine,
+      displayMode: p.displayMode,
     }));
   }
   get(id: ProfileId): Profile | null {
@@ -48,6 +49,7 @@ class FakeProfileManager {
       tags: input.tags ?? [],
       fingerprint: { ...generateFingerprint(), ...input.fingerprint },
       engine: input.engine,
+      displayMode: input.displayMode,
       dataDir: `/tmp/${id}`,
       createdAt: now,
       updatedAt: now,
@@ -62,6 +64,7 @@ class FakeProfileManager {
       ...existing,
       name: patch.name ?? existing.name,
       engine: patch.engine === null ? undefined : (patch.engine ?? existing.engine),
+      displayMode: patch.displayMode === null ? undefined : (patch.displayMode ?? existing.displayMode),
     };
     this.rows.set(id, merged);
     return merged;
@@ -230,3 +233,186 @@ test("update_profile rejects a null engine (unpinning) via Zod", async () => {
   assert.equal(pm.get("p")?.engine, "cloakbrowser");
   await client.close();
 });
+
+// ── display_mode ─────────────────────────────────────────────────────────────
+
+const MODES = ["headed", "xvfb", "headless"];
+
+test("create_profile, update_profile and launch_profile advertise display_mode", async () => {
+  const { client, close } = await connectDisplay();
+  try {
+    const { tools } = await client.listTools();
+    const props = (name: string): Record<string, any> =>
+      (tools.find((t) => t.name === name)!.inputSchema as { properties: Record<string, any> }).properties;
+    assert.deepEqual(props("create_profile").display_mode.enum, MODES);
+    assert.deepEqual(props("launch_profile").display_mode.enum, MODES);
+    assert.deepEqual(
+      props("update_profile").display_mode.anyOf.map((o: { enum?: string[]; type: string }) => o.enum ?? o.type),
+      [MODES, "null"],
+    );
+    for (const name of ["create_profile", "update_profile", "launch_profile"]) {
+      const required = (tools.find((t) => t.name === name)!.inputSchema as { required?: string[] }).required;
+      assert.equal(required?.includes("display_mode") ?? false, false, name);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test("display_mode round trip: create, list, update, launch, list while running", async () => {
+  const { client, close, driver } = await connectDisplay();
+  try {
+    const created = parsed(await client.callTool({
+      name: "create_profile",
+      arguments: { name: "a", display_mode: "headless" },
+    }));
+    assert.equal(created.displayMode, "headless");
+    const id = created.id as string;
+
+    const listed = async (): Promise<Record<string, unknown>> =>
+      (parsed(await client.callTool({ name: "list_profiles", arguments: {} })).profiles as Array<Record<string, unknown>>)[0]!;
+    assert.equal((await listed()).displayMode, "headless");
+    assert.equal((await listed()).runningDisplayMode, null, "stopped");
+
+    const updated = parsed(await client.callTool({
+      name: "update_profile",
+      arguments: { profile_id: id, display_mode: "headed" },
+    }));
+    assert.equal(updated.displayMode, "headed");
+    assert.equal((await listed()).displayMode, "headed");
+
+    const launched = parsed(await client.callTool({
+      name: "launch_profile",
+      arguments: { profile_id: id, display_mode: "headless" },
+    }));
+    assert.equal(launched.displayMode, "headless", "the launch's own wins over the saved");
+    assert.equal(driver.runningDisplayMode(id), "headless");
+    const running = await listed();
+    assert.equal(running.displayMode, "headed", "the saved mode is untouched");
+    assert.equal(running.runningDisplayMode, "headless");
+
+    await client.callTool({ name: "close_profile", arguments: { profile_id: id } });
+    const cleared = parsed(await client.callTool({
+      name: "update_profile",
+      arguments: { profile_id: id, display_mode: null },
+    }));
+    assert.equal(cleared.displayMode, null);
+    assert.equal((await listed()).displayMode, undefined);
+  } finally {
+    await close();
+  }
+});
+
+test("launch_profile without a mode passes none down: the router decides", async () => {
+  const { client, close, driver } = await connectDisplay();
+  try {
+    const { id } = parsed(await client.callTool({ name: "create_profile", arguments: { name: "a" } }));
+    const seen: unknown[] = [];
+    const original = driver.launch.bind(driver);
+    driver.launch = (profileId, opts) => {
+      seen.push(opts?.displayMode);
+      return original(profileId, opts);
+    };
+    await client.callTool({ name: "launch_profile", arguments: { profile_id: id } });
+    assert.deepEqual(seen, [undefined]);
+  } finally {
+    await close();
+  }
+});
+
+test("a mode outside the roster is INVALID_INPUT on every tool that takes one", async () => {
+  const { client, close } = await connectDisplay();
+  try {
+    const { id } = parsed(await client.callTool({ name: "create_profile", arguments: { name: "a" } }));
+    for (const [name, args] of [
+      ["create_profile", { name: "b", display_mode: "auto" }],
+      ["update_profile", { profile_id: id, display_mode: "auto" }],
+      ["launch_profile", { profile_id: id, display_mode: "auto" }],
+      ["launch_profile", { profile_id: id, display_mode: null }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      assert.equal(result.isError, true, name);
+      assert.equal((parsed(result).error as { code: string }).code, "INVALID_INPUT", name);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test("update_profile: a real mode change on a running profile is refused, and saves nothing", async () => {
+  const { client, close, pm } = await connectDisplay();
+  try {
+    const { id } = parsed(await client.callTool({
+      name: "create_profile",
+      arguments: { name: "a", display_mode: "headed" },
+    }));
+    await client.callTool({ name: "launch_profile", arguments: { profile_id: id } });
+
+    const result = await client.callTool({
+      name: "update_profile",
+      arguments: { profile_id: id, name: "renamed", display_mode: "headless" },
+    });
+    assert.equal(result.isError, true);
+    assert.equal((parsed(result).error as { code: string }).code, "PROFILE_ALREADY_RUNNING");
+    assert.equal(pm.get(id)!.name, "a", "nothing else was saved either");
+    assert.equal(pm.get(id)!.displayMode, "headed");
+
+    const cleared = await client.callTool({
+      name: "update_profile",
+      arguments: { profile_id: id, display_mode: null },
+    });
+    assert.equal(cleared.isError, true, "clearing a saved mode is a real change too");
+  } finally {
+    await close();
+  }
+});
+
+test("update_profile: re-sending the current mode on a running profile saves, the autosave rule", async () => {
+  const { client, close, pm } = await connectDisplay();
+  try {
+    const withMode = parsed(await client.callTool({
+      name: "create_profile",
+      arguments: { name: "a", display_mode: "headless" },
+    })).id as string;
+    await client.callTool({ name: "launch_profile", arguments: { profile_id: withMode } });
+    const saved = await client.callTool({
+      name: "update_profile",
+      arguments: { profile_id: withMode, name: "renamed", display_mode: "headless" },
+    });
+    assert.equal(saved.isError ?? false, false);
+    assert.equal(parsed(saved).appliesOnNextLaunch, true);
+    assert.equal(pm.get(withMode)!.name, "renamed");
+
+    const unset = parsed(await client.callTool({ name: "create_profile", arguments: { name: "b" } })).id as string;
+    await client.callTool({ name: "launch_profile", arguments: { profile_id: unset } });
+    const nulled = await client.callTool({
+      name: "update_profile",
+      arguments: { profile_id: unset, name: "renamed", display_mode: null },
+    });
+    assert.equal(nulled.isError ?? false, false, "null on an unset mode changes nothing");
+    assert.equal(pm.get(unset)!.name, "renamed");
+  } finally {
+    await close();
+  }
+});
+
+test("update_profile: a stopped profile takes any change", async () => {
+  const { client, close, pm } = await connectDisplay();
+  try {
+    const { id } = parsed(await client.callTool({ name: "create_profile", arguments: { name: "a" } }));
+    await client.callTool({ name: "update_profile", arguments: { profile_id: id, display_mode: "xvfb" } });
+    assert.equal(pm.get(id as string)!.displayMode, "xvfb");
+  } finally {
+    await close();
+  }
+});
+
+async function connectDisplay(): Promise<Harness & { close: () => Promise<void> }> {
+  const harness = await connect();
+  return { ...harness, close: () => harness.client.close() };
+}
+
+function parsed(result: unknown): Record<string, any> {
+  const { content } = result as { content: Array<{ text: string }> };
+  return JSON.parse(content[0]!.text) as Record<string, any>;
+}

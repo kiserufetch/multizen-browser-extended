@@ -89,13 +89,25 @@ const DIALOG_MODE_FIELDS = ["mode", "alert", "confirm", "prompt", "beforeunload"
 export const LOGGED_ARGS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
   ["list_profiles", []],
   ["list_fingerprint_options", []],
-  ["create_profile", ["name", "tags", "engine", "proxy", "alignTimezoneToProxy", "strictGeoCoherence"]],
+  [
+    "create_profile",
+    ["name", "tags", "engine", "display_mode", "proxy", "alignTimezoneToProxy", "strictGeoCoherence"],
+  ],
   [
     "update_profile",
-    ["profile_id", "name", "tags", "engine", "proxy", "alignTimezoneToProxy", "strictGeoCoherence"],
+    [
+      "profile_id",
+      "name",
+      "tags",
+      "engine",
+      "display_mode",
+      "proxy",
+      "alignTimezoneToProxy",
+      "strictGeoCoherence",
+    ],
   ],
   ["delete_profile", PROFILE],
-  ["launch_profile", PROFILE],
+  ["launch_profile", [...PROFILE, "display_mode"]],
   ["close_profile", PROFILE],
   ["extract", PROFILE],
   ["screenshot", PROFILE],

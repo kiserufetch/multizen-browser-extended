@@ -24,6 +24,19 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   on anything that changes it. A lease lasts 5 minutes by default and at most an hour,
   survives a dropped connection (reattach with its `lease_id`), and a token with the
   `operator` group can force-release it. With no lease nothing changes.
+- **Display modes: `headed`, `xvfb` and `headless`.** A profile can save one, Settings
+  has a default, and MCP `create_profile`, `update_profile` and `launch_profile` take
+  `display_mode`. `list_profiles` shows the saved mode and the running one, and a profile
+  card or row shows a badge when it opens with no window. Headless is the engine's own:
+  `--headless=new` on CloakBrowser, `headless: true` on Camoufox. `xvfb` (Linux only) runs
+  a real window on a private X server per profile. The desktop default stays `headed`, and
+  its launch flags don't change. On a server, `--display-mode` sets the default (`auto`:
+  Linux without `DISPLAY` takes `xvfb` if installed, otherwise `headless`; elsewhere
+  `headed`), and `--headless` allows no windows at all: a profile saved as `headed` runs
+  headless, and asking for `headed` by name is `INVALID_INPUT`. A running profile keeps
+  its mode: `launch_profile` with no parameter stays idempotent, naming another mode is
+  `PROFILE_ALREADY_RUNNING`, and `update_profile` refuses a real change while it runs.
+  `headed` with no display and `xvfb` off Linux are `DISPLAY_UNAVAILABLE`.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.
@@ -31,6 +44,8 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 ### Changed
 
+- A browser that never answers at launch now fails with the end of what it wrote to
+  stderr in the message, so a missing library or a rejected flag is visible.
 - **`new_tab` makes the new tab the active one** on CloakBrowser profiles, in the
   foreground, as it already was on Camoufox. Page tools (`navigate`, `click`,
   `extract`, ...) now follow the active tab, which `activate_tab` also changes.
@@ -63,6 +78,9 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 ### Fixed
 
+- On Camoufox, a `navigate` right after `launch_profile` could fail with "interrupted by
+  another navigation" when the start page committed after it. A launch now waits for the
+  start page to commit, for up to 3 s.
 - A profile launched twice at once starts one browser, and closing a profile while it
   launches closes what the launch brings up. Quitting during a launch no longer leaves
   that browser running.

@@ -10,4 +10,5 @@ export {
   type PlatformKind,
 } from "./PlatformIcon";
 export { EngineIcon, engineLabel } from "./EngineIcon";
+export { DisplayModeIcon, displayModeLabel, displayModeRunningNote } from "./DisplayModeIcon";
 export { Modal, ConfirmHost, confirm, type ModalProps, type ConfirmOptions } from "./Modal";

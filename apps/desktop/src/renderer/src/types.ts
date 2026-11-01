@@ -13,6 +13,7 @@ import type {
   EngineUpdateStatus,
   ExtensionConfig,
   BrowserEngine,
+  DisplayMode,
   SandboxStatus,
 } from "@multizen/types";
 
@@ -182,5 +183,6 @@ export type {
   ExtensionConfig,
   UpdateProfileInput,
   BrowserEngine,
+  DisplayMode,
   SandboxStatus,
 };

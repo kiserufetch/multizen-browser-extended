@@ -109,7 +109,7 @@ for (const [name, argv, pattern] of [
   ["port zero", ["--port", "0"], /--port/],
   ["a non-numeric port", ["--port", "abc"], /--port/],
   ["an unknown engine", ["--default-engine", "chrome"], /Unknown engine/],
-  ["a flag from a later stage", ["--display-mode", "headed"], /display-mode/],
+  ["a flag from a later stage", ["--allow-remote"], /allow-remote/],
   ["a stray argument", ["extra"], /Unexpected argument/],
 ] as Array<[string, string[], RegExp]>) {
   test(`serve rejects ${name}`, () => {
@@ -183,6 +183,8 @@ test("stdio: local by default, --connect switches to the relay", () => {
     kind: "local",
     dataDir: resolve("d"),
     defaultEngine: undefined,
+    displayMode: "auto",
+    headless: false,
   });
   assert.deepEqual(
     parseStdioConfig(["--connect", "http://127.0.0.1:7777/mcp", "--token-file", "t"], {}, LINUX),
@@ -250,3 +252,49 @@ for (const [name, argv, pattern] of [
     assert.throws(() => parseProfileCommand(argv, {}, LINUX), pattern);
   });
 }
+
+test("display flags: auto and not forced by default, on serve and a local stdio", () => {
+  for (const parse of [parseServeConfig, parseStdioConfig]) {
+    const config = parse([], {}, LINUX) as { displayMode: string; headless: boolean };
+    assert.equal(config.displayMode, "auto");
+    assert.equal(config.headless, false);
+  }
+});
+
+test("display flags: the flag wins over the environment", () => {
+  const env = { MULTIZEN_DISPLAY_MODE: "xvfb", MULTIZEN_HEADLESS: "1" };
+  assert.equal(parseServeConfig([], env, LINUX).displayMode, "xvfb");
+  assert.equal(parseServeConfig([], env, LINUX).headless, true);
+  assert.equal(parseServeConfig(["--display-mode", "headed"], env, LINUX).displayMode, "headed");
+  assert.equal(parseServeConfig(["--headless"], {}, LINUX).headless, true);
+  assert.equal(parseServeConfig([], { MULTIZEN_HEADLESS: "0" }, LINUX).headless, false);
+  const stdio = parseStdioConfig(["--headless", "--display-mode", "headless"], {}, LINUX);
+  assert.deepEqual(
+    stdio.kind === "local" ? [stdio.displayMode, stdio.headless] : [],
+    ["headless", true],
+  );
+});
+
+test("display flags: every mode and auto are accepted, nothing else", () => {
+  for (const mode of ["auto", "headed", "xvfb", "headless"]) {
+    assert.equal(parseServeConfig(["--display-mode", mode], {}, LINUX).displayMode, mode);
+  }
+  assert.throws(() => parseServeConfig(["--display-mode", "holographic"], {}, LINUX), UsageError);
+  assert.throws(() => parseServeConfig([], { MULTIZEN_DISPLAY_MODE: "holographic" }, LINUX), UsageError);
+  assert.throws(() => parseServeConfig(["--display-mode", ""], {}, LINUX), UsageError);
+});
+
+test("--headless and --display-mode together are fine: the force simply wins at launch", () => {
+  const config = parseServeConfig(["--headless", "--display-mode", "headed"], {}, LINUX);
+  assert.equal(config.headless, true);
+  assert.equal(config.displayMode, "headed");
+});
+
+test("--connect runs no browsers, so it takes no display flags", () => {
+  for (const flags of [["--headless"], ["--display-mode", "headless"]]) {
+    assert.throws(
+      () => parseStdioConfig(["--connect", "http://127.0.0.1:1", ...flags], {}, LINUX),
+      /--connect runs no browsers/,
+    );
+  }
+});

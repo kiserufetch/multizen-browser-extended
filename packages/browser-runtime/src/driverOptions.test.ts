@@ -1,13 +1,15 @@
 import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { ProfileManager } from "@multizen/profile-manager";
-import type { ChromiumStatus, MultizenError, ProfileId } from "@multizen/types";
+import type { ChromiumStatus, DisplayMode, MultizenError, ProfileId } from "@multizen/types";
 import { ChromiumBrowserDriver, type ChromiumBrowserDriverOptions } from "./ChromiumBrowserDriver.ts";
 import type { EngineRegistry } from "./engineRegistry.ts";
 import { EngineRouter } from "./engineRouter.ts";
@@ -159,11 +161,12 @@ test("the router hands firefoxOptions to the driver it constructs", async () => 
     const launchExtras = { handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false };
     pm.update(id, { engine: "camoufox" });
     const chromiumDriver = driverFor(pm, join(dir, "unused.exe"));
-    // The driver's own lookup comes after the router's. Answering null there stops
-    // the launch before camoufox-js could look for a real binary to start.
+    // The driver's own lookup comes after the router's two, for the mode and the engine.
+    // Answering null there stops the launch before camoufox-js could look for a real
+    // binary to start.
     let lookups = 0;
     const once = {
-      get: (profileId: ProfileId) => (lookups++ === 0 ? pm.get(profileId) : null),
+      get: (profileId: ProfileId) => (lookups++ < 2 ? pm.get(profileId) : null),
       markOpened: () => {},
     } as unknown as ProfileManager;
     const router = new EngineRouter({
@@ -405,5 +408,190 @@ test("closing ends a call stuck on the browser right away", async () => {
     };
     await driver.close(id);
     assert.equal(aborted, 1);
+  });
+});
+
+// ── display modes ────────────────────────────────────────────────────────────
+
+/** The flag names of a launch, as they stood before display modes existed. */
+const HEADED_FLAGS = [
+  "--user-data-dir",
+  "--remote-debugging-port",
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--restore-last-session",
+  ...(process.platform === "darwin" ? ["--use-mock-keychain"] : []),
+  ...(process.platform === "linux" ? ["--password-store"] : []),
+  "--lang",
+  "--accept-lang",
+  "--window-size",
+  "--fingerprint",
+  "--fingerprint-platform",
+  "--fingerprint-timezone",
+  "--fingerprint-screen-width",
+  "--fingerprint-screen-height",
+  "--fingerprint-hardware-concurrency",
+  "--fingerprint-device-memory",
+  "--fingerprint-gpu-vendor",
+  "--fingerprint-gpu-renderer",
+  "--fingerprint-brand-version",
+  "--fingerprint-platform-version",
+  "--disable-features",
+];
+
+async function launchArgv(
+  pm: ProfileManager,
+  id: ProfileId,
+  dir: string,
+  displayMode?: DisplayMode,
+): Promise<string[]> {
+  let captured: string[] = [];
+  const spawnMock = mock.method(childProcess, "spawn", (_bin: string, args: readonly string[]) => {
+    captured = [...args];
+    throw new Error("stop before a real spawn");
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      driverFor(pm, join(dir, "x.exe")).launch(id, displayMode ? { displayMode } : undefined),
+      /stop before a real spawn/,
+    );
+  } finally {
+    spawnMock.mock.restore();
+    syncBuiltinESMExports();
+  }
+  return captured;
+}
+
+test("headed argv is unchanged: the same flags, in the same order, with no mode given or named", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const fingerprintDefault = await launchArgv(pm, id, dir);
+    const named = await launchArgv(pm, id, dir, "headed");
+    assert.deepEqual(named, fingerprintDefault);
+
+    const flagNames = named.map((a) => a.split("=")[0]!);
+    const positional = flagNames.pop();
+    assert.equal(positional?.startsWith("--"), false, "the start URL stays last");
+    const expected = HEADED_FLAGS.filter((flag) => named.some((a) => a.startsWith(`${flag}=`) || a === flag));
+    assert.deepEqual(flagNames, expected);
+    assert.equal(named.some((a) => a.startsWith("--headless")), false);
+    assert.equal(named.some((a) => a.startsWith("--blink-settings")), false);
+  });
+});
+
+test("headless adds exactly the two flags, before the positional URL, and changes nothing else", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const headed = await launchArgv(pm, id, dir, "headed");
+    const headless = await launchArgv(pm, id, dir, "headless");
+    const added = headless.filter((a) => !headed.includes(a));
+    assert.deepEqual(added, [
+      "--headless=new",
+      "--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2",
+    ]);
+    assert.deepEqual(headless.filter((a) => !added.includes(a)), headed);
+    assert.equal(headless.at(-1), headed.at(-1), "the positional URL stays last");
+  });
+});
+
+test("a readiness failure carries the end of the browser's stderr", async () => {
+  await withProfile(async (pm, id) => {
+    // Node, handed Chromium's flags, prints "bad option" to stderr and exits.
+    const driver = driverFor(pm, process.execPath, { onBrowserStderr: () => {} });
+    await assert.rejects(driver.launch(id), (e: Error) => {
+      assert.match(e.message, /within 500ms/);
+      assert.match(e.message, /stderr ended with:\n[^]*bad option/);
+      assert.ok(e.message.length < 2_600, `${e.message.length} characters`);
+      return true;
+    });
+  });
+});
+
+/** Speaks as Xvfb does on fd 3, and records how it was told to stop. */
+class FakeXvfbProcess extends EventEmitter {
+  readonly pid = 4242;
+  exitCode: number | null = null;
+  signalCode: string | null = null;
+  readonly stderr = new PassThrough();
+  readonly fd3 = new PassThrough();
+  readonly stdio = [null, null, this.stderr, this.fd3];
+  readonly signals: string[] = [];
+  kill(signal: string): boolean {
+    this.signals.push(signal);
+    this.signalCode = signal;
+    this.emit("exit", null, signal);
+    return true;
+  }
+}
+
+test("xvfb: the browser gets the private display, and the display goes when the launch fails", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const screen = pm.get(id)!.fingerprint.screen;
+    const xvfb = new FakeXvfbProcess();
+    const spawned: Array<{ bin: string; args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
+    const spawnMock = mock.method(
+      childProcess,
+      "spawn",
+      (bin: string, args: readonly string[], opts: { env: NodeJS.ProcessEnv }) => {
+        spawned.push({ bin, args, env: opts.env });
+        if (bin !== "Xvfb") throw new Error("stop before a real browser");
+        setImmediate(() => xvfb.fd3.write("42\n"));
+        return xvfb;
+      },
+    );
+    syncBuiltinESMExports();
+    const before = { DISPLAY: process.env.DISPLAY, XAUTHORITY: process.env.XAUTHORITY };
+    process.env.DISPLAY = ":0";
+    process.env.XAUTHORITY = "session-auth";
+    try {
+      await assert.rejects(
+        driverFor(pm, join(dir, "x.exe")).launch(id, { displayMode: "xvfb" }),
+        /stop before a real browser/,
+      );
+    } finally {
+      spawnMock.mock.restore();
+      syncBuiltinESMExports();
+      if (before.DISPLAY === undefined) delete process.env.DISPLAY;
+      else process.env.DISPLAY = before.DISPLAY;
+      if (before.XAUTHORITY === undefined) delete process.env.XAUTHORITY;
+      else process.env.XAUTHORITY = before.XAUTHORITY;
+    }
+    const [server, browser] = spawned as [(typeof spawned)[0], (typeof spawned)[0]];
+    assert.equal(server.bin, "Xvfb");
+    assert.ok(server.args.includes(`${screen.width}x${screen.height}x24`), "the fingerprint's screen");
+    assert.equal(browser.env.DISPLAY, ":42");
+    assert.equal(browser.env.XAUTHORITY, server.args[server.args.indexOf("-auth") + 1]);
+    assert.equal(browser.env.WAYLAND_DISPLAY, undefined);
+    assert.deepEqual(xvfb.signals, ["SIGTERM"], "stopped on the failure path");
+    assert.equal(existsSync(browser.env.XAUTHORITY!), false, "and its auth file with it");
+  });
+});
+
+test("xvfb: the record's display stops on close and on a browser that exits by itself", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    let stops = 0;
+    const closing = { abortOperations: () => {}, closeBrowser: async () => {}, close: async () => {} };
+    graftRunning(driver, id, closing);
+    const record = (driver as unknown as { running: Map<ProfileId, Record<string, unknown>> }).running.get(id)!;
+    record.child = { exitCode: 0, killed: false, once: () => {}, kill: () => {} };
+    record.xvfb = { stop: async () => void stops++ };
+    await driver.close(id);
+    assert.equal(stops, 1);
+  });
+});
+
+test("a driver reports the mode a browser runs in, and nothing once it is gone", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    assert.equal(driver.runningDisplayMode(id), null);
+    graftRunning(driver, id, { abortOperations: () => {}, closeBrowser: async () => {}, close: async () => {} });
+    const record = (driver as unknown as { running: Map<ProfileId, Record<string, unknown>> }).running.get(id)!;
+    record.displayMode = "headless";
+    record.cdpEndpoint = "http://127.0.0.1:1";
+    assert.equal(driver.runningDisplayMode(id), "headless");
+    assert.equal((await driver.launch(id)).displayMode, "headless", "idempotent, and says so");
+    record.child = { exitCode: 0, killed: false, once: () => {}, kill: () => {} };
+    await driver.close(id);
+    assert.equal(driver.runningDisplayMode(id), null);
   });
 });

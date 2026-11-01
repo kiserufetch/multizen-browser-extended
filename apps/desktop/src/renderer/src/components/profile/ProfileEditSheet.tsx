@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type JSX } from "react";
 import { Check, Loader2, TriangleAlert } from "lucide-react";
 import type {
   BrowserEngine,
+  DisplayMode,
   FingerprintConfig,
   Profile,
   ProxyConfig,
@@ -41,6 +42,8 @@ interface FormState {
   /** Engine that runs this profile. `undefined` = not pinned (inherits the app
    *  default); kept undefined so an unrelated edit doesn't silently pin it. */
   engine: BrowserEngine | undefined;
+  /** `undefined` follows the app default. */
+  displayMode: DisplayMode | undefined;
   proxyEnabled: boolean;
   proxyType: "http" | "socks5";
   proxyHost: string;
@@ -58,6 +61,7 @@ function toForm(p: Profile): FormState {
     icon: p.icon,
     startUrl: p.startUrl ?? "",
     engine: p.engine, // undefined stays undefined → patch omits it → keeps unset
+    displayMode: p.displayMode,
 
     proxyEnabled: !!p.proxy,
     proxyType: p.proxy?.type ?? "http",
@@ -93,6 +97,7 @@ function toPatch(f: FormState): UpdateProfileInput {
     icon: f.icon ?? null, // null clears a custom icon (revert to derived default)
     startUrl: f.startUrl.trim() || null, // null → app default start page
     engine: f.engine,
+    displayMode: f.displayMode ?? null, // null → follow the app default again
     proxy,
     fingerprint: f.fingerprint,
   };
@@ -268,6 +273,10 @@ export function ProfileEditSheet({ profile, isRunning = false, onSaved }: Props)
             onEngine={(v) => update("engine", v)}
             engineDisabled={isRunning}
             engineDisabledReason="Stop the profile to change its engine."
+            displayMode={form.displayMode}
+            onDisplayMode={(v) => update("displayMode", v)}
+            displayModeDisabled={isRunning}
+            displayModeDisabledReason="Stop the profile to change how it displays."
           />
         )}
 

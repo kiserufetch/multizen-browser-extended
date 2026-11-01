@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { promises as fsp } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -17,9 +18,11 @@ import type {
   DialogResponse,
   DownloadFile,
   DownloadRecord,
+  DisplayMode,
   DriverAction,
   FingerprintConfig,
   LaunchedProfile,
+  LaunchOptions,
   OpenDialog,
   ProfileId,
 } from "@multizen/types";
@@ -40,6 +43,8 @@ import { assertSpawnedBrowser, waitForCdpSessionReady } from "./cdpReadiness";
 import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
 import { sanitizeStartUrl } from "./startPage";
 import { firstFreePort } from "./portProbe.ts";
+import { displayEnv, HEADLESS_CHROMIUM_ARGS } from "./displayMode.ts";
+import { startXvfb, type XvfbHandle } from "./xvfb.ts";
 import type { RuntimeHost } from "./host.ts";
 
 function readSysctl(path: string): string | null {
@@ -61,6 +66,21 @@ const SANDBOX_FAILURE_RE = /No usable sandbox|Failed to move to new (?:user )?na
 /** Thrown by the spawn attempt when the sandbox failed to start, so the caller
  *  can relaunch once with --no-sandbox (never re-prompting). */
 class SandboxStartupError extends Error {}
+
+const STDERR_TAIL_CHARS = 2_048;
+
+/**
+ * What the browser last said is often the only clue why it never answered: a missing
+ * library, a rejected flag. The two typed cases already say what happened.
+ */
+function withStderrTail(e: unknown, tail: string): Error {
+  const error = e instanceof Error ? e : new Error(String(e));
+  if (!tail.trim() || error instanceof SandboxStartupError || error instanceof MultizenError) {
+    return error;
+  }
+  error.message = `${error.message}\nThe browser's stderr ended with:\n${tail.trimEnd()}`;
+  return error;
+}
 
 /**
  * Sync fallback used ONLY when the async sandbox resolver is absent or throws:
@@ -98,6 +118,9 @@ interface RunningProcess {
   windowWatcher: NodeJS.Timeout;
   /** Set once this browser's downloads go to the profile's downloads directory. */
   downloadsArmed?: Promise<void>;
+  displayMode: DisplayMode;
+  /** Its private display, in xvfb mode. Ends when the browser does. */
+  xvfb?: XvfbHandle;
 }
 
 /** A launch under way, which everyone asking for this profile meanwhile shares. */
@@ -237,7 +260,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   }
 
   /** Idempotent: a running profile answers as it is, and parallel calls share one launch. */
-  async launch(profileId: ProfileId): Promise<LaunchedProfile> {
+  async launch(profileId: ProfileId, opts: LaunchOptions = {}): Promise<LaunchedProfile> {
     const existing = this.running.get(profileId);
     if (existing) {
       return {
@@ -245,13 +268,14 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         cdpEndpoint: existing.cdpEndpoint,
         pid: existing.pid,
         startedAt: existing.startedAt,
+        displayMode: existing.displayMode,
       };
     }
     const underway = this.launching.get(profileId);
     if (underway) return underway.promise;
 
     const launch = { aborted: false } as LaunchInProgress;
-    launch.promise = this.doLaunch(profileId, launch)
+    launch.promise = this.doLaunch(profileId, launch, opts.displayMode ?? "headed")
       .then(async (launched) => {
         if (!launch.aborted) return launched;
         await this.shutdownProfile(profileId, "user-close");
@@ -262,7 +286,11 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return launch.promise;
   }
 
-  private async doLaunch(profileId: ProfileId, launch: LaunchInProgress): Promise<LaunchedProfile> {
+  private async doLaunch(
+    profileId: ProfileId,
+    launch: LaunchInProgress,
+    displayMode: DisplayMode,
+  ): Promise<LaunchedProfile> {
     const profile = this.profileManager.get(profileId);
     if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
 
@@ -534,6 +562,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       args.push(`--disable-extensions-except=${joined}`);
     }
 
+    if (displayMode === "headless") args.push(...HEADLESS_CHROMIUM_ARGS);
+
     // NOTE on Sec-CH-UA: The Client Hints headers (`Sec-CH-UA`,
     // `Sec-CH-UA-Platform`, `Sec-CH-UA-Platform-Version`, `Sec-CH-UA-Arch`,
     // `Sec-CH-UA-Bitness`, etc.) and `navigator.userAgentData` are NOT
@@ -595,6 +625,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       args.push(sanitizeStartUrl(profile.startUrl));
     }
 
+    // Headed keeps the session's display, set above. The others replace it just before
+    // the spawn, once a private display exists to replace it with.
+    let childEnv = cleanEnv;
+
     // Spawn + readiness, with a one-shot crash backstop: if the child dies from
     // a user-namespace sandbox failure while we launched WITHOUT --no-sandbox
     // (the AppArmor profile turned out not to be active), relaunch once WITH
@@ -612,7 +646,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         // so leave it attached there.
         detached: process.platform !== "win32",
         stdio: ["ignore", "ignore", "pipe"],
-        env: cleanEnv,
+        env: childEnv,
       });
       let crashReject: ((e: Error) => void) | undefined;
       // A failed spawn (missing or non-executable binary) arrives as "error". With
@@ -629,6 +663,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       // bare early exit, or a stray signature on a healthy child, is NOT a
       // sandbox crash.
       let sawSandboxCrash = false;
+      let stderrTail = "";
       const signalCrashIfConfirmed = (): void => {
         if (sawSandboxCrash && (child.exitCode !== null || child.signalCode !== null)) {
           crashReject?.(new SandboxStartupError());
@@ -637,6 +672,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       child.stderr?.on("data", (chunk: Buffer) => {
         const line = chunk.toString("utf8").trim();
         if (!line) return;
+        stderrTail = `${stderrTail}${line}\n`.slice(-STDERR_TAIL_CHARS);
         if (SANDBOX_FAILURE_RE.test(line)) {
           sawSandboxCrash = true;
           signalCrashIfConfirmed();
@@ -683,14 +719,23 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         // stops the socks5 bridge (same order as close()).
         await session.close().catch(() => {});
         await killProcessTree(pid);
-        throw e instanceof Error ? e : new Error(String(e));
+        throw withStderrTail(e, stderrTail);
       }
       return { child, session };
     };
 
     let child: ChildProcess;
     let session: CdpSession;
+    let xvfb: XvfbHandle | undefined;
     try {
+      if (displayMode === "xvfb") {
+        xvfb = await startXvfb({
+          width: fp.screen.width,
+          height: fp.screen.height,
+          runDir: tmpdir(),
+        });
+      }
+      childEnv = displayEnv(cleanEnv, displayMode, xvfb);
       try {
         ({ child, session } = await attemptSpawn(noSandbox));
       } catch (e) {
@@ -710,7 +755,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     } catch (e) {
       // Spawn/readiness failed for good — don't leak this profile's socks5
       // bridge (only the record's exit/close paths stop it, and no record
-      // exists yet).
+      // exists yet). The same goes for its display.
+      await xvfb?.stop().catch(() => {});
       await stopBridgeForProfile(profileId).catch(() => {});
       throw e;
     }
@@ -830,6 +876,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       session,
       browserDataDir,
       windowWatcher,
+      displayMode,
+      ...(xvfb ? { xvfb } : {}),
     };
     const r = record;
     this.running.set(profileId, record);
@@ -839,6 +887,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       clearInterval(record.windowWatcher);
       void session.close().catch(() => {});
       void stopBridgeForProfile(profileId).catch(() => {});
+      void xvfb?.stop().catch(() => {});
       this.running.delete(profileId);
       if (wasTracked) {
         // close() removes from the map first so wasTracked is false there;
@@ -861,7 +910,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       throw new Error("Chromium exited right after it started");
     }
     this.emit("running-changed", { kind: "launched", profileId });
-    return { id: profileId, cdpEndpoint, pid, startedAt };
+    return { id: profileId, cdpEndpoint, pid, startedAt, displayMode };
   }
 
   /** During a launch this means the browser that launch brings up, so it waits for it. */
@@ -894,11 +943,16 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // the shutdown (and, via before-quit, hang the whole app on exit).
     await gracefulShutdown(r, opts);
     await stopBridgeForProfile(profileId).catch(() => {});
+    await r.xvfb?.stop().catch(() => {});
     this.emit("running-changed", { kind: "closed", profileId, reason });
   }
 
   isRunning(profileId: ProfileId): boolean {
     return this.running.has(profileId);
+  }
+
+  runningDisplayMode(profileId: ProfileId): DisplayMode | null {
+    return this.running.get(profileId)?.displayMode ?? null;
   }
 
   async navigate(profileId: ProfileId, url: string): Promise<{ url: string }> {

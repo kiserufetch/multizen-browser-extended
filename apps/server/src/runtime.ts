@@ -168,7 +168,10 @@ export interface ServerRuntime {
  * and the companion extension. The caller must already hold the data dir's lock.
  */
 export async function buildRuntime(
-  cfg: Pick<ServerConfig, "dataDir" | "defaultEngine" | "maxBrowsers" | "browserQueueTimeoutMs">,
+  cfg: Pick<
+    ServerConfig,
+    "dataDir" | "defaultEngine" | "maxBrowsers" | "browserQueueTimeoutMs" | "displayMode" | "headless"
+  >,
 ): Promise<ServerRuntime> {
   const { extensionStoreRoot } = dataPaths(cfg.dataDir);
   const settings = new SettingsStore(defaultSettingsPath(cfg.dataDir));
@@ -204,6 +207,9 @@ export async function buildRuntime(
     engineNotReady: "reject",
     maxBrowsers: cfg.maxBrowsers,
     browserQueueTimeoutMs: cfg.browserQueueTimeoutMs,
+    displayModeDefault: cfg.displayMode,
+    forcedDisplayMode: cfg.headless ? "headless" : undefined,
+    getDefaultDisplayMode: () => initialSettings.defaultDisplayMode,
   });
   driver.on("running-changed", (change) => log.info("profile state", { ...change }));
 

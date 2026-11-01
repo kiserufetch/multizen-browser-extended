@@ -139,7 +139,8 @@ export async function runGated<T>(
           return run(
             withOverrides(ctx.driver, {
               // A launch waiting for a browser slot is another queue a client can leave.
-              launch: (id) => ctx.driver.launch(id, ctx.signal ? { signal: ctx.signal } : undefined),
+              launch: (id, opts) =>
+                ctx.driver.launch(id, ctx.signal ? { ...opts, signal: ctx.signal } : opts),
             }),
           );
         },

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { BrowserEngine, Profile, ProfileId } from "@multizen/types";
-import { isBrowserEngine } from "@multizen/types";
+import { isBrowserEngine, isDisplayMode } from "@multizen/types";
 import { exportProfile, importProfile } from "./archive.js";
 import type { ProfileManager } from "./ProfileManager.js";
 
@@ -75,6 +75,8 @@ export async function importProfileFromArchive(
   // the current default, like profile creation, so a later change of the default
   // can't move it onto another engine's empty data dir.
   restored.engine ??= opts.defaultEngine;
+  // An archive is untrusted input: a mode this build doesn't know follows the default.
+  if (!isDisplayMode(restored.displayMode)) delete restored.displayMode;
   // Insert the row verbatim so the DB entry points at the restored files (the old
   // create()-based path minted a new id/dataDir and orphaned the cookies/logins
   // that were just restored).

@@ -8,7 +8,9 @@ import { MultizenError } from "@multizen/types";
 import type {
   BrowserEngine,
   ChromiumStatus,
+  DisplayMode,
   LaunchedProfile,
+  LaunchOptions,
   Profile,
   ProfileId,
 } from "@multizen/types";
@@ -672,4 +674,190 @@ test("two launches during the Firefox import load one driver", async () => {
   const [a, b] = await Promise.all([internals.firefox(), internals.firefox()]);
   assert.equal(a, b);
   assert.ok(a);
+});
+
+// ── display modes ────────────────────────────────────────────────────────────
+
+/** Records what the router resolved, and answers for it as an engine's driver does. */
+class ModeDriver extends EventEmitter {
+  launches: Array<LaunchOptions | undefined> = [];
+  running: DisplayMode | null = null;
+
+  async launch(profileId: ProfileId, opts?: LaunchOptions): Promise<LaunchedProfile> {
+    this.launches.push(opts);
+    this.running ??= opts?.displayMode ?? "headed";
+    return { id: profileId, cdpEndpoint: "", pid: 1, startedAt: "now", displayMode: this.running };
+  }
+  async close(profileId: ProfileId): Promise<void> {
+    this.running = null;
+    this.emit("running-changed", { kind: "closed", profileId, reason: "user-close" });
+  }
+  isRunning(): boolean {
+    return this.running !== null;
+  }
+  runningDisplayMode(): DisplayMode | null {
+    return this.running;
+  }
+  async closeAll(): Promise<void> {}
+}
+
+const WINDOWS_MACHINE = { platform: "win32", env: {}, hasXvfb: () => false } as const;
+
+function modeRouter(
+  driver: ModeDriver,
+  overrides: Partial<EngineRouterOptions> & { saved?: DisplayMode } = {},
+): EngineRouter {
+  const { saved, ...options } = overrides;
+  return new EngineRouter({
+    profileManager: {
+      get: (id: ProfileId) =>
+        ({ id, engine: "cloakbrowser", dataDir: "unused", displayMode: saved }) as Profile,
+    } as unknown as ProfileManager,
+    engineRegistry: { get: () => new FakeBootstrap(true) } as unknown as EngineRegistry,
+    getDefaultEngine: (): BrowserEngine => "cloakbrowser",
+    chromiumDriver: driver as unknown as ChromiumBrowserDriver,
+    displayEnvironment: WINDOWS_MACHINE,
+    ...options,
+  });
+}
+
+test("the desktop's router, with nothing configured: headed, as it always was", async () => {
+  const driver = new ModeDriver();
+  const launched = await modeRouter(driver).launch("p");
+  assert.equal(driver.launches[0]?.displayMode, "headed");
+  assert.equal(launched.displayMode, "headed");
+});
+
+test("the driver gets the concrete mode: the profile's, the setting's, the flag's, the caller's", async () => {
+  const cases: Array<[Partial<EngineRouterOptions> & { saved?: DisplayMode }, LaunchOptions, DisplayMode]> = [
+    [{ saved: "headless" }, {}, "headless"],
+    [{ getDefaultDisplayMode: () => "headless" }, {}, "headless"],
+    [{ displayModeDefault: "headless" }, {}, "headless"],
+    [{ saved: "headed", getDefaultDisplayMode: () => "headless" }, {}, "headed"],
+    [{ saved: "headless" }, { displayMode: "headed" }, "headed"],
+    [{ displayModeDefault: "auto" }, {}, "headed"],
+  ];
+  for (const [options, launchOptions, expected] of cases) {
+    const driver = new ModeDriver();
+    await modeRouter(driver, options).launch("p", launchOptions);
+    assert.equal(driver.launches[0]?.displayMode, expected, JSON.stringify(options));
+  }
+});
+
+test("the setting is read at each launch, so a change applies without a restart", async () => {
+  const driver = new ModeDriver();
+  let setting: DisplayMode | undefined;
+  const r = modeRouter(driver, { getDefaultDisplayMode: () => setting });
+  await r.launch("p");
+  assert.equal(driver.launches.at(-1)?.displayMode, "headed");
+  await r.close("p");
+  setting = "headless";
+  await r.launch("p");
+  assert.equal(driver.launches.at(-1)?.displayMode, "headless");
+});
+
+test("--headless: a profile saved as headed launches headless", async () => {
+  const driver = new ModeDriver();
+  const r = modeRouter(driver, { saved: "headed", forcedDisplayMode: "headless" });
+  const launched = await r.launch("p");
+  assert.equal(driver.launches[0]?.displayMode, "headless");
+  assert.equal(launched.displayMode, "headless");
+});
+
+test("--headless: an explicit contradiction is INVALID_INPUT, and starts nothing", async () => {
+  const driver = new ModeDriver();
+  const r = modeRouter(driver, { forcedDisplayMode: "headless" });
+  await assert.rejects(r.launch("p", { displayMode: "headed" }), (e) => code(e) === "INVALID_INPUT");
+  assert.equal(driver.launches.length, 0);
+  await r.launch("p", { displayMode: "headless" });
+  assert.equal(driver.launches.length, 1);
+});
+
+test("what the machine can't do is refused before any engine or browser work", async () => {
+  const driver = new ModeDriver();
+  const bootstrap = new FakeBootstrap(true);
+  const r = new EngineRouter({
+    profileManager: { get: () => ({ engine: "cloakbrowser" }) } as unknown as ProfileManager,
+    engineRegistry: { get: () => bootstrap } as unknown as EngineRegistry,
+    getDefaultEngine: (): BrowserEngine => "cloakbrowser",
+    chromiumDriver: driver as unknown as ChromiumBrowserDriver,
+    displayEnvironment: WINDOWS_MACHINE,
+  });
+  await assert.rejects(r.launch("p", { displayMode: "xvfb" }), (e) => code(e) === "DISPLAY_UNAVAILABLE");
+  assert.equal(bootstrap.ensureCalls, 0);
+  assert.equal(driver.launches.length, 0);
+});
+
+test("a saved mode this machine can't run fails the launch: nothing else is quietly chosen", async () => {
+  const driver = new ModeDriver();
+  await assert.rejects(modeRouter(driver, { saved: "xvfb" }).launch("p"), (e) => code(e) === "DISPLAY_UNAVAILABLE");
+  assert.equal(driver.launches.length, 0);
+});
+
+test("running: no parameter stays idempotent, and so does naming the mode it runs in", async () => {
+  const driver = new ModeDriver();
+  const r = modeRouter(driver);
+  await r.launch("p", { displayMode: "headless" });
+  assert.equal((await r.launch("p")).displayMode, "headless");
+  assert.equal((await r.launch("p", { displayMode: "headless" })).displayMode, "headless");
+  assert.equal(r.runningDisplayMode("p"), "headless");
+});
+
+test("running: no parameter stays idempotent even when the saved mode has since become impossible", async () => {
+  const driver = new ModeDriver();
+  let setting: DisplayMode | undefined;
+  const r = modeRouter(driver, { getDefaultDisplayMode: () => setting });
+  await r.launch("p");
+  setting = "xvfb";
+  assert.equal((await r.launch("p")).displayMode, "headed");
+});
+
+test("running: an explicit mismatch is PROFILE_ALREADY_RUNNING with the way out, and starts nothing", async () => {
+  const driver = new ModeDriver();
+  const r = modeRouter(driver);
+  await r.launch("p", { displayMode: "headless" });
+  const launchesBefore = driver.launches.length;
+  const error = await r.launch("p", { displayMode: "headed" }).then(
+    () => assert.fail("expected a refusal"),
+    (e: unknown) => e as MultizenError,
+  );
+  assert.equal(code(error), "PROFILE_ALREADY_RUNNING");
+  assert.equal(error.retryable, false);
+  assert.match(error.message, /"headless", not "headed"/);
+  assert.match(error.hint ?? "", /close_profile/);
+  assert.equal(driver.launches.length, launchesBefore);
+  assert.equal(r.runningDisplayMode("p"), "headless");
+
+  await r.close("p");
+  assert.equal(r.runningDisplayMode("p"), null);
+  assert.equal((await r.launch("p", { displayMode: "headed" })).displayMode, "headed");
+});
+
+test("running under --headless: a contradiction is still INVALID_INPUT, not a matter of closing", async () => {
+  const driver = new ModeDriver();
+  const r = modeRouter(driver, { forcedDisplayMode: "headless" });
+  await r.launch("p");
+  await assert.rejects(r.launch("p", { displayMode: "headed" }), (e) => code(e) === "INVALID_INPUT");
+});
+
+test("during a launch: the same rules, against the mode that launch is bringing up", async () => {
+  const driver = new ModeDriver();
+  let release = (): void => {};
+  const original = driver.launch.bind(driver);
+  driver.launch = async (id, opts) => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return original(id, opts);
+  };
+  const r = modeRouter(driver);
+  const first = r.launch("p", { displayMode: "headless" });
+  await assert.rejects(r.launch("p", { displayMode: "headed" }), (e) => code(e) === "PROFILE_ALREADY_RUNNING");
+  const shared = r.launch("p");
+  const named = r.launch("p", { displayMode: "headless" });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  release();
+  const results = await Promise.all([first, shared, named]);
+  assert.deepEqual(results.map((l) => l.displayMode), ["headless", "headless", "headless"]);
+  assert.equal(driver.launches.length, 1, "one browser");
 });

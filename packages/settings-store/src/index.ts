@@ -1,8 +1,8 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { BrowserEngine } from "@multizen/types";
+import { isDisplayMode, type BrowserEngine, type DisplayMode } from "@multizen/types";
 
-export type { BrowserEngine };
+export type { BrowserEngine, DisplayMode };
 
 /**
  * Linux sandbox secure-setup state.
@@ -50,6 +50,11 @@ export interface AppSettings {
    * Linux kernels that restrict unprivileged user namespaces; ignored elsewhere.
    */
   linuxSandboxState: LinuxSandboxState;
+  /**
+   * How profiles without a mode of their own open. Unset means headed on the
+   * desktop, and the `--display-mode` flag on a server.
+   */
+  defaultDisplayMode?: DisplayMode;
 }
 
 const DEFAULTS: AppSettings = {
@@ -109,11 +114,17 @@ export class SettingsStore {
     ) {
       merged.linuxSandboxState = DEFAULTS.linuxSandboxState;
     }
+    // A value this build can't run is dropped, not defaulted: unset has its own meaning.
+    if (!isDisplayMode(merged.defaultDisplayMode)) delete merged.defaultDisplayMode;
     this.cache = merged;
     return merged;
   }
 
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
+    const mode: unknown = patch.defaultDisplayMode;
+    if (mode !== undefined && !isDisplayMode(mode)) {
+      throw new Error(`Unknown display mode "${String(mode)}"`);
+    }
     const current = await this.load();
     const next = { ...current, ...patch };
     this.cache = next;

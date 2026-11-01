@@ -1,13 +1,14 @@
 /**
  * Live end-to-end check of the built server against a real browser engine, with
- * real MCP SDK clients. Not part of test:unit: it opens real browser windows. Run it
- * from PowerShell or cmd: Ctrl+C can't be delivered to anything started from Git Bash.
+ * real MCP SDK clients. Not part of test:unit: it opens real browser windows, unless
+ * --headless. Run it from PowerShell or cmd: Ctrl+C can't be delivered to anything
+ * started from Git Bash.
  *
  *   corepack yarn workspace @multizen/server build
  *   corepack yarn workspace @multizen/server exec tsx scripts/e2e.ts \
  *     --data-dir %TEMP%\mzts2 --engine-version-dir <dir with chrome.exe> \
- *     [--engine cloakbrowser|camoufox] [--flows http,sigint,stdio,tabs,concurrency] [--keep]
- *     [--camoufox-install <dir>]
+ *     [--engine cloakbrowser|camoufox] [--flows http,sigint,stdio,tabs,concurrency,display]
+ *     [--keep] [--camoufox-install <dir>] [--headless]
  *
  * --engine-version-dir links an installed engine into the temp data dir through a
  * junction on the version directory only, so nothing the server does to its own
@@ -32,6 +33,13 @@
  * leave, a lease across a reconnect, close_profile on a stuck page, a ref from before a
  * relaunch, and shutdown with a launch under way.
  *
+ * --headless starts every server with --headless, so all those flows run with no window.
+ * The display flow, not run by default, covers the modes themselves: what a headless page
+ * reports about itself (pointer, hover, UA, Client Hints, webdriver), whether it is visible
+ * and painted right after load, the refusals, one data dir going headed, headless, headed
+ * with its cookies intact (a short real window), session restore in headless, and an
+ * unpacked extension loading in headless.
+ *
  * --engine camoufox runs the same flows on Camoufox, minus what is CDP's or CloakBrowser's:
  * there are no OOPIF targets, cdp_send refuses, its pid is unknown (so nothing is killed
  * from outside), and no chrome:// pages. Its engine installs into the data dir.
@@ -45,6 +53,7 @@ import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { ProfileManager } from "@multizen/profile-manager";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -58,6 +67,7 @@ const { values } = parseArgs({
     engine: { type: "string" },
     flows: { type: "string" },
     keep: { type: "boolean" },
+    headless: { type: "boolean" },
   },
 });
 if (process.platform !== "win32") throw new Error("This check only runs on Windows");
@@ -71,8 +81,10 @@ if (!existsSync(CLI)) throw new Error(`${CLI} is missing: build the server first
 const FLOWS = (values.flows ?? "http,sigint,stdio,tabs").split(",");
 const ENGINE_ARGS = values.engine ? { engine: values.engine } : {};
 const IS_CAMOUFOX = values.engine === "camoufox";
+const FORCED_HEADLESS = values.headless === true;
 /** A server installs its default engine on start: this keeps CloakBrowser out of this run. */
 const ENGINE_FLAGS = IS_CAMOUFOX ? ["--default-engine", "camoufox"] : [];
+const SERVER_FLAGS = [...ENGINE_FLAGS, ...(FORCED_HEADLESS ? ["--headless"] : [])];
 const ENGINE_INSTALL_BUDGET_MS = 15 * 60_000;
 const CTRL_C_EXIT_BUDGET_MS = 30_000;
 const results: Array<{ check: string; observed: string }> = [];
@@ -141,13 +153,17 @@ const FIXTURE_HTML = `<!doctype html>
 interface Fixture {
   url: string;
   cookieHeaders: string[];
+  /** The last page request's headers, which say what a page's browser claims on the wire. */
+  lastHeaders(): IncomingMessage["headers"];
   close(): Promise<void>;
 }
 
 async function startFixture(): Promise<Fixture> {
   const cookieHeaders: string[] = [];
+  let lastHeaders: IncomingMessage["headers"] = {};
   const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
-    if (req.url === "/page") {
+    if (req.url?.split("?")[0] === "/page") {
+      lastHeaders = req.headers;
       if (req.headers.cookie) cookieHeaders.push(req.headers.cookie);
       res.writeHead(200, { "content-type": "text/html" }).end(FIXTURE_HTML);
     } else {
@@ -159,6 +175,7 @@ async function startFixture(): Promise<Fixture> {
   return {
     url: `http://127.0.0.1:${port}/page`,
     cookieHeaders,
+    lastHeaders: () => lastHeaders,
     close: () =>
       new Promise((done) => {
         server.closeAllConnections();
@@ -207,7 +224,7 @@ async function startServe(extra: string[] = []): Promise<Running & { url: string
     DATA_DIR,
     "--port",
     String(port),
-    ...ENGINE_FLAGS,
+    ...SERVER_FLAGS,
     ...extra,
   ]);
   await waitFor(() => running.output().includes('"listening"'), `serve to listen:\n${running.output()}`);
@@ -434,7 +451,11 @@ async function httpFlow(fixture: Fixture): Promise<string> {
 
     const launched = await launch(client, id);
     expect(IS_CAMOUFOX || Number(launched.pid) > 0, "launch_profile returned no pid");
-    pass("launch_profile", `pid ${launched.pid}, ${launched.cdpEndpoint}`);
+    expect(
+      !FORCED_HEADLESS || launched.displayMode === "headless",
+      `--headless launched in ${String(launched.displayMode)}`,
+    );
+    pass("launch_profile", `pid ${launched.pid}, ${launched.cdpEndpoint}, ${launched.displayMode}`);
 
     const navigated = await call(client, "navigate", { profile_id: id, url: fixture.url });
     expect(navigated.url === fixture.url, `navigate went to ${String(navigated.url)}`);
@@ -588,7 +609,7 @@ async function sigintFlow(profileId: string): Promise<void> {
 async function stdioFlow(fixture: Fixture): Promise<void> {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [CLI, "stdio", "--data-dir", DATA_DIR, ...ENGINE_FLAGS],
+    args: [CLI, "stdio", "--data-dir", DATA_DIR, ...SERVER_FLAGS],
     // Makes the driver log from its launch path, which is the noise that would
     // corrupt stdout if the rebinding were not in place.
     env: { MULTIZEN_DEBUG: "1" },
@@ -1835,6 +1856,312 @@ async function concurrencyFlow(): Promise<void> {
   }
 }
 
+// ── Display modes ────────────────────────────────────────────────────────────
+
+/** What a page says about itself. Everything here is what a site can read. */
+const PAGE_SURFACE = `JSON.stringify({
+  pointerFine: matchMedia("(pointer: fine)").matches,
+  hover: matchMedia("(hover: hover)").matches,
+  anyPointerFine: matchMedia("(any-pointer: fine)").matches,
+  anyHover: matchMedia("(any-hover: hover)").matches,
+  webdriver: navigator.webdriver,
+  userAgent: navigator.userAgent,
+  brands: navigator.userAgentData ? navigator.userAgentData.brands.map((b) => b.brand) : null,
+  visibility: document.visibilityState,
+  hasFocus: document.hasFocus(),
+  paints: performance.getEntriesByType("paint").map((p) => p.name),
+  screen: [screen.width, screen.height, screen.colorDepth],
+  outer: [outerWidth, outerHeight],
+  inner: [innerWidth, innerHeight],
+})`;
+
+interface PageSurface {
+  pointerFine: boolean;
+  hover: boolean;
+  webdriver: boolean;
+  userAgent: string;
+  brands: string[] | null;
+  visibility: string;
+  hasFocus: boolean;
+  paints: string[];
+}
+
+async function pageSurface(client: Client, id: string): Promise<PageSurface> {
+  const read = await call(client, "evaluate_js", { profile_id: id, expression: PAGE_SURFACE });
+  return JSON.parse(String((read.result as { value?: unknown }).value)) as PageSurface;
+}
+
+async function runningMode(client: Client, id: string): Promise<{ saved: unknown; running: unknown }> {
+  const { profiles } = await call(client, "list_profiles");
+  const row = (profiles as Array<Record<string, unknown>>).find((p) => p.id === id);
+  expect(row, `list_profiles lacks ${id}`);
+  return { saved: row.displayMode, running: row.runningDisplayMode };
+}
+
+async function closeAndExit(serve: Awaited<ReturnType<typeof startServe>>, client: Client): Promise<void> {
+  await client.close();
+  sendConsoleCtrl(serve.child.pid!, "CTRL_BREAK");
+  const code = await serve.exited;
+  expect(code === 0, `exit code ${code}:\n${serve.output()}`);
+}
+
+const SESSION_COOKIE = (name: string): Record<string, unknown> => ({
+  name,
+  value: "kept",
+  domain: "127.0.0.1",
+  path: "/",
+  expires: Math.floor(Date.now() / 1000) + 86_400,
+});
+
+/** With --headless, forced: the page's surface, the visibility it loads with, the refusals. */
+async function headlessSurfaceChecks(fixture: Fixture): Promise<void> {
+  const serve = await startServe(["--headless"]);
+  try {
+    const client = await httpClient(serve.url, serve.token);
+    const id = String(
+      (await call(client, "create_profile", { name: "saved headed", display_mode: "headed", ...ENGINE_ARGS })).id,
+    );
+    expect((await runningMode(client, id)).saved === "headed", "the saved mode didn't round trip");
+
+    const launched = await launch(client, id);
+    expect(launched.displayMode === "headless", `launched ${String(launched.displayMode)}`);
+    const modes = await runningMode(client, id);
+    expect(modes.saved === "headed" && modes.running === "headless", JSON.stringify(modes));
+    pass("--headless: a profile saved as headed runs headless", JSON.stringify(modes));
+
+    await call(client, "navigate", { profile_id: id, url: fixture.url });
+    const surface = await pageSurface(client, id);
+    pass("page right after load", JSON.stringify(surface));
+    for (const ms of [100, 900]) {
+      await new Promise((done) => setTimeout(done, ms));
+      const later = await pageSurface(client, id);
+      pass(`the same page ${ms === 100 ? "100 ms" : "1 s"} later`, `${later.visibility}, paints ${JSON.stringify(later.paints)}, focus ${later.hasFocus}`);
+    }
+    expect(surface.pointerFine, "(pointer: fine) is false");
+    expect(surface.hover, "(hover: hover) is false");
+    expect(surface.webdriver === false, `navigator.webdriver is ${surface.webdriver}`);
+    const claims = JSON.stringify([surface.userAgent, surface.brands, fixture.lastHeaders()]);
+    expect(!/headless/i.test(claims), `a headless marker in ${claims}`);
+    pass("no headless marker", `in the UA, brands or request headers; sec-ch-ua: ${String(fixture.lastHeaders()["sec-ch-ua"])}`);
+
+    // A fresh tab, right after it loads: where an occluded headed window has no paint.
+    await call(client, "new_tab", { profile_id: id, url: `${fixture.url}?fresh=1` });
+    await call(client, "wait_for_load", { profile_id: id });
+    const fresh = await pageSurface(client, id);
+    pass("a new tab right after load", `${fresh.visibility}, paints ${JSON.stringify(fresh.paints)}, focus ${fresh.hasFocus}`);
+
+    const tree = treeOf((await call(client, "extract", { profile_id: id })).result as Extracted);
+    await call(client, "click_ref", { profile_id: id, ref: refOf(tree, "Press me") });
+    const clicked = (await call(client, "extract", { profile_id: id })).result as { title: string };
+    expect(clicked.title === "clicked", `the click in the new tab didn't land: ${clicked.title}`);
+    pass("input in that tab at once", "delivered, no INPUT_NOT_DELIVERED");
+
+    const probe = await call(client, "probe_fingerprint", { profile_id: id });
+    pass("probe_fingerprint in headless", JSON.stringify({ ok: probe.ok, drift: probe.drift }));
+
+    expect((await call(client, "launch_profile", { profile_id: id })).displayMode === "headless", "idempotent");
+    expect(
+      (await call(client, "launch_profile", { profile_id: id, display_mode: "headless" })).displayMode === "headless",
+      "naming the running mode",
+    );
+    pass("launch on a running profile: no parameter, or naming its mode", "idempotent");
+
+    for (const mode of ["headed", "xvfb"]) {
+      const refused = await callError(client, "launch_profile", { profile_id: id, display_mode: mode });
+      expect(refused.code === "INVALID_INPUT", `explicit ${mode}: ${JSON.stringify(refused)}`);
+    }
+    pass("--headless plus an explicit headed or xvfb", "INVALID_INPUT, running or not");
+    await call(client, "close_profile", { profile_id: id });
+    const stopped = await callError(client, "launch_profile", { profile_id: id, display_mode: "headed" });
+    expect(stopped.code === "INVALID_INPUT", `on a stopped profile: ${JSON.stringify(stopped)}`);
+    pass("the same on a stopped profile", String(stopped.message));
+
+    await closeAndExit(serve, client);
+    await assertNoLeftovers("forced headless");
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
+/** With nothing forced: what a machine can't do, and what a running browser won't change. */
+async function refusalChecks(): Promise<void> {
+  const serve = await startServe();
+  try {
+    const client = await httpClient(serve.url, serve.token);
+    const id = String((await call(client, "create_profile", { name: "refusals", ...ENGINE_ARGS })).id);
+
+    const xvfb = await callError(client, "launch_profile", { profile_id: id, display_mode: "xvfb" });
+    expect(xvfb.code === "DISPLAY_UNAVAILABLE", `xvfb on Windows: ${JSON.stringify(xvfb)}`);
+    pass("xvfb on Windows", `DISPLAY_UNAVAILABLE: ${String(xvfb.message)}`);
+
+    await call(client, "update_profile", { profile_id: id, display_mode: "xvfb" });
+    const saved = await callError(client, "launch_profile", { profile_id: id });
+    expect(saved.code === "DISPLAY_UNAVAILABLE", `a saved xvfb: ${JSON.stringify(saved)}`);
+    await call(client, "update_profile", { profile_id: id, display_mode: null });
+    pass("a saved xvfb on Windows", "DISPLAY_UNAVAILABLE, not some other mode");
+
+    const launched = await call(client, "launch_profile", { profile_id: id, display_mode: "headless" });
+    expect(launched.displayMode === "headless", `launched ${String(launched.displayMode)}`);
+
+    const mismatch = await callError(client, "launch_profile", { profile_id: id, display_mode: "headed" });
+    expect(mismatch.code === "PROFILE_ALREADY_RUNNING", `mismatch: ${JSON.stringify(mismatch)}`);
+    expect(/close_profile/.test(String(mismatch.hint)), `no way out: ${JSON.stringify(mismatch)}`);
+    pass("an explicit mismatch on a running profile", `PROFILE_ALREADY_RUNNING: ${String(mismatch.hint)}`);
+
+    const plain = await call(client, "launch_profile", { profile_id: id });
+    expect(plain.displayMode === "headless", "a plain launch changed something");
+    pass("a plain launch on it", "idempotent, still headless");
+
+    const change = await callError(client, "update_profile", { profile_id: id, display_mode: "headed" });
+    expect(change.code === "PROFILE_ALREADY_RUNNING", `a real change: ${JSON.stringify(change)}`);
+    await call(client, "update_profile", { profile_id: id, name: "renamed", display_mode: null });
+    pass("update_profile while it runs", "a real change is refused, re-sending the same saves");
+
+    await closeAndExit(serve, client);
+    await assertNoLeftovers("refusals");
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
+/** One data dir through every mode. Includes one short real window. */
+async function dataDirSwitchChecks(fixture: Fixture): Promise<void> {
+  const serve = await startServe();
+  try {
+    const client = await httpClient(serve.url, serve.token);
+    const id = String((await call(client, "create_profile", { name: "switching", ...ENGINE_ARGS })).id);
+    const stage = async (mode: string, cookie: string, expected: string[]): Promise<void> => {
+      const launched = await call(client, "launch_profile", { profile_id: id, display_mode: mode });
+      expect(launched.displayMode === mode, `launched ${String(launched.displayMode)}`);
+      await call(client, "navigate", { profile_id: id, url: fixture.url });
+      pass(`one data dir: the page in ${mode}`, JSON.stringify(await pageSurface(client, id)));
+      const sent = fixture.cookieHeaders.at(-1) ?? "";
+      for (const name of expected) {
+        expect(sent.includes(`${name}=kept`), `in ${mode} the page got "${sent}", wanting ${name}`);
+      }
+      await call(client, "set_cookies", { profile_id: id, cookies: [SESSION_COOKIE(cookie)] });
+      await call(client, "close_profile", { profile_id: id });
+      pass(`one data dir: ${mode}`, expected.length ? `the page got "${sent}"` : "the cookie is set");
+    };
+    await stage("headed", "from_headed", []);
+    await stage("headless", "from_headless", ["from_headed"]);
+    await stage("headed", "from_headed_again", ["from_headed", "from_headless"]);
+    await closeAndExit(serve, client);
+    await assertNoLeftovers("data dir switching");
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
+/** CloakBrowser restores tabs: critic C6 asks whether that holds in --headless=new. */
+async function restoreChecks(fixture: Fixture): Promise<void> {
+  const serve = await startServe(["--headless"]);
+  try {
+    const client = await httpClient(serve.url, serve.token);
+    const id = String((await call(client, "create_profile", { name: "restore", ...ENGINE_ARGS })).id);
+    await launch(client, id);
+    await call(client, "navigate", { profile_id: id, url: `${fixture.url}?tab=one` });
+    await call(client, "new_tab", { profile_id: id, url: `${fixture.url}?tab=two` });
+    const tabsOf = async (): Promise<string[]> => {
+      const listed = await call(client, "list_tabs", { profile_id: id });
+      return ((listed.tabs ?? listed.targetInfos ?? []) as Array<{ url?: string }>).map((t) => String(t.url));
+    };
+    pass("restore: open before closing", JSON.stringify(await tabsOf()));
+    await call(client, "close_profile", { profile_id: id });
+
+    await launch(client, id);
+    const after = await tabsOf();
+    if (IS_CAMOUFOX) {
+      expect(after.length === 1, `Camoufox has no restore, yet: ${JSON.stringify(after)}`);
+      pass("restore on Camoufox", `none by design: ${JSON.stringify(after)}`);
+    } else {
+      const has = (tab: string): boolean => after.some((url) => url.includes(`tab=${tab}`));
+      expect(has("one") && has("two"), `restore in --headless=new lost tabs: ${JSON.stringify(after)}`);
+      pass("restore in --headless=new", JSON.stringify(after));
+    }
+    await closeAndExit(serve, client);
+    await assertNoLeftovers("restore");
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
+const EXTENSION_MANIFEST = {
+  manifest_version: 3,
+  name: "MZ e2e",
+  version: "1.0",
+  background: { service_worker: "worker.js" },
+  content_scripts: [{ matches: ["<all_urls>"], js: ["content.js"], run_at: "document_start" }],
+};
+
+/** No tool installs one on a server, so this writes the profile's row while nothing runs. */
+async function extensionChecks(fixture: Fixture): Promise<void> {
+  const created = await (async (): Promise<string> => {
+    const serve = await startServe();
+    try {
+      const client = await httpClient(serve.url, serve.token);
+      const id = String((await call(client, "create_profile", { name: "extension" })).id);
+      await closeAndExit(serve, client);
+      return id;
+    } finally {
+      if (serve.child.exitCode === null) serve.child.kill();
+    }
+  })();
+  const pm = new ProfileManager({
+    dbPath: join(DATA_DIR, "profiles.db"),
+    profilesRoot: join(DATA_DIR, "profiles"),
+  });
+  const dataDir = pm.get(created)!.dataDir;
+  const relative = join("extensions", "mz-e2e");
+  mkdirSync(join(dataDir, relative), { recursive: true });
+  writeFileSync(join(dataDir, relative, "manifest.json"), JSON.stringify(EXTENSION_MANIFEST));
+  writeFileSync(join(dataDir, relative, "worker.js"), "");
+  writeFileSync(
+    join(dataDir, relative, "content.js"),
+    'document.documentElement.setAttribute("data-mz-ext", "loaded");',
+  );
+  pm.update(created, {
+    extensions: [{ id: "mz-e2e", name: "MZ e2e", version: "1.0", scope: "profile", enabled: true, dir: relative, source: "folder" }],
+  });
+  pm.close();
+
+  const serve = await startServe(["--headless"]);
+  try {
+    const client = await httpClient(serve.url, serve.token);
+    const launched = await launch(client, created);
+    expect(launched.displayMode === "headless", `launched ${String(launched.displayMode)}`);
+    await call(client, "navigate", { profile_id: created, url: fixture.url });
+    const read = await call(client, "evaluate_js", {
+      profile_id: created,
+      expression: 'document.documentElement.getAttribute("data-mz-ext")',
+    });
+    expect((read.result as { value?: unknown }).value === "loaded", `no content script: ${JSON.stringify(read)}`);
+    const targets = (await call(client, "cdp_send", { profile_id: created, method: "Target.getTargets" })) as {
+      result?: { targetInfos?: Array<{ type: string; url: string }> };
+      targetInfos?: Array<{ type: string; url: string }>;
+    };
+    const infos = targets.result?.targetInfos ?? targets.targetInfos ?? [];
+    const worker = infos.find((t) => t.type === "service_worker" && t.url.startsWith("chrome-extension://"));
+    pass(
+      "an unpacked extension in --headless=new",
+      `content script ran; service worker: ${worker?.url ?? "not listed"}`,
+    );
+    await closeAndExit(serve, client);
+    await assertNoLeftovers("extension");
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
+async function displayFlow(fixture: Fixture): Promise<void> {
+  expect(!FORCED_HEADLESS, "this flow decides per server whether --headless is on: run it without");
+  await headlessSurfaceChecks(fixture);
+  await refusalChecks();
+  await dataDirSwitchChecks(fixture);
+  await restoreChecks(fixture);
+  if (!IS_CAMOUFOX) await extensionChecks(fixture);
+}
+
 async function main(): Promise<void> {
   prepareDataDir();
   const fixture = await startFixture();
@@ -1846,9 +2173,18 @@ async function main(): Promise<void> {
     if (FLOWS.includes("stdio")) await stdioFlow(fixture);
     if (FLOWS.includes("tabs")) await tabsFlow();
     if (FLOWS.includes("concurrency")) await concurrencyFlow();
+    if (FLOWS.includes("display")) await displayFlow(fixture);
   } finally {
     await fixture.close();
-    if (!values.keep) cleanDataDir();
+    if (!values.keep) {
+      // After a failure a browser can still hold the directory: that must not hide the failure.
+      try {
+        cleanDataDir();
+      } catch (e) {
+        process.stdout.write(`could not remove ${DATA_DIR}: ${String(e)}
+`);
+      }
+    }
   }
   process.stdout.write(`\n${results.length} checks passed\n`);
 }

@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
+import { isDisplayMode } from "@multizen/types";
 import type {
   Profile,
   ProfileId,
@@ -12,6 +13,7 @@ import type {
   FingerprintConfig,
   ExtensionConfig,
   BrowserEngine,
+  DisplayMode,
 } from "@multizen/types";
 import { defaultFingerprint } from "./fingerprint.js";
 
@@ -34,6 +36,7 @@ interface ProfileRow {
   align_timezone_to_proxy: number | null;
   strict_geo_coherence: number | null;
   engine: string | null;
+  display_mode: string | null;
 }
 
 export interface ProfileManagerOptions {
@@ -107,12 +110,16 @@ export class ProfileManager {
       // changing the default would move them onto an empty data dir.
       this.db.exec(`UPDATE profiles SET engine = 'cloakbrowser'`);
     }
+    // NULL means "follow the default", which is what every older row should do.
+    if (!cols.some((c) => c.name === "display_mode")) {
+      this.db.exec(`ALTER TABLE profiles ADD COLUMN display_mode TEXT`);
+    }
   }
 
   list(): ProfileSummary[] {
     const rows = this.db
       .prepare(
-        `SELECT id, name, tags, last_opened_at, proxy, fingerprint, proxy_country, icon, engine
+        `SELECT id, name, tags, last_opened_at, proxy, fingerprint, proxy_country, icon, engine, display_mode
          FROM profiles ORDER BY updated_at DESC`,
       )
       .all() as Pick<
@@ -126,6 +133,7 @@ export class ProfileManager {
       | "proxy_country"
       | "icon"
       | "engine"
+      | "display_mode"
     >[];
     return rows.map((r) => {
       const fingerprint = JSON.parse(r.fingerprint) as FingerprintConfig;
@@ -143,6 +151,7 @@ export class ProfileManager {
         // Pinned engine (undefined = inherits the app default). The profiles:list
         // IPC resolves this to the effective engine for the GUI badge.
         engine: (r.engine as BrowserEngine | null) ?? undefined,
+        displayMode: storedDisplayMode(r.display_mode),
       };
     });
   }
@@ -178,6 +187,7 @@ export class ProfileManager {
       startUrl: input.startUrl,
       searchProvider: input.searchProvider,
       engine: input.engine,
+      displayMode: input.displayMode,
       dataDir,
       createdAt: now,
       updatedAt: now,
@@ -188,8 +198,8 @@ export class ProfileManager {
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, display_mode, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
@@ -203,6 +213,7 @@ export class ProfileManager {
         profile.startUrl ?? null,
         profile.searchProvider ?? null,
         profile.engine ?? null,
+        profile.displayMode ?? null,
         profile.dataDir,
         profile.createdAt,
         profile.updatedAt,
@@ -230,8 +241,8 @@ export class ProfileManager {
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, display_mode, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
@@ -245,6 +256,7 @@ export class ProfileManager {
         profile.startUrl ?? null,
         profile.searchProvider ?? null,
         profile.engine ?? null,
+        profile.displayMode ?? null,
         profile.dataDir,
         profile.createdAt,
         profile.updatedAt,
@@ -290,6 +302,9 @@ export class ProfileManager {
           : (patch.strictGeoCoherence ?? existing.strictGeoCoherence),
       // null clears → revert to the app default engine; undefined keeps existing.
       engine: patch.engine === null ? undefined : (patch.engine ?? existing.engine),
+      // null clears → follow the default again; undefined keeps existing.
+      displayMode:
+        patch.displayMode === null ? undefined : (patch.displayMode ?? existing.displayMode),
       updatedAt: now,
       // Stale country if proxy changed — next launch / Test re-probes.
       proxyCountry: proxyChanged ? undefined : existing.proxyCountry,
@@ -299,7 +314,7 @@ export class ProfileManager {
       .prepare(
         `UPDATE profiles SET
            name = ?, notes = ?, tags = ?, proxy = ?, fingerprint = ?, extensions = ?,
-           icon = ?, start_url = ?, search_provider = ?, engine = ?, updated_at = ?, proxy_country = ?,
+           icon = ?, start_url = ?, search_provider = ?, engine = ?, display_mode = ?, updated_at = ?, proxy_country = ?,
            align_timezone_to_proxy = ?, strict_geo_coherence = ?
          WHERE id = ?`,
       )
@@ -314,6 +329,7 @@ export class ProfileManager {
         merged.startUrl ?? null,
         merged.searchProvider ?? null,
         merged.engine ?? null,
+        merged.displayMode ?? null,
         merged.updatedAt,
         merged.proxyCountry ?? null,
         merged.alignTimezoneToProxy ? 1 : null,
@@ -417,6 +433,7 @@ export class ProfileManager {
       startUrl: row.start_url ?? undefined,
       searchProvider: row.search_provider ?? undefined,
       engine: (row.engine as BrowserEngine | null) ?? undefined,
+      displayMode: storedDisplayMode(row.display_mode),
       dataDir: row.data_dir,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -426,6 +443,11 @@ export class ProfileManager {
       strictGeoCoherence: row.strict_geo_coherence === 1 ? true : undefined,
     };
   }
+}
+
+/** A value this build can't run reads as unset, so the launch path only ever sees real modes. */
+function storedDisplayMode(raw: string | null): DisplayMode | undefined {
+  return isDisplayMode(raw) ? raw : undefined;
 }
 
 /**

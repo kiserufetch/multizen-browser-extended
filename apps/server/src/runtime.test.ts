@@ -310,3 +310,52 @@ test("engine progress: downloads are throttled, other changes pass at once", () 
   );
   assert.equal(logged.at(-1)?.error, "boom");
 });
+
+test("the readiness budget on a server is 30 s, for software GL in a container", async () => {
+  await withRuntime(async (runtime) => {
+    const chromium = (runtime.driver as unknown as { chromiumDriver: { readinessBudgetMs: number } })
+      .chromiumDriver;
+    assert.equal(chromium.readinessBudgetMs, 30_000);
+  });
+});
+
+test("display: the flags and the stored setting reach the router", async () => {
+  const dir = dataDirWithEngine();
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ defaultDisplayMode: "headless" }));
+  const runtime = await buildRuntime({
+    dataDir: dir,
+    maxBrowsers: 1,
+    displayMode: "xvfb",
+    headless: true,
+  });
+  try {
+    const router = runtime.driver as unknown as {
+      displayModeDefault: string;
+      forcedDisplayMode: string | undefined;
+      getDefaultDisplayMode: () => string | undefined;
+    };
+    assert.equal(router.displayModeDefault, "xvfb");
+    assert.equal(router.forcedDisplayMode, "headless");
+    assert.equal(router.getDefaultDisplayMode(), "headless");
+  } finally {
+    await runtime.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test("display: without --headless nothing is forced, and a bad setting is simply absent", async () => {
+  const dir = dataDirWithEngine();
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ defaultDisplayMode: "holographic" }));
+  const runtime = await buildRuntime({ dataDir: dir, maxBrowsers: 1, displayMode: "auto", headless: false });
+  try {
+    const router = runtime.driver as unknown as {
+      forcedDisplayMode: string | undefined;
+      getDefaultDisplayMode: () => string | undefined;
+    };
+    assert.equal(router.forcedDisplayMode, undefined);
+    assert.equal(router.getDefaultDisplayMode(), undefined);
+  } finally {
+    await runtime.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});

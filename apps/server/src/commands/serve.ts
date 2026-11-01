@@ -90,6 +90,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     dataDir: config.dataDir,
     auth: authToken ? "owner-token" : "none",
     defaultEngine: runtime.getDefaultEngine(),
+    displayMode: config.headless ? "headless (forced)" : config.displayMode,
     maxBrowsers: config.maxBrowsers,
     version: SERVER_VERSION,
   });

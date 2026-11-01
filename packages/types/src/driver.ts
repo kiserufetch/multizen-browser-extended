@@ -1,4 +1,4 @@
-import type { LaunchedProfile, ProfileId } from "./index.js";
+import type { DisplayMode, LaunchedProfile, ProfileId } from "./index.js";
 
 /** Under a profile's data dir, next to `engines/`: files agents exchange with its pages. */
 export const PROFILE_UPLOADS_DIR = "uploads";
@@ -110,6 +110,12 @@ export interface RunningInfo {
 export interface LaunchOptions {
   /** Gives up the wait for a free browser slot. A browser already starting still starts. */
   signal?: AbortSignal;
+  /**
+   * To the router, what the caller asks for by name, which wins over the saved modes and
+   * conflicts with a browser already running in another. To an engine's own driver, the
+   * mode the router resolved. Absent there means headed.
+   */
+  displayMode?: DisplayMode;
 }
 
 /**
@@ -163,4 +169,6 @@ export interface BrowserDriver {
   dispatchInput(profileId: ProfileId, event: HumanInputEvent): Promise<void>;
   hasOpenDialog?(profileId: ProfileId): boolean;
   runningInfo?(profileId: ProfileId): RunningInfo | null;
+  /** Null when it isn't running. */
+  runningDisplayMode?(profileId: ProfileId): DisplayMode | null;
 }

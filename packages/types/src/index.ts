@@ -35,6 +35,23 @@ export function isBrowserEngine(value: unknown): value is BrowserEngine {
   return typeof value === "string" && (BROWSER_ENGINES as readonly string[]).includes(value);
 }
 
+/**
+ * How a profile's browser shows itself.
+ *   - "headed": a normal window on this machine's display.
+ *   - "xvfb": a normal window on a private virtual display. Linux only.
+ *   - "headless": no window (`--headless=new` on CloakBrowser).
+ */
+export type DisplayMode = "headed" | "xvfb" | "headless";
+
+/** A default that can leave the choice to the machine. Only a server's flag takes "auto". */
+export type DisplayModeSetting = DisplayMode | "auto";
+
+export const DISPLAY_MODES = ["headed", "xvfb", "headless"] as const;
+
+export function isDisplayMode(value: unknown): value is DisplayMode {
+  return typeof value === "string" && (DISPLAY_MODES as readonly string[]).includes(value);
+}
+
 export interface ProxyConfig {
   type: "http" | "socks5";
   host: string;
@@ -219,6 +236,8 @@ export interface Profile {
   /** Browser engine that runs this profile. Unset → the app's default engine
    *  (settings.browserEngine) is resolved at launch. See {@link BrowserEngine}. */
   engine?: BrowserEngine;
+  /** How this profile opens. Unset → the app's default. A server's --headless overrides it. */
+  displayMode?: DisplayMode;
   dataDir: string;
   createdAt: string;
   updatedAt: string;
@@ -261,6 +280,10 @@ export interface ProfileSummary {
   /** Effective browser engine this profile runs on, for the engine badge. The
    *  `profiles:list` IPC resolves it (profile's pinned engine ?? app default). */
   engine?: BrowserEngine;
+  /** The profile's saved mode. The `profiles:list` IPC resolves it to the effective one. */
+  displayMode?: DisplayMode;
+  /** The mode its browser actually runs in. Absent when stopped. */
+  runningDisplayMode?: DisplayMode;
 }
 
 export interface CreateProfileInput {
@@ -272,6 +295,8 @@ export interface CreateProfileInput {
   searchProvider?: string;
   /** Engine for the new profile. Unset → the app's default engine. */
   engine?: BrowserEngine;
+  /** Unset → follows the app's default. */
+  displayMode?: DisplayMode;
   proxy?: ProxyConfig;
   fingerprint?: Partial<FingerprintConfig>;
   extensions?: ExtensionConfig[];
@@ -288,6 +313,8 @@ export interface UpdateProfileInput {
   searchProvider?: string | null;
   /** null clears → revert to the app default engine; undefined keeps existing. */
   engine?: BrowserEngine | null;
+  /** null clears → follows the app's default again; undefined keeps existing. */
+  displayMode?: DisplayMode | null;
   proxy?: ProxyConfig | null;
   fingerprint?: Partial<FingerprintConfig>;
   extensions?: ExtensionConfig[];
@@ -300,6 +327,8 @@ export interface LaunchedProfile {
   cdpEndpoint: string;
   pid: number;
   startedAt: string;
+  /** The mode it runs in. */
+  displayMode?: DisplayMode;
 }
 
 export interface McpToolError {

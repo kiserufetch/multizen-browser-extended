@@ -387,6 +387,7 @@ app.whenReady().then(async () => {
     profileManager,
     engineRegistry,
     getDefaultEngine: () => cachedSettings?.browserEngine ?? "cloakbrowser",
+    getDefaultDisplayMode: () => cachedSettings?.defaultDisplayMode,
     chromiumDriver,
   });
 
@@ -453,11 +454,18 @@ app.whenReady().then(async () => {
 
   // Profile IPC
   ipcMain.handle("profiles:list", () =>
-    profileManager.list().map((p) => ({
-      ...p,
-      isRunning: browserDriver.isRunning(p.id),
-      engine: resolveEngine(p.engine, cachedSettings?.browserEngine ?? "cloakbrowser"),
-    })),
+    profileManager.list().map((p) => {
+      const runningDisplayMode = browserDriver.runningDisplayMode(p.id) ?? undefined;
+      return {
+        ...p,
+        isRunning: browserDriver.isRunning(p.id),
+        engine: resolveEngine(p.engine, cachedSettings?.browserEngine ?? "cloakbrowser"),
+        // What the card should say: the mode it runs in, else the one it would open in.
+        displayMode:
+          runningDisplayMode ?? p.displayMode ?? cachedSettings?.defaultDisplayMode ?? "headed",
+        runningDisplayMode,
+      };
+    }),
   );
   ipcMain.handle("profiles:get", (_e, id: string) => profileManager.get(id));
   ipcMain.handle("profiles:create", (_e, input: Parameters<ProfileManager["create"]>[0]) =>
@@ -479,6 +487,12 @@ app.whenReady().then(async () => {
         const defaultEngine = cachedSettings?.browserEngine ?? "cloakbrowser";
         if (resolveEngine(current?.engine, defaultEngine) !== resolveEngine(patch.engine, defaultEngine)) {
           throw new Error("Stop the profile before changing its engine.");
+        }
+      }
+      // The same autosave rule: the sheet re-sends the unchanged mode with every edit.
+      if (patch.displayMode !== undefined && browserDriver.isRunning(id)) {
+        if ((profileManager.get(id)?.displayMode ?? null) !== (patch.displayMode ?? null)) {
+          throw new Error("Stop the profile before changing its display mode.");
         }
       }
       return profileManager.update(id, patch);

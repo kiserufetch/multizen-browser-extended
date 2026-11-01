@@ -189,6 +189,31 @@ function assertNoDomainEnable(spy: SpyDriver): void {
   }
 }
 
+// ── initialize guidance ──────────────────────────────────────────────────────
+
+test("initialize: autonomy within the product's limits, and how display modes work", async () => {
+  const client = await connect(new SpyDriver());
+  try {
+    const instructions = client.getInstructions();
+    assert.ok(instructions, "initialize must include server-level guidance");
+    assert.match(instructions, /tools and access available to you/);
+    assert.match(instructions, /Do not stop and ask a human to perform work you can complete yourself/);
+    assert.match(instructions, /concrete missing prerequisite actually prevents progress/);
+    assert.match(instructions, /CAPTCHA.*do not attempt to solve or bypass it yourself/);
+    assert.match(instructions, /Do not create or launch profiles in bulk to farm accounts/);
+    assert.match(instructions, /authorized workflows/);
+
+    assert.doesNotMatch(instructions, /no headless mode/i);
+    assert.doesNotMatch(instructions, /always open as visible/i);
+    for (const mode of ["headed", "headless", "xvfb"]) assert.match(instructions, new RegExp(mode));
+    assert.match(instructions, /display_mode/);
+    assert.match(instructions, /PROFILE_ALREADY_RUNNING/);
+    assert.match(instructions, /--headless/);
+  } finally {
+    await client.close();
+  }
+});
+
 // ── tools/list registration ─────────────────────────────────────────────────
 
 test("tools/list exposes all 12 CDP tool surfaces with object input schemas", async () => {

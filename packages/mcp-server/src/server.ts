@@ -21,7 +21,7 @@ import type {
   CreateProfileInput,
   ProxyConfig,
 } from "@multizen/types";
-import { BROWSER_ENGINES, MultizenError, resolveEngine } from "@multizen/types";
+import { BROWSER_ENGINES, DISPLAY_MODES, MultizenError, resolveEngine } from "@multizen/types";
 import { ActivityLog } from "./ActivityLog.js";
 import { principalFrom, type Principal } from "./auth/principal.js";
 import {
@@ -217,6 +217,8 @@ const FingerprintInputSchema = z
   .strict();
 
 const EngineSchema = z.enum(BROWSER_ENGINES);
+const DisplayModeSchema = z.enum(DISPLAY_MODES);
+const LaunchProfileSchema = ProfileIdSchema.extend({ display_mode: DisplayModeSchema.optional() });
 
 const CreateProfileSchema = z.object({
   name: z.string().min(1),
@@ -224,6 +226,8 @@ const CreateProfileSchema = z.object({
   tags: z.array(z.string()).optional(),
   /** Omitted → the app's default engine, pinned at creation. */
   engine: EngineSchema.optional(),
+  /** Omitted → follows the default, unlike the engine: no data dir hangs on this. */
+  display_mode: DisplayModeSchema.optional(),
   proxy: ProxySchema.optional(),
   fingerprint: FingerprintInputSchema.optional(),
   /** Top-level seed wins over fingerprint.seed when both are set. */
@@ -243,6 +247,8 @@ const UpdateProfileSchema = ProfileIdSchema.extend({
   // No `null` (unpin): an unpinned profile follows the app default and would
   // move onto another engine's data dir when the default changes.
   engine: EngineSchema.optional(),
+  // `null` follows the default again; omitted leaves it untouched.
+  display_mode: DisplayModeSchema.nullable().optional(),
   // `null` clears the proxy; omitted leaves it untouched.
   proxy: ProxySchema.nullable().optional(),
   fingerprint: FingerprintInputSchema.optional(),
@@ -253,8 +259,8 @@ const UpdateProfileSchema = ProfileIdSchema.extend({
 /**
  * Server-level guidance surfaced to any connecting agent via the MCP
  * `initialize` result. Complements the per-tool descriptions with the workflow
- * and the non-obvious constraints (persistent profiles, visible windows,
- * headful only) that an agent can't infer from tool signatures alone.
+ * and the non-obvious constraints (persistent profiles, display modes) that an
+ * agent can't infer from tool signatures alone.
  */
 const MULTIZEN_MCP_INSTRUCTIONS = [
   "MultiZen drives real, persistent browser profiles — each has its own cookies, login state, fingerprint, and proxy, kept on disk between sessions. Each profile runs on one engine: CloakBrowser (Chromium, the usual default) or Camoufox (Firefox); list_profiles shows which.",
@@ -268,7 +274,7 @@ const MULTIZEN_MCP_INSTRUCTIONS = [
   "",
   "Constraints:",
   "- Page actions go to the profile's one active tab: list_tabs shows it, new_tab and activate_tab change it. Sessions on the same profile share it, unless you hold a lease.",
-  "- Profiles always open as visible desktop windows. There is no headless mode; do not expect one.",
+  "- Each profile opens in a display mode: headed (a visible window), headless (no window), or xvfb (Linux: a window on a private virtual display nobody sees). list_profiles shows the saved mode and, while running, the running one. launch_profile takes an optional display_mode; a running profile keeps its mode, so asking for another gives PROFILE_ALREADY_RUNNING until you close_profile. Without a visible window, read the page with screenshot and extract. A server started with --headless runs everything headless and refuses any other display_mode with INVALID_INPUT.",
   "- Camoufox has no CDP: cdp_send and cdp_send_no_safety refuse on it with UNSUPPORTED_ON_ENGINE. Refs and every page tool work on both engines. On Camoufox extract gives the tree as ariaSnapshot text, with refs like 'p3.e7'.",
   "- On a CAPTCHA, 2FA prompt, or other human-verification wall, do not attempt to solve or bypass it yourself — pause and let the user handle it, then continue. The session carries over.",
   "- Do not create or launch profiles in bulk to farm accounts; this tool supports autonomous execution of authorized workflows.",
@@ -367,6 +373,7 @@ async function dispatch(
         ...p,
         proxy: redactProxy(p.proxy),
         isRunning: browserDriver.isRunning(p.id),
+        runningDisplayMode: browserDriver.runningDisplayMode?.(p.id) ?? null,
         // Effective engine, so the agent knows whether the CDP-only tools apply.
         engine: resolveEngine(p.engine, defaultEngine),
       }));
@@ -382,6 +389,7 @@ async function dispatch(
         // row would follow the app default and a later default change would move
         // the profile onto another engine's empty data dir.
         engine: input.engine ?? getDefaultEngine(),
+        displayMode: input.display_mode,
         proxy: input.proxy,
         alignTimezoneToProxy: input.alignTimezoneToProxy,
         strictGeoCoherence: input.strictGeoCoherence,
@@ -403,6 +411,7 @@ async function dispatch(
         id: created.id,
         name: created.name,
         engine: created.engine,
+        displayMode: created.displayMode ?? null,
         proxy: redactProxy(created.proxy),
         fingerprint: fingerprintSummary(created.fingerprint),
       };
@@ -426,10 +435,23 @@ async function dispatch(
           "Stop the profile before changing its engine: call close_profile, then update_profile again.",
         );
       }
+      // The same rule: only a real change is refused, so a client that re-sends the whole
+      // profile with an unrelated edit still saves.
+      if (
+        input.display_mode !== undefined &&
+        browserDriver.isRunning(input.profile_id) &&
+        (input.display_mode ?? null) !== (existing.displayMode ?? null)
+      ) {
+        throw new MultizenError(
+          "PROFILE_ALREADY_RUNNING",
+          "Stop the profile before changing its display mode: call close_profile, then update_profile again.",
+        );
+      }
 
       const patch: UpdateProfileInput = {};
       if (input.name !== undefined) patch.name = input.name;
       if (input.engine !== undefined) patch.engine = input.engine;
+      if (input.display_mode !== undefined) patch.displayMode = input.display_mode;
       if (input.notes !== undefined) patch.notes = input.notes;
       if (input.tags !== undefined) patch.tags = input.tags;
       // `proxy: null` clears it, `proxy: {…}` sets it, omitted leaves as-is.
@@ -454,6 +476,7 @@ async function dispatch(
         id: updated.id,
         name: updated.name,
         engine: resolveEngine(updated.engine, defaultEngine),
+        displayMode: updated.displayMode ?? null,
         tags: updated.tags,
         proxy: redactProxy(updated.proxy),
         fingerprint: fingerprintSummary(updated.fingerprint),
@@ -479,11 +502,14 @@ async function dispatch(
       };
     }
     case "launch_profile": {
-      const { profile_id } = ProfileIdSchema.parse(args);
+      const { profile_id, display_mode } = LaunchProfileSchema.parse(args);
       assertProfileExists(profileManager, profile_id);
       // ChromiumBrowserDriver.launch() handles markOpened internally so
       // every entry-point (UI, MCP, palette) gets the same timestamp.
-      const launched = await browserDriver.launch(profile_id);
+      const launched = await browserDriver.launch(
+        profile_id,
+        display_mode ? { displayMode: display_mode } : undefined,
+      );
       return launched;
     }
     case "close_profile": {
@@ -527,7 +553,7 @@ async function dispatch(
       return {
         status: "waiting_for_human",
         reason,
-        note: "A human must complete this step (e.g. CAPTCHA/2FA) in the browser window. Call wait_for_human to block until they resume.",
+        note: "A human must complete this step (e.g. CAPTCHA/2FA) in the browser window. A profile running headless or under xvfb has no window they can reach: close it and launch it with display_mode headed if this machine has a display. Call wait_for_human to block until they resume.",
       };
     }
     case "wait_for_human": {
@@ -852,6 +878,13 @@ const FINGERPRINT_JSON_SCHEMA = {
   },
 } as const;
 
+const DISPLAY_MODE_JSON_SCHEMA = {
+  type: "string",
+  enum: [...DISPLAY_MODES],
+  description:
+    "How the browser shows itself. headed = a visible window. headless = no window. xvfb = Linux only, a window on a private virtual display nobody sees.",
+} as const;
+
 const ENGINE_JSON_SCHEMA = {
   type: "string",
   enum: [...BROWSER_ENGINES],
@@ -867,13 +900,13 @@ export const TOOL_DEFINITIONS = [
   {
     name: "list_profiles",
     description:
-      "List all browser profiles available on this machine. Returns id, name, tags, engine, last opened, and running state.",
+      "List all browser profiles available on this machine. Returns id, name, tags, engine, last opened, running state, the saved display mode (displayMode, absent when it follows the default) and the mode a running browser is in (runningDisplayMode).",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "create_profile",
     description:
-      "Create a new browser profile. Only `name` is required; a coherent default fingerprint is generated. Optionally pass an `engine` (default: the app's default engine, fixed at creation), a `proxy` and/or high-level `fingerprint` knobs. Optional top-level `seed` / `entropy` (or `fingerprint.seed`) makes device/WebGL + CloakBrowser noise deterministic — same seed + knobs → same device/WebGL; different seed → different device/noise with high probability. Top-level seed wins over fingerprint.seed. Unknown localeId or invalid timezone/screen/hwc/mem → INVALID_INPUT (profile not created). Call list_fingerprint_options for valid device families and locale ids.",
+      "Create a new browser profile. Only `name` is required; a coherent default fingerprint is generated. Optionally pass an `engine` (default: the app's default engine, fixed at creation), a `display_mode` (default: follows the app's default), a `proxy` and/or high-level `fingerprint` knobs. Optional top-level `seed` / `entropy` (or `fingerprint.seed`) makes device/WebGL + CloakBrowser noise deterministic — same seed + knobs → same device/WebGL; different seed → different device/noise with high probability. Top-level seed wins over fingerprint.seed. Unknown localeId or invalid timezone/screen/hwc/mem → INVALID_INPUT (profile not created). Call list_fingerprint_options for valid device families and locale ids.",
     inputSchema: {
       type: "object",
       required: ["name"],
@@ -882,6 +915,7 @@ export const TOOL_DEFINITIONS = [
         notes: { type: "string" },
         tags: { type: "array", items: { type: "string" } },
         engine: ENGINE_JSON_SCHEMA,
+        display_mode: DISPLAY_MODE_JSON_SCHEMA,
         proxy: PROXY_JSON_SCHEMA,
         fingerprint: FINGERPRINT_JSON_SCHEMA,
         seed: {
@@ -911,11 +945,11 @@ export const TOOL_DEFINITIONS = [
   {
     name: "launch_profile",
     description:
-      "Launch a profile on its engine. Returns the CDP endpoint (empty on Camoufox, which has no CDP). Idempotent: returns existing endpoint if already running.",
+      "Launch a profile on its engine. Returns the CDP endpoint (empty on Camoufox, which has no CDP) and the display mode it runs in. Idempotent: returns existing endpoint if already running. Pass display_mode to override the saved mode for this run; on a profile already running in another mode that is PROFILE_ALREADY_RUNNING (close_profile first). On a server started with --headless, a display_mode other than headless is INVALID_INPUT. headed without a display, or xvfb where it isn't available, is DISPLAY_UNAVAILABLE.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
-      properties: { profile_id: { type: "string" } },
+      properties: { profile_id: { type: "string" }, display_mode: DISPLAY_MODE_JSON_SCHEMA },
     },
   },
   {
@@ -1001,7 +1035,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "request_human",
     description:
-      "Hand control to a human for a step the agent must NOT do itself — a CAPTCHA, a 2FA/OTP prompt, or any manual verification. Brings the browser window forward and marks the profile as awaiting a human in the app. Call wait_for_human next to block until the person is done. Never attempt to solve CAPTCHA or 2FA yourself.",
+      "Hand control to a human for a step the agent must NOT do itself — a CAPTCHA, a 2FA/OTP prompt, or any manual verification. Brings the browser window forward, on a profile that has a visible one, and marks the profile as awaiting a human in the app. Call wait_for_human next to block until the person is done. Never attempt to solve CAPTCHA or 2FA yourself.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "reason"],
@@ -1065,7 +1099,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "update_profile",
     description:
-      "Update an existing profile's name, notes, tags, engine, proxy, and/or fingerprint. Every field is optional — only the ones you pass change. Set `proxy` to null to remove the proxy. Fingerprint changes are reconciled for coherence. If the profile is running, changes apply on the next launch (response includes appliesOnNextLaunch) — except an engine change, which is refused while it runs (close_profile first). Each engine keeps its own browser state, so after switching, the profile starts from that engine's cookies and logins, which may be empty.",
+      "Update an existing profile's name, notes, tags, engine, display_mode, proxy, and/or fingerprint. Every field is optional — only the ones you pass change. Set `proxy` to null to remove the proxy, and `display_mode` to null to follow the default again. Fingerprint changes are reconciled for coherence. If the profile is running, changes apply on the next launch (response includes appliesOnNextLaunch) — except an engine or display mode change, which is refused while it runs (close_profile first). Each engine keeps its own browser state, so after switching, the profile starts from that engine's cookies and logins, which may be empty.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1075,6 +1109,11 @@ export const TOOL_DEFINITIONS = [
         notes: { type: "string" },
         tags: { type: "array", items: { type: "string" } },
         engine: ENGINE_JSON_SCHEMA,
+        display_mode: {
+          description:
+            "The mode to save, or null to follow the default again. Omit to leave unchanged.",
+          anyOf: [DISPLAY_MODE_JSON_SCHEMA, { type: "null" }],
+        },
         proxy: {
           description: "Proxy object to set, or null to clear. Omit to leave unchanged.",
           anyOf: [PROXY_JSON_SCHEMA, { type: "null" }],

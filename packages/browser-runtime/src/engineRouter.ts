@@ -14,6 +14,8 @@ import type {
   ChromiumStatus,
   DialogPolicy,
   DialogResponse,
+  DisplayMode,
+  DisplayModeSetting,
   DownloadFile,
   DownloadRecord,
   DriverAction,
@@ -34,8 +36,10 @@ import {
   type ChromiumBrowserDriver,
   type RunningStateChange,
 } from "./ChromiumBrowserDriver.ts";
+import { resolveDisplayMode } from "./displayMode.ts";
 import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
 import { camoufoxConfigForProfile } from "./firefoxFingerprint.ts";
+import { hasXvfbBinary } from "./xvfb.ts";
 import { StrictGeoCoherenceError } from "./launchTimezone";
 // Type-only: the concrete module (which statically imports camoufox-js +
 // playwright-core) is loaded lazily, so Chromium-only sessions never pull it in.
@@ -75,6 +79,18 @@ export interface EngineRouterOptions {
   maxBrowsers?: number;
   /** How long a launch waits for a free slot. Then BROWSER_LIMIT_REACHED. */
   browserQueueTimeoutMs?: number;
+  /** The last word on a mode: a server's --display-mode. Default: headed, as on the desktop. */
+  displayModeDefault?: DisplayModeSetting;
+  /** A server's --headless: the first word on a mode. */
+  forcedDisplayMode?: DisplayMode;
+  /** The global setting, read at each launch so a change applies without a restart. */
+  getDefaultDisplayMode?: () => DisplayMode | undefined;
+  /** What the machine offers. Default: this process's. */
+  displayEnvironment?: {
+    platform: NodeJS.Platform;
+    env: NodeJS.ProcessEnv;
+    hasXvfb: () => boolean;
+  };
 }
 
 /** A launch under way. Everyone asking for this profile meanwhile shares it. */
@@ -82,6 +98,7 @@ interface InFlightLaunch {
   promise: Promise<LaunchedProfile>;
   /** Calls off the waits before a browser starts. One already starting finishes starting. */
   callOff: AbortController;
+  displayMode: DisplayMode;
 }
 
 /**
@@ -108,6 +125,10 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   private readonly closing = new Map<ProfileId, Promise<void>>();
   private readonly limiter: BrowserLimiter;
   private readonly browserQueueTimeoutMs: number;
+  private readonly displayModeDefault: DisplayModeSetting;
+  private readonly forcedDisplayMode: DisplayMode | undefined;
+  private readonly getDefaultDisplayMode: () => DisplayMode | undefined;
+  private readonly displayEnvironment: NonNullable<EngineRouterOptions["displayEnvironment"]>;
   /** closeAll has begun: whatever a launch brings up from now on is closed at once. */
   private shuttingDown = false;
 
@@ -121,6 +142,14 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     this.engineNotReady = opts.engineNotReady ?? "wait";
     this.limiter = new BrowserLimiter(opts.maxBrowsers ?? Infinity);
     this.browserQueueTimeoutMs = opts.browserQueueTimeoutMs ?? BROWSER_QUEUE_TIMEOUT_MS;
+    this.displayModeDefault = opts.displayModeDefault ?? "headed";
+    this.forcedDisplayMode = opts.forcedDisplayMode;
+    this.getDefaultDisplayMode = opts.getDefaultDisplayMode ?? (() => undefined);
+    this.displayEnvironment = opts.displayEnvironment ?? {
+      platform: process.platform,
+      env: process.env,
+      hasXvfb: () => hasXvfbBinary(),
+    };
     this.chromiumDriver.on("running-changed", (c) => this.onSubEvent(c));
   }
 
@@ -237,21 +266,56 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     if (this.shuttingDown) {
       throw new MultizenError("LAUNCH_FAILED", "The server is shutting down.");
     }
+    // What this machine can't do is refused whatever is running.
+    if (opts.displayMode) this.resolveMode(profileId, opts.displayMode);
     const bound = this.bindings.get(profileId);
-    if (bound) return bound.launch(profileId); // idempotent — already running
+    if (bound) {
+      this.assertSameMode(profileId, opts.displayMode, this.runningDisplayMode(profileId));
+      return bound.launch(profileId); // idempotent — already running
+    }
     const underway = this.inFlight.get(profileId);
-    if (underway) return underway.promise;
+    if (underway) {
+      this.assertSameMode(profileId, opts.displayMode, underway.displayMode);
+      return underway.promise;
+    }
 
+    const displayMode = this.resolveMode(profileId, opts.displayMode);
     const callOff = new AbortController();
-    const promise = this.startLaunch(profileId, callOff.signal, opts.signal).finally(() => {
+    const promise = this.startLaunch(profileId, displayMode, callOff.signal, opts.signal).finally(() => {
       this.inFlight.delete(profileId);
     });
-    this.inFlight.set(profileId, { promise, callOff });
+    this.inFlight.set(profileId, { promise, callOff, displayMode });
     return promise;
+  }
+
+  private resolveMode(profileId: ProfileId, explicit: DisplayMode | undefined): DisplayMode {
+    return resolveDisplayMode({
+      ...this.displayEnvironment,
+      explicit,
+      profile: this.profileManager.get(profileId)?.displayMode,
+      setting: this.getDefaultDisplayMode(),
+      flag: this.displayModeDefault,
+      forced: this.forcedDisplayMode,
+    });
+  }
+
+  /** Only a mode named by the caller can conflict: a plain launch means "make sure it runs". */
+  private assertSameMode(
+    profileId: ProfileId,
+    explicit: DisplayMode | undefined,
+    running: DisplayMode | null,
+  ): void {
+    if (!explicit || !running || explicit === running) return;
+    throw new MultizenError(
+      "PROFILE_ALREADY_RUNNING",
+      `Profile ${profileId} is already running in display mode "${running}", not "${explicit}".`,
+      { hint: `Call close_profile, then launch_profile with display_mode "${explicit}".` },
+    );
   }
 
   private async startLaunch(
     profileId: ProfileId,
+    displayMode: DisplayMode,
     callOff: AbortSignal,
     client: AbortSignal | undefined,
   ): Promise<LaunchedProfile> {
@@ -270,7 +334,7 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     });
     try {
       const driver = await this.driverForEngine(engine);
-      const result = await driver.launch(profileId).catch((e: unknown) => {
+      const result = await driver.launch(profileId, { displayMode }).catch((e: unknown) => {
         throw typedLaunchError(e);
       });
       // A browser that died this early reported its end before this binding could exist.
@@ -418,6 +482,9 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   }
   runningInfo(profileId: ProfileId): RunningInfo | null {
     return this.bindings.get(profileId)?.runningInfo?.(profileId) ?? null;
+  }
+  runningDisplayMode(profileId: ProfileId): DisplayMode | null {
+    return this.bindings.get(profileId)?.runningDisplayMode?.(profileId) ?? null;
   }
 
   /** `opts` shortens the Chromium shutdown on the quit path (see before-quit). */

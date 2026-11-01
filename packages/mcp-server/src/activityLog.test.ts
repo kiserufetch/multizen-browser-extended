@@ -143,3 +143,10 @@ test("a real tools/call logs through the allowlist", async () => {
   assert.ok(LOGGED_ARGS.size > 0);
   await client.close();
 });
+
+test("display_mode reaches the activity feed on the tools that take it", () => {
+  const log = new ActivityLog();
+  assert.equal(log.startCall("launch_profile", { profile_id: "p", display_mode: "headless" }).args.display_mode, "headless");
+  assert.equal(log.startCall("create_profile", { name: "n", display_mode: "xvfb" }).args.display_mode, "xvfb");
+  assert.equal(log.startCall("update_profile", { profile_id: "p", display_mode: null }).args.display_mode, null);
+});

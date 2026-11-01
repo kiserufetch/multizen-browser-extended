@@ -12,6 +12,9 @@ import {
   platformLabel,
   EngineIcon,
   engineLabel,
+  DisplayModeIcon,
+  displayModeLabel,
+  displayModeRunningNote,
 } from "../atoms";
 import { Button } from "../atoms/Button";
 import { relativeTime } from "../../lib/relativeTime";
@@ -200,6 +203,13 @@ export function ProfileTile({
             <span className="text-slate-500">{engineLabel(profile.engine)}</span>
           </>
         )}
+        {profile.displayMode && profile.displayMode !== "headed" && (
+          <>
+            <span className="text-slate-700">·</span>
+            <DisplayModeIcon mode={profile.displayMode} size={12} className="text-slate-500" />
+            <span className="text-slate-500">{displayModeLabel(profile.displayMode)}</span>
+          </>
+        )}
         <span className="text-slate-700">·</span>
         <span className="truncate">
           {profile.lastOpenedAt ? relativeTime(profile.lastOpenedAt) : "never opened"}
@@ -374,6 +384,26 @@ function ContextLine({ profile }: { profile: TileData }): JSX.Element | null {
     return (
       <div className="mono text-[11px] leading-tight text-red-400 truncate">
         {profile.errorMessage}
+      </div>
+    );
+  }
+  if (profile.state === "running" && profile.runningDisplayMode && profile.runningDisplayMode !== "headed") {
+    return (
+      <div
+        className="flex items-center gap-2 px-2.5 py-2 rounded-lg"
+        style={{
+          background: "rgba(16,185,129,0.05)",
+          boxShadow: "inset 0 0 0 1px rgba(16,185,129,0.12)",
+        }}
+      >
+        <DisplayModeIcon
+          mode={profile.runningDisplayMode}
+          size={12}
+          className="text-emerald-400 flex-shrink-0"
+        />
+        <span className="text-[11px] leading-snug text-emerald-200/80">
+          {displayModeRunningNote(profile.runningDisplayMode)}
+        </span>
       </div>
     );
   }

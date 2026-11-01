@@ -10,6 +10,8 @@ export * from "./ChromiumBrowserDriver.ts";
 export type { FirefoxBrowserDriver, FirefoxBrowserDriverOptions } from "./FirefoxBrowserDriver.ts";
 export * from "./engineRegistry.ts";
 export * from "./engineRouter.ts";
+export * from "./displayMode.ts";
+export * from "./xvfb.ts";
 export * from "./browserLimiter.ts";
 export * from "./socks5Bridge.ts";
 export * from "./proxyGeo.ts";

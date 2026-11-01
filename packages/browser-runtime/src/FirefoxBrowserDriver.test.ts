@@ -5,7 +5,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MultizenError, ProfileId } from "@multizen/types";
-import { FirefoxBrowserDriver, persistentContextOptions } from "./FirefoxBrowserDriver.ts";
+import {
+  camoufoxDisplayOptions,
+  FirefoxBrowserDriver,
+  openStartPage,
+  persistentContextOptions,
+} from "./FirefoxBrowserDriver.ts";
 
 const ID: ProfileId = "p";
 
@@ -1080,4 +1085,127 @@ test("extract caps the page text too", async (t) => {
   };
   assert.equal(result.truncated, true);
   assert.equal(result.text.length, 1024 * 1024);
+});
+
+// ── display modes ────────────────────────────────────────────────────────────
+
+function withDisplayVars(t: TestContext): void {
+  const before = { DISPLAY: process.env.DISPLAY, WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY, XAUTHORITY: process.env.XAUTHORITY };
+  Object.assign(process.env, { DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0", XAUTHORITY: "session-auth" });
+  t.after(() => {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
+test("camoufox's headless option follows the mode, and only headless means headless", () => {
+  assert.equal(camoufoxDisplayOptions("headed").headless, false);
+  assert.equal(camoufoxDisplayOptions("xvfb").headless, false, "xvfb is a real window");
+  assert.equal(camoufoxDisplayOptions("headless").headless, true);
+});
+
+test("headed passes the session's display through the allowlist, as it did before", (t) => {
+  withDisplayVars(t);
+  const { env } = camoufoxDisplayOptions("headed");
+  assert.equal(env.DISPLAY, ":0");
+  assert.equal(env.WAYLAND_DISPLAY, "wayland-0");
+  assert.equal(env.XAUTHORITY, "session-auth");
+});
+
+test("headless takes every display variable away", (t) => {
+  withDisplayVars(t);
+  const { env } = camoufoxDisplayOptions("headless");
+  assert.equal(env.DISPLAY, undefined);
+  assert.equal(env.WAYLAND_DISPLAY, undefined);
+  assert.equal(env.XAUTHORITY, undefined);
+  assert.equal(env.PATH, process.env.PATH, "the rest of the allowlist stays");
+});
+
+test("xvfb's own display overrides what the allowlist forwarded", (t) => {
+  withDisplayVars(t);
+  const { env } = camoufoxDisplayOptions("xvfb", {
+    display: ":7",
+    authFile: "own-auth",
+    pid: 1,
+    stop: async () => {},
+  });
+  assert.equal(env.DISPLAY, ":7");
+  assert.equal(env.XAUTHORITY, "own-auth");
+  assert.equal(env.WAYLAND_DISPLAY, undefined);
+});
+
+function displayRig(t: TestContext, displayMode: string, stop?: () => void): { driver: FirefoxBrowserDriver; context: FakeContext } {
+  const dir = mkdtempSync(join(tmpdir(), "mz-ff-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const context = new FakeContext(new FakePage());
+  const driver = new FirefoxBrowserDriver({
+    profileManager: { get: () => ({ id: ID, dataDir: dir }) } as never,
+    browserDataDir: () => dir,
+  });
+  (driver as unknown as { adopt: (...a: unknown[]) => unknown }).adopt(
+    ID,
+    context,
+    false,
+    "windows",
+    displayMode,
+    stop ? { display: ":7", authFile: "a", pid: 1, stop: async () => stop() } : undefined,
+  );
+  t.after(() => driver.closeAll());
+  return { driver, context };
+}
+
+test("a running browser's mode reads back, and launch answers with it", async (t) => {
+  const { driver } = displayRig(t, "headless");
+  assert.equal(driver.runningDisplayMode(ID), "headless");
+  assert.equal((await driver.launch(ID)).displayMode, "headless");
+  await driver.close(ID);
+  assert.equal(driver.runningDisplayMode(ID), null);
+});
+
+test("xvfb: the display stops when close_profile closes the browser", async (t) => {
+  let stops = 0;
+  const { driver } = displayRig(t, "xvfb", () => void stops++);
+  await driver.close(ID);
+  assert.ok(stops >= 1);
+});
+
+test("xvfb: the display stops when the browser goes by itself", async (t) => {
+  let stops = 0;
+  const { context } = displayRig(t, "xvfb", () => void stops++);
+  context.emit("close");
+  assert.equal(stops, 1);
+});
+
+test("the start page: launch waits for its commit, so a navigate right after can't be aborted by it", async () => {
+  const order: string[] = [];
+  let commit = (): void => {};
+  const page = {
+    goto: (url: string, opts: { waitUntil: string }) => {
+      order.push(`goto ${url} ${opts.waitUntil}`);
+      return new Promise<null>((resolve) => {
+        commit = () => {
+          order.push("committed");
+          resolve(null);
+        };
+      });
+    },
+  };
+  const opening = openStartPage(page as never, "about:blank").then(() => order.push("returned"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["goto about:blank commit"]);
+  commit();
+  await opening;
+  assert.deepEqual(order, ["goto about:blank commit", "committed", "returned"]);
+});
+
+test("the start page: a slow one doesn't hold up the launch, and a failed one doesn't fail it", async () => {
+  const never = { goto: () => new Promise<null>(() => {}) };
+  const startedAt = Date.now();
+  await openStartPage(never as never, "http://slow/", 30);
+  assert.ok(Date.now() - startedAt < 2_000);
+
+  const broken = { goto: () => Promise.reject(new Error("net::ERR_PROXY_CONNECTION_FAILED")) };
+  await openStartPage(broken as never, "http://down/");
 });
