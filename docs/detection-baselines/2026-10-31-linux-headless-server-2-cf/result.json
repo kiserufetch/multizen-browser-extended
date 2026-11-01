@@ -1,0 +1,1450 @@
+{
+ "meta": {
+  "label": "linux-headless-server-2-cf",
+  "date": "2026-10-31",
+  "engine": "camoufox",
+  "mode": "headless",
+  "egress": "block-private",
+  "egressAllow": [
+   "localhost",
+   "127.0.0.1"
+  ],
+  "seed": "mz-baseline-70",
+  "reference": null,
+  "occlusion": "server",
+  "platform": "linux",
+  "nodeVersion": "v22.23.4",
+  "lang": "C.UTF-8",
+  "persona": {
+   "device": "windows-desktop-nvidia",
+   "screen": {
+    "width": 1920,
+    "height": 1080
+   },
+   "locale": "en-IE",
+   "timezone": "Europe/Dublin",
+   "hardwareConcurrency": 8,
+   "deviceMemory": 16,
+   "webgl": {
+    "vendor": "Google Inc. (NVIDIA)",
+    "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 (0x00002786) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+   },
+   "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.177 Safari/537.36"
+  },
+  "engineVersion": "152.0.4-beta.30",
+  "displayMode": "headless",
+  "browserArgv": [
+   "-no-remote",
+   "-headless",
+   "-profile",
+   "<profile>",
+   "-juggler-pipe",
+   "about:blank"
+  ],
+  "firefoxPrefs": [
+   "user_pref(\"media.peerconnection.enabled\", false);",
+   "user_pref(\"network.http.http3.enable\", false);",
+   "user_pref(\"network.proxy.allow_hijacking_localhost\", true);",
+   "user_pref(\"network.trr.mode\", 5);",
+   "user_pref(\"network.webtransport.enabled\", false);"
+  ],
+  "durationMs": 18938
+ },
+ "sections": {
+  "probe": {
+   "status": "ok",
+   "data": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "appVersion": "5.0 (Windows)",
+    "platform": "Win32",
+    "vendor": "",
+    "productSub": "20100101",
+    "oscpu": "Windows NT 10.0; Win64; x64",
+    "buildID": "20181001000000",
+    "brands": null,
+    "mobile": null,
+    "highEntropy": "error: TypeError",
+    "webdriver": false,
+    "language": "en-IE",
+    "languages": [
+     "en-IE",
+     "en"
+    ],
+    "hardwareConcurrency": 8,
+    "deviceMemory": null,
+    "maxTouchPoints": 0,
+    "cookieEnabled": true,
+    "doNotTrack": "unspecified",
+    "globalPrivacyControl": false,
+    "pdfViewerEnabled": true,
+    "plugins": [
+     "PDF Viewer",
+     "Chrome PDF Viewer",
+     "Chromium PDF Viewer",
+     "Microsoft Edge PDF Viewer",
+     "WebKit built-in PDF"
+    ],
+    "mimeTypes": [
+     "application/pdf",
+     "text/pdf"
+    ],
+    "screen": {
+     "width": 1920,
+     "height": 1080,
+     "availWidth": 1920,
+     "availHeight": 1040,
+     "availLeft": 1920,
+     "availTop": 0,
+     "colorDepth": 24,
+     "pixelDepth": 24,
+     "orientation": "landscape-primary",
+     "isExtended": null
+    },
+    "window": {
+     "outerWidth": 1936,
+     "outerHeight": 1056,
+     "innerWidth": 1280,
+     "innerHeight": 720,
+     "screenX": 1912,
+     "screenY": -15,
+     "devicePixelRatio": 1,
+     "visualViewport": [
+      1280,
+      720,
+      1
+     ],
+     "toolbar": true,
+     "locationbar": true,
+     "menubar": true,
+     "personalbar": true,
+     "statusbar": true,
+     "scrollbars": true,
+     "historyLength": 3
+    },
+    "scrollbar": {
+     "width": 0,
+     "height": 0
+    },
+    "document": {
+     "visibility": "visible",
+     "hidden": false,
+     "hasFocus": true,
+     "paints": [
+      "first-contentful-paint"
+     ],
+     "rafRunning": true,
+     "referrer": "",
+     "characterSet": "UTF-8",
+     "compatMode": "CSS1Compat"
+    },
+    "media": {
+     "(pointer: fine)": true,
+     "(pointer: coarse)": false,
+     "(pointer: none)": false,
+     "(any-pointer: fine)": true,
+     "(any-pointer: coarse)": false,
+     "(any-pointer: none)": false,
+     "(hover: hover)": true,
+     "(hover: none)": false,
+     "(any-hover: hover)": true,
+     "(any-hover: none)": false,
+     "(prefers-color-scheme: dark)": false,
+     "(prefers-reduced-motion: reduce)": false,
+     "(prefers-contrast: more)": false,
+     "(forced-colors: active)": false,
+     "(color-gamut: srgb)": true,
+     "(color-gamut: p3)": false,
+     "(dynamic-range: high)": false,
+     "(display-mode: browser)": true,
+     "(display-mode: standalone)": false,
+     "(inverted-colors: inverted)": false,
+     "(monochrome)": false
+    },
+    "chrome": null,
+    "notificationPermission": "default",
+    "permissions": {
+     "notifications": "prompt",
+     "geolocation": "prompt",
+     "camera": "prompt",
+     "microphone": "prompt",
+     "persistent-storage": "prompt",
+     "clipboard-read": "error: TypeError",
+     "clipboard-write": "error: TypeError",
+     "midi": "prompt"
+    },
+    "webgl": null,
+    "gpu": null,
+    "canvasHash": -1706714972,
+    "audio": {
+     "canvasLikeSum": 75.80652588487283,
+     "live": {
+      "sampleRate": 44100,
+      "state": "suspended",
+      "maxChannelCount": 0,
+      "baseLatency": 0
+     }
+    },
+    "voices": [],
+    "devices": [],
+    "battery": "error: TypeError",
+    "storageQuota": 10737418240,
+    "connection": null,
+    "intl": {
+     "timeZone": "Europe/Dublin",
+     "locale": "en",
+     "calendar": "gregory",
+     "numberingSystem": "latn",
+     "timezoneOffset": 0,
+     "dateSample": "1/15/2026, 12:00:00 PM"
+    },
+    "systemColors": {
+     "ActiveText": "rgb(238, 0, 0)",
+     "Highlight": "rgb(51, 153, 255)",
+     "ButtonFace": "rgb(233, 233, 237)",
+     "Canvas": "rgb(255, 255, 255)"
+    },
+    "windowProps": {
+     "count": 937,
+     "hash": -278472104,
+     "suspicious": []
+    },
+    "jsHeapSizeLimit": null,
+    "secureContext": true,
+    "apis": {
+     "serial": false,
+     "usb": false,
+     "hid": false,
+     "bluetooth": false,
+     "keyboard": false,
+     "wakeLock": true,
+     "share": false,
+     "contacts": false,
+     "windowControlsOverlay": false,
+     "documentPictureInPicture": true
+    },
+    "timings": {
+     "rafFramesIn500Ms": 33,
+     "timeOrigin": 1793473606232,
+     "loadMs": 2427
+    }
+   }
+  },
+  "fonts": {
+   "status": "ok",
+   "data": {
+    "present": {
+     "windows": [
+      "Arial Black",
+      "Bahnschrift",
+      "Calibri",
+      "Cambria",
+      "Cambria Math",
+      "Candara",
+      "Comic Sans MS",
+      "Consolas",
+      "Constantia",
+      "Corbel",
+      "Courier New",
+      "Ebrima",
+      "Franklin Gothic Medium",
+      "Gabriola",
+      "Gadugi",
+      "Georgia",
+      "HoloLens MDL2 Assets",
+      "Impact",
+      "Ink Free",
+      "Javanese Text",
+      "Leelawadee UI",
+      "Lucida Console",
+      "Lucida Sans Unicode",
+      "Malgun Gothic",
+      "Marlett",
+      "Microsoft Himalaya",
+      "Microsoft JhengHei",
+      "Microsoft New Tai Lue",
+      "Microsoft PhagsPa",
+      "Microsoft Sans Serif",
+      "Microsoft Tai Le",
+      "Microsoft YaHei",
+      "Microsoft Yi Baiti",
+      "MingLiU-ExtB",
+      "Mongolian Baiti",
+      "MS Gothic",
+      "MV Boli",
+      "Myanmar Text",
+      "Nirmala UI",
+      "Palatino Linotype",
+      "Segoe Print",
+      "Segoe Script",
+      "Segoe UI",
+      "Segoe UI Emoji",
+      "Segoe UI Historic",
+      "Segoe UI Symbol",
+      "SimSun",
+      "Sitka Text",
+      "Sylfaen",
+      "Symbol",
+      "Tahoma",
+      "Times New Roman",
+      "Trebuchet MS",
+      "Verdana",
+      "Webdings",
+      "Wingdings",
+      "Yu Gothic"
+     ],
+     "linux": [],
+     "mac": []
+    },
+    "widths": {
+     "Arial": 884.9666748046875,
+     "Arial Black": 1025.4666748046875,
+     "Bahnschrift": 872.2999877929688,
+     "Calibri": 837.566650390625,
+     "Cambria": 873.9500122070312,
+     "Cambria Math": 873.9500122070312,
+     "Candara": 849.9666748046875,
+     "Comic Sans MS": 856.6166381835938,
+     "Consolas": 673.2000122070312,
+     "Constantia": 896.1500244140625,
+     "Corbel": 868.6166381835938,
+     "Courier New": 734.683349609375,
+     "Ebrima": 901.8499755859375,
+     "Franklin Gothic Medium": 883.3666381835938,
+     "Gabriola": 642,
+     "Gadugi": 901.8499755859375,
+     "Georgia": 918.3333129882812,
+     "HoloLens MDL2 Assets": 884.9666748046875,
+     "Impact": 795.5999755859375,
+     "Ink Free": 789.4166870117188,
+     "Javanese Text": 870.683349609375,
+     "Leelawadee UI": 901.8499755859375,
+     "Lucida Console": 737.7999877929688,
+     "Lucida Sans Unicode": 959.683349609375,
+     "Malgun Gothic": 921.433349609375,
+     "Marlett": 1209.36669921875,
+     "Microsoft Himalaya": 564.3333129882812,
+     "Microsoft JhengHei": 969.9833374023438,
+     "Microsoft New Tai Lue": 901.8499755859375,
+     "Microsoft PhagsPa": 901.8499755859375,
+     "Microsoft Sans Serif": 886.2666625976562,
+     "Microsoft Tai Le": 901.8499755859375,
+     "Microsoft YaHei": 980.7999877929688,
+     "Microsoft Yi Baiti": 668.9833374023438,
+     "MingLiU-ExtB": 612.2833251953125,
+     "Mongolian Baiti": 842.5166625976562,
+     "MS Gothic": 612.2833251953125,
+     "MV Boli": 882.7833251953125,
+     "Myanmar Text": 901.8499755859375,
+     "Nirmala UI": 901.8499755859375,
+     "Palatino Linotype": 912.4166870117188,
+     "Segoe MDL2 Assets": 884.9666748046875,
+     "Segoe Print": 1045.300048828125,
+     "Segoe Script": 1060.0833740234375,
+     "Segoe UI": 901.8499755859375,
+     "Segoe UI Emoji": 901.8499755859375,
+     "Segoe UI Historic": 901.8499755859375,
+     "Segoe UI Symbol": 901.8499755859375,
+     "SimSun": 612.2833251953125,
+     "Sitka Text": 940.5166625976562,
+     "Sylfaen": 878.8833618164062,
+     "Symbol": 702.0166625976562,
+     "Tahoma": 875.183349609375,
+     "Times New Roman": 842.5166625976562,
+     "Trebuchet MS": 864.1666870117188,
+     "Verdana": 1005.4833374023438,
+     "Webdings": 873.1166381835938,
+     "Wingdings": 1127.933349609375,
+     "Yu Gothic": 897.5166625976562,
+     "Liberation Sans": 884.9666748046875,
+     "Liberation Serif": 884.9666748046875,
+     "Liberation Mono": 884.9666748046875,
+     "DejaVu Sans": 884.9666748046875,
+     "DejaVu Serif": 884.9666748046875,
+     "DejaVu Sans Mono": 884.9666748046875,
+     "Noto Sans": 884.9666748046875,
+     "Noto Serif": 884.9666748046875,
+     "Noto Sans CJK SC": 884.9666748046875,
+     "Noto Color Emoji": 884.9666748046875,
+     "Ubuntu": 884.9666748046875,
+     "Cantarell": 884.9666748046875,
+     "Roboto": 884.9666748046875,
+     "Droid Sans": 884.9666748046875,
+     "FreeSans": 884.9666748046875,
+     "Helvetica": 884.9666748046875,
+     "Helvetica Neue": 884.9666748046875,
+     "Menlo": 884.9666748046875,
+     "Monaco": 884.9666748046875,
+     "San Francisco": 884.9666748046875,
+     "SF Pro Text": 884.9666748046875,
+     "Apple Color Emoji": 884.9666748046875,
+     "Lucida Grande": 884.9666748046875,
+     "Geneva": 884.9666748046875,
+     "Avenir": 884.9666748046875
+    },
+    "baseWidths": {
+     "monospace": 884.9666748046875,
+     "sans-serif": 884.9666748046875,
+     "serif": 884.9666748046875
+    },
+    "systemFonts": {
+     "caption": "Segoe UI 12px",
+     "icon": "Segoe UI 12px",
+     "menu": "Segoe UI 12px",
+     "message-box": "Segoe UI 12px",
+     "small-caption": "Segoe UI 12px",
+     "status-bar": "Segoe UI 12px",
+     "system-ui": "system-ui 16px"
+    },
+    "emoji": {
+     "width": 24.016666412353516,
+     "canvasHash": -146798342
+    },
+    "fontsCheckCount": 84,
+    "counts": {
+     "windows": 57,
+     "linux": 0,
+     "mac": 0
+    }
+   }
+  },
+  "headers": {
+   "status": "ok",
+   "data": {
+    "navigation": {
+     "httpVersion": "1.1",
+     "order": [
+      "Host",
+      "User-Agent",
+      "Accept",
+      "Accept-Language",
+      "Accept-Encoding",
+      "Connection",
+      "Upgrade-Insecure-Requests",
+      "Sec-Fetch-Dest",
+      "Sec-Fetch-Mode",
+      "Sec-Fetch-Site",
+      "Sec-Fetch-User",
+      "Priority"
+     ],
+     "values": {
+      "host": "localhost:<port>",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "accept-language": "en-IE,en;q=0.9",
+      "accept-encoding": "gzip, deflate, br, zstd",
+      "connection": "keep-alive",
+      "upgrade-insecure-requests": "1",
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "none",
+      "sec-fetch-user": "?1",
+      "priority": "u=0, i"
+     }
+    },
+    "subresourceAfterAcceptCh": {
+     "httpVersion": "1.1",
+     "order": [
+      "Host",
+      "User-Agent",
+      "Accept",
+      "Accept-Language",
+      "Accept-Encoding",
+      "Referer",
+      "Connection",
+      "Sec-Fetch-Dest",
+      "Sec-Fetch-Mode",
+      "Sec-Fetch-Site",
+      "Priority"
+     ],
+     "values": {
+      "host": "localhost:<port>",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+      "accept": "*/*",
+      "accept-language": "en-IE,en;q=0.9",
+      "accept-encoding": "gzip, deflate, br, zstd",
+      "referer": "http://localhost:<port>/p/probe.html",
+      "connection": "keep-alive",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin",
+      "priority": "u=4"
+     }
+    }
+   }
+  },
+  "input": {
+   "status": "ok",
+   "data": {
+    "click": {
+     "error": null,
+     "sequence": [
+      "mouseover",
+      "mouseenter",
+      "pointerover",
+      "pointerenter",
+      "pointermove+",
+      "mousemove+",
+      "pointerdown",
+      "mousedown",
+      "focus",
+      "focusin",
+      "pointerup",
+      "pointerout",
+      "pointerleave",
+      "mouseup",
+      "click"
+     ],
+     "total": 26,
+     "allTrusted": true,
+     "untrusted": [],
+     "pointerdown": {
+      "button": 0,
+      "buttons": 1,
+      "pressure": 0.5,
+      "tangentialPressure": 0,
+      "tiltX": 0,
+      "tiltY": 0,
+      "twist": 0,
+      "width": 1,
+      "height": 1,
+      "pointerType": "",
+      "isPrimary": true
+     },
+     "pointermove": {
+      "pressure": 0,
+      "buttons": 0,
+      "width": 1,
+      "height": 1,
+      "pointerType": "",
+      "coalesced": 1,
+      "predicted": 0
+     },
+     "mousedown": {
+      "button": 0,
+      "buttons": 1,
+      "detail": 1
+     },
+     "click": {
+      "button": 0,
+      "buttons": 0,
+      "detail": 1,
+      "pointerType": "",
+      "pressure": 0
+     },
+     "keydown": null,
+     "keyCount": 0,
+     "input": null,
+     "wheel": null,
+     "timings": {
+      "pointerMoves": 1,
+      "pressToReleaseMs": 39,
+      "keyDownToUpMs": null,
+      "meanKeyGapMs": null,
+      "firstToLastMs": 42
+     }
+    },
+    "click_ref": {
+     "error": null,
+     "sequence": [
+      "pointerover",
+      "pointerenter",
+      "pointermove+",
+      "mouseout",
+      "mouseleave",
+      "mouseover",
+      "mouseenter",
+      "mousemove+",
+      "pointerdown",
+      "mousedown",
+      "blur",
+      "focusout",
+      "focus",
+      "focusin",
+      "pointerup",
+      "pointerout",
+      "pointerleave",
+      "mouseup",
+      "click"
+     ],
+     "total": 25,
+     "allTrusted": true,
+     "untrusted": [],
+     "pointerdown": {
+      "button": 0,
+      "buttons": 1,
+      "pressure": 0.5,
+      "tangentialPressure": 0,
+      "tiltX": 0,
+      "tiltY": 0,
+      "twist": 0,
+      "width": 1,
+      "height": 1,
+      "pointerType": "",
+      "isPrimary": true
+     },
+     "pointermove": {
+      "pressure": 0,
+      "buttons": 0,
+      "width": 1,
+      "height": 1,
+      "pointerType": "",
+      "coalesced": 1,
+      "predicted": 0
+     },
+     "mousedown": {
+      "button": 0,
+      "buttons": 1,
+      "detail": 1
+     },
+     "click": {
+      "button": 0,
+      "buttons": 0,
+      "detail": 1,
+      "pointerType": "",
+      "pressure": 0
+     },
+     "keydown": null,
+     "keyCount": 0,
+     "input": null,
+     "wheel": null,
+     "timings": {
+      "pointerMoves": 1,
+      "pressToReleaseMs": 1,
+      "keyDownToUpMs": null,
+      "meanKeyGapMs": null,
+      "firstToLastMs": 4
+     }
+    },
+    "type": {
+     "error": null,
+     "sequence": [
+      "blur",
+      "focusout",
+      "focus",
+      "focusin",
+      "selectionchange",
+      "input",
+      "selectionchange"
+     ],
+     "total": 7,
+     "allTrusted": true,
+     "untrusted": [],
+     "pointerdown": null,
+     "pointermove": null,
+     "mousedown": null,
+     "click": null,
+     "keydown": null,
+     "keyCount": 0,
+     "input": {
+      "inputType": "insertText"
+     },
+     "wheel": null,
+     "timings": {
+      "pointerMoves": 0,
+      "pressToReleaseMs": null,
+      "keyDownToUpMs": null,
+      "meanKeyGapMs": null,
+      "firstToLastMs": 4
+     }
+    },
+    "type_ref": {
+     "error": null,
+     "sequence": [
+      "pointerover",
+      "pointerenter",
+      "pointermove+",
+      "mouseout",
+      "mouseleave",
+      "mouseover",
+      "mouseenter",
+      "mousemove+",
+      "pointerdown",
+      "mousedown",
+      "blur",
+      "focusout",
+      "focus",
+      "focusin",
+      "pointerup",
+      "pointerout",
+      "pointerleave",
+      "mouseup",
+      "click",
+      "keydown",
+      "keypress",
+      "beforeinput",
+      "input",
+      "selectionchange",
+      "keyup",
+      "keydown",
+      "keypress",
+      "beforeinput",
+      "input",
+      "selectionchange",
+      "keyup",
+      "keydown",
+      "keypress",
+      "beforeinput",
+      "input",
+      "selectionchange",
+      "keyup",
+      "keydown",
+      "keypress",
+      "beforeinput",
+      "input",
+      "selectionchange",
+      "keyup",
+      "keydown",
+      "keypress",
+      "beforeinput",
+      "input",
+      "selectionchange",
+      "keyup"
+     ],
+     "total": 57,
+     "allTrusted": true,
+     "untrusted": [],
+     "pointerdown": {
+      "button": 0,
+      "buttons": 1,
+      "pressure": 0.5,
+      "tangentialPressure": 0,
+      "tiltX": 0,
+      "tiltY": 0,
+      "twist": 0,
+      "width": 1,
+      "height": 1,
+      "pointerType": "",
+      "isPrimary": true
+     },
+     "pointermove": {
+      "pressure": 0,
+      "buttons": 0,
+      "width": 1,
+      "height": 1,
+      "pointerType": "",
+      "coalesced": 1,
+      "predicted": 0
+     },
+     "mousedown": {
+      "button": 0,
+      "buttons": 1,
+      "detail": 1
+     },
+     "click": {
+      "button": 0,
+      "buttons": 0,
+      "detail": 1,
+      "pointerType": "",
+      "pressure": 0
+     },
+     "keydown": {
+      "key": "A",
+      "code": "KeyA",
+      "keyCode": 65,
+      "location": 0,
+      "repeat": false,
+      "shiftKey": false
+     },
+     "keyCount": 5,
+     "input": {
+      "inputType": "insertText"
+     },
+     "wheel": null,
+     "timings": {
+      "pointerMoves": 1,
+      "pressToReleaseMs": 1,
+      "keyDownToUpMs": 44,
+      "meanKeyGapMs": 62.5,
+      "firstToLastMs": 281
+     }
+    },
+    "press_key": {
+     "error": null,
+     "sequence": [
+      "keydown",
+      "change",
+      "blur",
+      "focusout",
+      "focus",
+      "focusin",
+      "keyup"
+     ],
+     "total": 7,
+     "allTrusted": true,
+     "untrusted": [],
+     "pointerdown": null,
+     "pointermove": null,
+     "mousedown": null,
+     "click": null,
+     "keydown": {
+      "key": "Tab",
+      "code": "Tab",
+      "keyCode": 9,
+      "location": 0,
+      "repeat": false,
+      "shiftKey": false
+     },
+     "keyCount": 1,
+     "input": null,
+     "wheel": null,
+     "timings": {
+      "pointerMoves": 0,
+      "pressToReleaseMs": null,
+      "keyDownToUpMs": 26,
+      "meanKeyGapMs": null,
+      "firstToLastMs": 26
+     }
+    },
+    "hover": {
+     "error": null,
+     "sequence": [
+      "pointerover",
+      "pointerenter",
+      "pointermove+",
+      "mouseout",
+      "mouseleave",
+      "mouseover",
+      "mouseenter",
+      "mousemove+"
+     ],
+     "total": 11,
+     "allTrusted": true,
+     "untrusted": [],
+     "pointerdown": null,
+     "pointermove": {
+      "pressure": 0,
+      "buttons": 0,
+      "width": 1,
+      "height": 1,
+      "pointerType": "",
+      "coalesced": 1,
+      "predicted": 0
+     },
+     "mousedown": null,
+     "click": null,
+     "keydown": null,
+     "keyCount": 0,
+     "input": null,
+     "wheel": null,
+     "timings": {
+      "pointerMoves": 1,
+      "pressToReleaseMs": null,
+      "keyDownToUpMs": null,
+      "meanKeyGapMs": null,
+      "firstToLastMs": 0
+     }
+    },
+    "scroll": {
+     "error": null,
+     "sequence": [
+      "pointerout",
+      "pointerleave",
+      "pointerover",
+      "pointerenter",
+      "pointermove+",
+      "mouseout",
+      "mouseleave",
+      "mouseover",
+      "mouseenter",
+      "mousemove+",
+      "wheel",
+      "scroll"
+     ],
+     "total": 12,
+     "allTrusted": true,
+     "untrusted": [],
+     "pointerdown": null,
+     "pointermove": {
+      "pressure": 0,
+      "buttons": 0,
+      "width": 1,
+      "height": 1,
+      "pointerType": "",
+      "coalesced": 1,
+      "predicted": 0
+     },
+     "mousedown": null,
+     "click": null,
+     "keydown": null,
+     "keyCount": 0,
+     "input": null,
+     "wheel": {
+      "deltaX": 0,
+      "deltaY": 300,
+      "deltaMode": 0
+     },
+     "timings": {
+      "pointerMoves": 1,
+      "pressToReleaseMs": null,
+      "keyDownToUpMs": null,
+      "meanKeyGapMs": null,
+      "firstToLastMs": 184
+     }
+    },
+    "select_option": {
+     "error": null,
+     "sequence": [
+      "mousedown",
+      "mouseup",
+      "input",
+      "change",
+      "click"
+     ],
+     "total": 5,
+     "allTrusted": true,
+     "untrusted": [],
+     "pointerdown": null,
+     "pointermove": null,
+     "mousedown": {
+      "button": 0,
+      "buttons": 0,
+      "detail": 0
+     },
+     "click": {
+      "button": 0,
+      "buttons": 0,
+      "detail": 0,
+      "pointerType": "",
+      "pressure": 0
+     },
+     "keydown": null,
+     "keyCount": 0,
+     "input": {},
+     "wheel": null,
+     "timings": {
+      "pointerMoves": 0,
+      "pressToReleaseMs": 2,
+      "keyDownToUpMs": null,
+      "meanKeyGapMs": null,
+      "firstToLastMs": 2
+     }
+    },
+    "pageState": {
+     "txt": "Hello, World 1",
+     "txt2": "Abc 2",
+     "sel": "2",
+     "scrollY": 300,
+     "visibility": "visible",
+     "hasFocus": true
+    }
+   }
+  },
+  "webrtc": {
+   "status": "ok",
+   "data": {
+    "blocked": true,
+    "stunRequestsSeen": 0
+   }
+  },
+  "tls": {
+   "status": "ok",
+   "data": {
+    "navigateError": null,
+    "negotiatedAlpn": "h2",
+    "connections": 1,
+    "ja4PerConnection": [
+     "t13d1617h2_86a278354501_3cbfd9057e0d"
+    ],
+    "ja4": "t13d1617h2_86a278354501_3cbfd9057e0d",
+    "ja4_r": "t13d1617h2_002f,0035,009c,009d,1301,1302,1303,c00a,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0005,000a,000b,000d,0012,0017,001b,001c,0022,0023,002b,002d,0033,fe0d,ff01_0403,0503,0603,0804,0805,0806,0401,0501,0601,0203,0201",
+    "legacyVersion": "0303",
+    "sessionIdLength": 32,
+    "sni": "localhost",
+    "alpn": [
+     "h2",
+     "http/1.1"
+    ],
+    "ciphers": [
+     "1301",
+     "1303",
+     "1302",
+     "c02b",
+     "c02f",
+     "cca9",
+     "cca8",
+     "c02c",
+     "c030",
+     "c00a",
+     "c013",
+     "c014",
+     "009c",
+     "009d",
+     "002f",
+     "0035"
+    ],
+    "extensionsSorted": [
+     "0000",
+     "0005",
+     "000a",
+     "000b",
+     "000d",
+     "0010",
+     "0012",
+     "0017",
+     "001b",
+     "001c",
+     "0022",
+     "0023",
+     "002b",
+     "002d",
+     "0033",
+     "fe0d",
+     "ff01"
+    ],
+    "extensionsWire": [
+     "0000",
+     "0017",
+     "ff01",
+     "000a",
+     "000b",
+     "0023",
+     "0010",
+     "0005",
+     "0022",
+     "0012",
+     "0033",
+     "002b",
+     "000d",
+     "002d",
+     "001c",
+     "001b",
+     "fe0d"
+    ],
+    "grease": false,
+    "supportedVersions": [
+     "0304",
+     "0303"
+    ],
+    "signatureAlgorithms": [
+     "0403",
+     "0503",
+     "0603",
+     "0804",
+     "0805",
+     "0806",
+     "0401",
+     "0501",
+     "0601",
+     "0203",
+     "0201"
+    ],
+    "supportedGroups": [
+     "11ec",
+     "001d",
+     "0017",
+     "0018",
+     "0019",
+     "0100",
+     "0101"
+    ],
+    "keyShareGroups": [
+     "11ec",
+     "001d",
+     "0017"
+    ],
+    "pskKeyExchangeModes": [
+     1
+    ],
+    "compressCertificate": [
+     "0001",
+     "0002",
+     "0003"
+    ],
+    "ech": true,
+    "resumed": false
+   }
+  },
+  "h2": {
+   "status": "ok",
+   "data": {
+    "preface": true,
+    "settings": [
+     [
+      1,
+      65536
+     ],
+     [
+      2,
+      0
+     ],
+     [
+      4,
+      131072
+     ],
+     [
+      5,
+      16384
+     ]
+    ],
+    "windowUpdate": 12517377,
+    "priorityFrames": [],
+    "frameOrder": [
+     "SETTINGS",
+     "WINDOW_UPDATE",
+     "HEADERS",
+     "WINDOW_UPDATE",
+     "SETTINGS_ACK",
+     "HEADERS",
+     "WINDOW_UPDATE"
+    ],
+    "firstHeaders": {
+     "streamId": 3,
+     "endStream": true,
+     "priority": {
+      "dependsOn": 0,
+      "exclusive": false,
+      "weight": 42
+     },
+     "pseudoOrder": [
+      ":method",
+      ":path",
+      ":authority",
+      ":scheme"
+     ]
+    },
+    "akamai": "1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s",
+    "headerOrder": [
+     ":method",
+     ":path",
+     ":authority",
+     ":scheme",
+     "user-agent",
+     "accept",
+     "accept-language",
+     "accept-encoding",
+     "upgrade-insecure-requests",
+     "sec-fetch-dest",
+     "sec-fetch-mode",
+     "sec-fetch-site",
+     "sec-fetch-user",
+     "priority",
+     "te"
+    ],
+    "headerValues": {
+     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+     "accept-language": "en-IE,en;q=0.9",
+     "accept-encoding": "gzip, deflate, br, zstd",
+     "upgrade-insecure-requests": "1",
+     "sec-fetch-dest": "document",
+     "sec-fetch-mode": "navigate",
+     "sec-fetch-site": "none",
+     "sec-fetch-user": "?1",
+     "priority": "u=0, i",
+     "te": "trailers"
+    }
+   }
+  },
+  "rebrowser": {
+   "status": "ok",
+   "data": {
+    "passive": {
+     "red": [
+      "ipcFloodingProtection"
+     ],
+     "yellow": [
+      "popupBlocking",
+      "viewport"
+     ],
+     "neutral": [
+      "documentInterception",
+      "dummyFn",
+      "exposeFunctionLeak",
+      "mainWorldExecution",
+      "sourceUrlLeak",
+      "storagePartitioning",
+      "useragent"
+     ],
+     "green": [
+      "bypassCsp",
+      "cdpBindingGlobals",
+      "headless",
+      "mobileEmulation",
+      "nativeTampering",
+      "navigatorWebdriver",
+      "platformMismatch",
+      "pwInitScripts",
+      "runtimeEnableLeak",
+      "workerConsistency"
+     ],
+     "notes": {
+      "viewport": "Viewport has default Playwright values. Use viewport: null in options.",
+      "popupBlocking": "A page script opened a popup without a click. Either popups are allowed for this site in the browser settings, or Chrome runs with --disable-popup-blocking (a Puppeteer and Playwright default). Use rebrowser-patches to fix it.",
+      "ipcFloodingProtection": "All 300 rapid history.replaceState() calls went through. Chrome ignores them after 200 within 10 seconds, unless it runs with --disable-ipc-flooding-protection (a Puppeteer and Playwright default). Use rebrowser-patches to fix it."
+     }
+    },
+    "afterAgentCalls": {
+     "red": [
+      "ipcFloodingProtection"
+     ],
+     "yellow": [
+      "popupBlocking",
+      "viewport"
+     ],
+     "neutral": [
+      "documentInterception",
+      "dummyFn",
+      "exposeFunctionLeak",
+      "mainWorldExecution",
+      "sourceUrlLeak",
+      "storagePartitioning",
+      "useragent"
+     ],
+     "green": [
+      "bypassCsp",
+      "cdpBindingGlobals",
+      "headless",
+      "mobileEmulation",
+      "nativeTampering",
+      "navigatorWebdriver",
+      "platformMismatch",
+      "pwInitScripts",
+      "runtimeEnableLeak",
+      "workerConsistency"
+     ],
+     "notes": {
+      "viewport": "Viewport has default Playwright values. Use viewport: null in options.",
+      "popupBlocking": "A page script opened a popup without a click. Either popups are allowed for this site in the browser settings, or Chrome runs with --disable-popup-blocking (a Puppeteer and Playwright default). Use rebrowser-patches to fix it.",
+      "ipcFloodingProtection": "All 300 rapid history.replaceState() calls went through. Chrome ignores them after 200 within 10 seconds, unless it runs with --disable-ipc-flooding-protection (a Puppeteer and Playwright default). Use rebrowser-patches to fix it."
+     }
+    },
+    "evaluateReachesPageGlobals": false
+   }
+  },
+  "creepjs": {
+   "status": "ok",
+   "data": {
+    "fingerprintId": "FP ID: 1360d875f112cc05b61b15de881a309e216a97bf216d3546c88858ea5bd8a01e",
+    "headless": {
+     "chromium": false,
+     "likeHeadlessRating": 6,
+     "headlessRating": 0,
+     "stealthRating": 0,
+     "platformEstimate": [
+      null,
+      null
+     ],
+     "systemFonts": "Segoe UI:Windows",
+     "likeHeadless": {
+      "noChrome": false,
+      "hasPermissionsBug": false,
+      "noPlugins": false,
+      "noMimeTypes": false,
+      "notificationIsDenied": false,
+      "hasKnownBgColor": false,
+      "prefersLightColor": true,
+      "uaDataIsBlank": false,
+      "pdfIsDisabled": false,
+      "noTaskbar": false,
+      "hasVvpScreenRes": false,
+      "hasSwiftShader": false,
+      "noWebShare": false,
+      "noContentIndex": false,
+      "noContactsManager": false,
+      "noDownlinkMax": false
+     },
+     "headless": {
+      "webDriverIsOn": false,
+      "hasHeadlessUA": false,
+      "hasHeadlessWorkerUA": false
+     },
+     "stealth": {
+      "hasIframeProxy": false,
+      "hasHighChromeIndex": false,
+      "hasBadChromeRuntime": false,
+      "hasToStringProxy": false
+     }
+    },
+    "lies": {
+     "total": 0,
+     "sources": [],
+     "detail": {}
+    },
+    "trash": {
+     "count": 0,
+     "items": []
+    },
+    "errors": {
+     "count": 0,
+     "items": []
+    },
+    "worker": {
+     "lied": 0,
+     "locale": "en",
+     "timezoneLocation": "Europe/Dublin",
+     "hardwareConcurrency": 8,
+     "language": "en-IE",
+     "languages": "en-IE,en",
+     "platform": "Win32",
+     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+     "system": "Windows",
+     "device": "Windows 10 (64-bit)",
+     "gpu": {}
+    },
+    "navigator": {
+     "platform": "Win32",
+     "system": "Windows",
+     "device": "Windows 10 (64-bit)",
+     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+     "hardwareConcurrency": 8,
+     "language": "en-IE, en (en-IE)",
+     "maxTouchPoints": 0,
+     "vendor": "",
+     "mimeTypes": [
+      "application/pdf",
+      "text/pdf"
+     ],
+     "lied": false
+    },
+    "screen": {
+     "width": 1920,
+     "height": 1080,
+     "availWidth": 1920,
+     "availHeight": 1040,
+     "colorDepth": 24,
+     "pixelDepth": 24,
+     "touch": false,
+     "lied": false,
+     "$hash": "e21c7846b9f354a5d7d7db6ef1caccf04837a44ffa0495758645206183dd20ac"
+    },
+    "cssMedia": {
+     "prefers-reduced-motion": "no-preference",
+     "prefers-color-scheme": "light",
+     "monochrome": "non-monochrome",
+     "forced-colors": "none",
+     "any-hover": "hover",
+     "hover": "hover",
+     "any-pointer": "fine",
+     "pointer": "fine",
+     "device-aspect-ratio": "16/9",
+     "device-screen": "1920 x 1080",
+     "display-mode": "browser",
+     "color-gamut": "srgb",
+     "orientation": "landscape"
+    },
+    "timezone": {
+     "zone": "Greenwich Mean Time",
+     "location": "Europe, Dublin",
+     "locationMeasured": "Europe, Dublin",
+     "offset": 0,
+     "lied": false
+    },
+    "intl": {
+     "locale": "en",
+     "lied": false
+    },
+    "voices": null,
+    "fonts": {
+     "fontFaceLoadFonts": [
+      "Bahnschrift",
+      "Cambria Math",
+      "Gadugi",
+      "HoloLens MDL2 Assets",
+      "Ink Free",
+      "Javanese Text",
+      "Leelawadee UI",
+      "Lucida Console",
+      "Myanmar Text",
+      "Nirmala UI",
+      "Segoe Fluent Icons",
+      "Segoe MDL2 Assets",
+      "Segoe UI Emoji"
+     ],
+     "platformVersion": "Windows 11",
+     "apps": [],
+     "emojiSet": [
+      "😀",
+      "🤵‍♂️",
+      "⚧",
+      "⁉",
+      "🏳️‍⚧️",
+      "🧑‍🤝‍🧑",
+      "⏱",
+      "☂",
+      "♟",
+      "👩‍❤️‍💋‍👨",
+      "👨‍👩‍👧‍👦",
+      "👨‍👩‍👦",
+      "©",
+      "™",
+      "⛓",
+      "♀",
+      "〰",
+      "⚜",
+      "◼",
+      "▪",
+      "✌",
+      "❄"
+     ],
+     "pixelSizeSystemSum": 0.11029601,
+     "lied": false,
+     "$hash": "f801dee641f0798d3cad9c6417f175fe3809eaec9ba4a146285d250a7818228d"
+    },
+    "canvas": {
+     "mods": {
+      "pixelImage": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAoCAYAAACM/rhtAAAAR0lEQVRYR+3QMQ0AMAzAsJU/6A6Enx4xgiizu/sOmwJRB1UHVQdVB1UHVQdVB1UHVQdVB1UHVQdVB1UHVQdVB1UHVQfV+YMfyAWfiSN598oAAAAQZGVCR0I4MDEwNzUwRkM1MEJDNzF6cjPAAAAAAElFTkSuQmCC"
+     },
+     "textMetricsSystemSum": 0.0437248333234787,
+     "lied": false
+    },
+    "webgl": {
+     "gpu": null,
+     "lied": null
+    },
+    "audio": {
+     "totalUniqueSamples": 4735,
+     "compressorGainReduction": -31.502185821533203,
+     "floatFrequencyDataSum": 167702.33290481567,
+     "floatTimeDomainDataSum": 148.42039495373683,
+     "sampleSum": 35.7389027702302,
+     "noise": 0,
+     "lied": false
+    },
+    "clientRects": {
+     "domrectSystemSum": 0.11040649902343751,
+     "lied": false
+    },
+    "svg": {
+     "svgrectSystemSum": 0.052416000289917,
+     "lied": false
+    },
+    "versions": {
+     "version": "112",
+     "cssVersion": "112",
+     "windowVersion": "112",
+     "jsVersion": "109-112"
+    },
+    "resistance": {
+     "engine": "Gecko",
+     "extensionHashPattern": {},
+     "$hash": "bfd6ca31bb78a50339ec03b06cd4dbe6c9456bb3cf070d81fc2cd167edb9b1bc"
+    },
+    "hashes": {
+     "workerScope": "4832798e8e95029ee1795883786c33c1de19814d98538bbbcc69d979d958be3e",
+     "navigator": "2eea5d3c73560765affe690b1d72d9b427dd12c35239bb7caf79340f8ad36784",
+     "windowFeatures": "066db60486896ee3acf36a731ca28d056eb215ed8298e7b55c36c1f58be594f1",
+     "headless": "77d71583e8c4ee9b3a4f4dc7ddb53b827bf6c22a36ab6d6b7dfcaec0ce187085",
+     "htmlElementVersion": "514cd2419f3cd86b8dcd508254046e5aebdb25ed395e8ceda5d149742b8e2ffb",
+     "cssMedia": "202401c6c97887f7cc3b444c2b24b529a21dd8be1db4a1c41d28f43bc6300bc8",
+     "css": "108e7f7635bade858b1026464ad4fe162d37aea0cc815616ac44803170181a97",
+     "screen": "e21c7846b9f354a5d7d7db6ef1caccf04837a44ffa0495758645206183dd20ac",
+     "media": "5cee837b6a8c8ce55cd43c70b0cf2ddbe4ad3869a28bb791ea33f5b34d3d7aa8",
+     "canvas2d": "7c95d21459cf4d637ee49d22995b314aaa22bb8751fe31b1e59f12df2a929883",
+     "maths": "1747db31bad6b2749bd71b3aba945993478a86a376bb75d7722dd9be755cf3df",
+     "consoleErrors": "5311d4b7dea48bb3b239b398e1f206b242bfab7b8e51dbf4743919266e48a2d2",
+     "timezone": "ce0a1dc2f3ad02ce6b6bd541f5b1af725e372be59a0b61d73c7736e103628207",
+     "clientRects": "a666b4276ff50451f6cccf022c8cbdfea62b60315ded3db494aaab771b47d411",
+     "offlineAudioContext": "e274fa28793a32b7a826bb01fb7662c264c7e42a5f1df94f69d9b0032ee03e4b",
+     "fonts": "f801dee641f0798d3cad9c6417f175fe3809eaec9ba4a146285d250a7818228d",
+     "lies": "f4c4e0371fde124bbb71790a9d668d18af1a5236965caed7959ee1aaa6bda301",
+     "trash": "8bb27644be50b5a7be02161ec83777cd9b06c8b3d949ae6a9bad26431ab13018",
+     "capturedErrors": "8fe32e407a1038ee38753b70e5374b3a46d6ae9d5f16cd5b73c53abaca8f5ed0",
+     "svg": "c03e98bc74b93109f4ee519ef1467a84018d62d1aa48148255db9380b9d2bd40",
+     "resistance": "bfd6ca31bb78a50339ec03b06cd4dbe6c9456bb3cf070d81fc2cd167edb9b1bc",
+     "intl": "e61c3ca1003d0decaf066a5aab4ad956d1ef6b89bebec03b7733c512a33aa2b1",
+     "features": "968d2c9fc3330ad2811c2fdd01510654a9f25dda15c87a4529df3432ee5b3a7d"
+    }
+   }
+  }
+ }
+}
