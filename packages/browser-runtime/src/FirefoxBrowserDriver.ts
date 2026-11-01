@@ -249,7 +249,9 @@ export interface FirefoxBrowserDriverOptions {
   browserDataDir: (profile: Profile) => string;
   /** T20 seam: map the profile's fingerprint to a Camoufox `launchOptions`
    *  config. When absent, Camoufox generates its own coherent fingerprint. */
-  buildFingerprintConfig?: (profile: Profile) => Record<string, unknown>;
+  buildFingerprintConfig?: (
+    profile: Profile,
+  ) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /** Merged last into Playwright's launch options, over what camoufox produced.
    *  The server sets `handleSIG*: false` here: Playwright's own SIGINT handler
    *  calls process.exit(130), cutting a graceful shutdown short. */
@@ -290,6 +292,12 @@ export function persistentContextOptions(
 ): PersistentContextOptions {
   return {
     ...camoufox,
+    // The page gets the real window, not Playwright's fixed 1280x720 viewport:
+    // Camoufox sizes the window to the persona's window.inner* (see
+    // camoufoxConfigFor), and an emulated viewport would contradict it — CSS
+    // media queries and clientWidth would read 1280x720 while innerWidth didn't.
+    // camoufox-js's own launch does the same.
+    viewport: null,
     // Hand the credential-free bridge URL straight to Playwright, overriding
     // whatever camoufox produced. Keeps the socks5 scheme intact end-to-end.
     ...(ours.proxy ? { proxy: ours.proxy } : {}),
@@ -415,7 +423,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   private readonly launching = new Map<ProfileId, Promise<LaunchedProfile>>();
   private readonly profileManager: ProfileManager;
   private readonly browserDataDir: (profile: Profile) => string;
-  private readonly buildFingerprintConfig?: (profile: Profile) => Record<string, unknown>;
+  private readonly buildFingerprintConfig: FirefoxBrowserDriverOptions["buildFingerprintConfig"];
   private readonly launchExtras: FirefoxBrowserDriverOptions["launchExtras"];
   private readonly extraPrefs: FirefoxBrowserDriverOptions["extraPrefs"];
   private readonly refBase: number | undefined;
@@ -630,7 +638,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
         exclude_addons: ["UBO"],
         ...(proxy ? { block_webrtc: true } : {}),
         ...(this.buildFingerprintConfig
-          ? this.buildFingerprintConfig({ ...profile, fingerprint })
+          ? await this.buildFingerprintConfig({ ...profile, fingerprint })
           : {}),
       };
 

@@ -21,6 +21,7 @@ export {
   reducedUserAgent,
   deviceMemoryApiValue,
   migrateFingerprint,
+  availScreenFor,
   type DeviceCatalogEntry,
   type LocaleCatalogEntry,
   type GenerateFingerprintOptions,

@@ -1975,6 +1975,12 @@ function buildAcceptLanguage(languages: string[]): string {
   return parts.join(",");
 }
 
+/** The persona's available screen area: its own, or the generator's default
+ *  for its platform when the profile predates `availScreen`. */
+export function availScreenFor(fp: FingerprintConfig): { width: number; height: number } {
+  return fp.availScreen ?? defaultAvail(fp.screen, fp.platform);
+}
+
 function defaultAvail(
   screen: { width: number; height: number },
   platform: "MacIntel" | "Win32" | "Linux x86_64",

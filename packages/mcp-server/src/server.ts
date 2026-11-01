@@ -735,9 +735,10 @@ async function dispatch(
         throw new Error("probe_fingerprint: evaluation failed to collect live surfaces");
       }
       const live = res.result.value;
-      // Camoufox generates its own Firefox UA / hardware / WebGL for the persona's
-      // OS and pins only screen + timezone, so comparing the rest of the stored
-      // Chrome-shaped fingerprint would report drift that isn't a defect.
+      // Camoufox reports a Firefox UA, languages and Firefox WebGL strings for the
+      // persona's OS and GPU vendor, and pins screen, timezone and thread count;
+      // comparing the rest of the stored Chrome-shaped fingerprint would report
+      // drift that isn't a defect.
       const pinsChromeSurfaces = !/\bFirefox\//.test(live.userAgent);
       // The stored fingerprint keeps the full-version UA and the physical RAM;
       // the browser reports Chrome's reduced UA and the quantized Device Memory
@@ -751,9 +752,8 @@ async function dispatch(
       // Chromium reports ICU's legacy spelling for some zones (the stored
       // Asia/Kolkata comes back as Asia/Calcutta); an alias is not drift.
       if (!sameTimeZone(live.timezone, expected.timezone)) drift.push("timezone");
-      if (pinsChromeSurfaces && live.hardwareConcurrency !== expected.hardwareConcurrency) {
-        drift.push("hardwareConcurrency");
-      }
+      // Both engines pin the persona's thread count.
+      if (live.hardwareConcurrency !== expected.hardwareConcurrency) drift.push("hardwareConcurrency");
       if (
         pinsChromeSurfaces &&
         live.deviceMemory !== null &&
@@ -796,7 +796,7 @@ async function dispatch(
         notes: [
           "CloakBrowser: pinned fields should show drift=[]. canvasHash is informational (seed-driven noise).",
           "expected.userAgent / expected.deviceMemory are what the browser reports for the stored fingerprint: Chrome's reduced UA (Chrome/<major>.0.0.0) and the Device Memory API value (power of two, max 8). profile.fingerprint keeps the full version and the physical GB.",
-          "Camoufox: only screen and timezone are compared — it generates its own Firefox UA/hardware/WebGL for the persona's OS.",
+          "Camoufox: only screen, timezone and hardwareConcurrency are compared — it reports a Firefox UA and Firefox WebGL strings for the persona's OS and GPU vendor, not the stored Chrome ones.",
           "timezone is compared as a zone: Chromium reports ICU's legacy spelling for some (Asia/Calcutta for Asia/Kolkata), which is the same zone.",
         ],
       };
@@ -894,7 +894,7 @@ const ENGINE_JSON_SCHEMA = {
   type: "string",
   enum: [...BROWSER_ENGINES],
   description:
-    "Browser engine. cloakbrowser = patched Chromium. camoufox = Firefox-based, a non-Chrome TLS/JS fingerprint. Refs and the page tools work on both; camoufox has no CDP, so only cdp_send and cdp_send_no_safety refuse on it (UNSUPPORTED_ON_ENGINE), and of the fingerprint only device OS, locale, screen and timezone apply.",
+    "Browser engine. cloakbrowser = patched Chromium. camoufox = Firefox-based, a non-Chrome TLS/JS fingerprint. Refs and the page tools work on both; camoufox has no CDP, so only cdp_send and cdp_send_no_safety refuse on it (UNSUPPORTED_ON_ENGINE), and of the fingerprint it applies device OS, locale, screen, timezone, thread count and GPU vendor, and draws its other values from the profile's seed, the same at every launch.",
 } as const;
 
 /** Shared tail of the input tool descriptions (click, type, click_ref, type_ref). */
@@ -1162,7 +1162,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "probe_fingerprint",
     description:
-      "Read back live fingerprint surfaces from a running profile (UA, platform, languages, hwc, deviceMemory, screen, WebGL, timezone, optional canvas hash) and compare to the stored profile.fingerprint. Returns { ok, live, expected, drift[] }. CloakBrowser: pinned fields should have empty drift; UA is compared in Chrome's reduced form and deviceMemory as the Device Memory API value (power of two, max 8). Timezones are compared as zones, so an ICU alias (Asia/Calcutta for Asia/Kolkata) is not drift. Camoufox: only screen and timezone are compared. Profile must be launched first.",
+      "Read back live fingerprint surfaces from a running profile (UA, platform, languages, hwc, deviceMemory, screen, WebGL, timezone, optional canvas hash) and compare to the stored profile.fingerprint. Returns { ok, live, expected, drift[] }. CloakBrowser: pinned fields should have empty drift; UA is compared in Chrome's reduced form and deviceMemory as the Device Memory API value (power of two, max 8). Timezones are compared as zones, so an ICU alias (Asia/Calcutta for Asia/Kolkata) is not drift. Camoufox: only screen, timezone and hardwareConcurrency are compared. Profile must be launched first.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],

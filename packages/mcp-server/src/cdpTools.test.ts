@@ -883,14 +883,15 @@ test("probe_fingerprint: an ICU alias of the stored timezone is not drift", asyn
   assert.deepEqual(res.parsed.drift, ["timezone"]);
 });
 
-test("probe_fingerprint: Camoufox compares only screen and timezone", async () => {
+test("probe_fingerprint: Camoufox compares only screen, timezone and hardwareConcurrency", async () => {
   const fp = storedFingerprint();
-  // Camoufox generates its own Firefox UA / hardware / WebGL for the persona's OS.
+  // Camoufox reports a Firefox UA and Firefox WebGL strings; it pins the persona's
+  // screen, timezone and thread count.
   const live: LiveProbe = {
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
     platform: fp.platform === "Win32" ? "MacIntel" : "Win32",
     languages: ["xx-XX"],
-    hardwareConcurrency: fp.hardwareConcurrency + 2,
+    hardwareConcurrency: fp.hardwareConcurrency,
     deviceMemory: null,
     screen: { ...fp.screen },
     webgl: { vendor: "Mozilla", renderer: "Mozilla" },
@@ -903,7 +904,8 @@ test("probe_fingerprint: Camoufox compares only screen and timezone", async () =
   const moved = await probe(fp, {
     ...live,
     timezone: "Antarctica/Troll",
+    hardwareConcurrency: fp.hardwareConcurrency + 2,
     screen: { width: fp.screen.width + 1, height: fp.screen.height },
   });
-  assert.deepEqual(moved.parsed.drift, ["timezone", "screen"]);
+  assert.deepEqual(moved.parsed.drift, ["timezone", "hardwareConcurrency", "screen"]);
 });
