@@ -10,6 +10,7 @@ import { MultizenError, type ProxyConfig } from "@multizen/types";
 import { ProfileManager } from "@multizen/profile-manager";
 
 import { LOGGED_ARGS } from "./ActivityLog.js";
+import type { ToolErrorFields } from "./errorMapping.js";
 import {
   createPrincipal,
   FULL_PRINCIPAL,
@@ -502,11 +503,11 @@ test("list_profiles names no host path, to anyone: a real manager's listing has 
 });
 
 test("an unexpected error names no host path to a token that isn't the owner's", async () => {
-  const seen = async (principal: Principal, message: string): Promise<string> => {
+  const failure = async (principal: Principal, thrown: Error): Promise<ToolErrorFields> => {
     const driver = new MockBrowserDriver();
     await driver.launch("p");
     driver.navigate = async () => {
-      throw new Error(message);
+      throw thrown;
     };
     const { server } = createMultizenMcpServer({
       profileManager: { get: () => ({ id: "p" }), list: () => [] } as unknown as ProfileManager,
@@ -519,9 +520,10 @@ test("an unexpected error names no host path to a token that isn't the owner's",
     await client.connect(clientTransport);
     const res = await client.callTool({ name: "navigate", arguments: { profile_id: "p", url: "http://x.test/" } });
     await client.close();
-    const { error } = JSON.parse((res.content as Array<{ text: string }>)[0]!.text) as {
-      error: { code: string; message: string };
-    };
+    return (JSON.parse((res.content as Array<{ text: string }>)[0]!.text) as { error: ToolErrorFields }).error;
+  };
+  const seen = async (principal: Principal, message: string): Promise<string> => {
+    const error = await failure(principal, new Error(message));
     assert.equal(error.code, "INTERNAL_ERROR");
     return error.message;
   };
@@ -530,6 +532,8 @@ test("an unexpected error names no host path to a token that isn't the owner's",
     [String.raw`EPERM: operation not permitted, rename 'C:\Users\Name Here\a' -> 'C:\Users\b'`, "EPERM: operation not permitted, rename '<path>' -> '<path>'"],
     ["failed at /data/profiles/p/db with code 5", "failed at <path> with code 5"],
     [String.raw`failed at C:\mzs\profiles\p`, "failed at <path>"],
+    [String.raw`failed at C:\Program Files\MultiZen\chrome.exe`, "failed at <path>"],
+    [String.raw`spawn \\host\my share\x.exe failed`, "spawn <path>"],
     ["fetch http://example.test/a/b failed", "fetch http://example.test/a/b failed"],
     ["1/2 of it, and either/or", "1/2 of it, and either/or"],
   ] as const) {
@@ -537,6 +541,22 @@ test("an unexpected error names no host path to a token that isn't the owner's",
   }
   const untouched = "ENOENT: no such file or directory, open '/data/profiles/p/x.db'";
   assert.equal(await seen(FULL_PRINCIPAL, untouched), untouched);
+
+  // A typed error is as likely to name one, in its message or its details.
+  const typed = new MultizenError("LAUNCH_FAILED", String.raw`Can't start C:\Program Files\MultiZen\chrome.exe`, {
+    details: { retry_after_ms: 5, last_error: "open '/data/profiles/p/x.db' failed" },
+  });
+  const limitedSees = await failure(limited(["read", "act"]), typed);
+  assert.equal(limitedSees.code, "LAUNCH_FAILED");
+  assert.equal(limitedSees.message, "Can't start <path>");
+  assert.deepEqual(limitedSees.details, { retry_after_ms: 5, last_error: "open '<path>' failed" });
+  const ownerSees = await failure(FULL_PRINCIPAL, typed);
+  assert.equal(ownerSees.message, typed.message);
+  assert.deepEqual(ownerSees.details, typed.details);
+
+  // What the caller wrote itself isn't this host's.
+  const own = new MultizenError("INVALID_INPUT", "Invalid selector: //div/a");
+  assert.equal((await failure(limited(["read", "act"]), own)).message, own.message);
 });
 
 test("delete_download is in act, takes a lease, and is marked destructive", () => {

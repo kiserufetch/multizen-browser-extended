@@ -330,7 +330,11 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     const calledOff = new Promise<never>((_, reject) => {
       callOff.addEventListener("abort", () => reject(launchCalledOff(profileId)), { once: true });
     });
-    await Promise.race([this.ensureEngine(engine), calledOff]);
+    await Promise.race([this.ensureEngine(engine), calledOff]).catch((e: unknown) => {
+      // No browser started, and a retry won't help: an engine that can't be installed here
+      // (no pinned build for this platform) or an install that failed. Its words are the message.
+      throw typedLaunchError(e);
+    });
 
     await this.limiter.acquire(profileId, {
       timeoutMs: this.browserQueueTimeoutMs,

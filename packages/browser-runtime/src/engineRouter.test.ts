@@ -193,6 +193,27 @@ test("a launch failure gets one code, keeping each engine's message", async () =
   await assert.rejects(r.launch("p"), (e) => e === typed);
 });
 
+test("an engine that can't be installed is a launch failure with its reason, not an internal error", async () => {
+  const refusal = "This server has no pinned, verified CloakBrowser build for cloakbrowser-linux-arm64.tar.gz";
+  class NoPin extends FakeBootstrap {
+    override ensure(): Promise<ChromiumStatus> {
+      this.status = { kind: "error", message: refusal };
+      return Promise.reject(new Error(refusal));
+    }
+  }
+  for (const rule of ["reject", "wait"] as const) {
+    const driver = new FakeDriver();
+    const error = await router(new NoPin(false), driver, rule).launch("p").then(
+      () => assert.fail("expected a rejection"),
+      (e: unknown) => e as MultizenError,
+    );
+    assert.equal(code(error), "LAUNCH_FAILED");
+    assert.equal(error.message, refusal);
+    assert.equal(error.retryable, false);
+    assert.equal(driver.launches, 0);
+  }
+});
+
 test("a verb on a profile that isn't running is typed", () => {
   const r = router(new FakeBootstrap(true), new FakeDriver());
   assert.throws(

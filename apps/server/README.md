@@ -52,13 +52,13 @@ git clone https://github.com/kiserufetch/multizen-browser-extended
 cd multizen-browser-extended
 corepack yarn install
 corepack yarn workspace @multizen/server build
-node apps/server/bin/multizen-server.js serve --headless
+node apps/server/bin/multizen-server.cjs serve --headless
 ```
 
 The first start downloads CloakBrowser into the data directory (`engine status` lines in the log show the progress) and writes the owner token. It listens on `http://127.0.0.1:7777/mcp`. In another shell, make a token for your agent. It is printed once:
 
 ```sh
-node apps/server/bin/multizen-server.js token create --name agent
+node apps/server/bin/multizen-server.cjs token create --name agent
 ```
 
 That token can use profiles but not create them, and a new server has none. For an agent that creates its own, add `--tools read,act,profile-admin`. Then connect any MCP client with that token, as in the [root README](../../README.md#connect-an-agent-codex-cursor-claude-desktop):
@@ -77,7 +77,7 @@ That token can use profiles but not create them, and a new server has none. For 
 A client that can only spawn a stdio server runs a relay to it:
 
 ```sh
-node apps/server/bin/multizen-server.js stdio --connect http://127.0.0.1:7777/mcp --token-file <file holding that token>
+node apps/server/bin/multizen-server.cjs stdio --connect http://127.0.0.1:7777/mcp --token-file <file holding that token>
 ```
 
 **`owner-token` is not for agents.** It holds every group: `raw`, which [defeats the egress policy](#egress-policy), and `operator`, which ends handoffs. An agent gets `read` and `act` from `token create`, and no more unless you ask. The owner's token is in `owner-token` in the [data directory](#data-layout), for you.
@@ -124,7 +124,7 @@ Leave out the seccomp option and every CloakBrowser launch fails with `SANDBOX_U
 
 ## Commands
 
-Everything below is `multizen-server <command>`: from source that is `node apps/server/bin/multizen-server.js`, in the container `docker compose exec multizen node /app/dist/cli.js`. Exit codes: 0 for a clean stop, 1 for a failed start, 2 for bad flags. Logs are JSON lines on stdout, and on stderr for `stdio` and `token`, whose stdout is their result.
+Everything below is `multizen-server <command>`: from source that is `node apps/server/bin/multizen-server.cjs`, in the container `docker compose exec multizen node /app/dist/cli.js`. Exit codes: 0 for a clean stop, 1 for a failed start, 2 for bad flags. Logs are JSON lines on stdout, and on stderr for `stdio` and `token`, whose stdout is their result.
 
 ### `serve`
 
@@ -147,10 +147,10 @@ MCP over Streamable HTTP (`/mcp`) and legacy SSE (`/sse`), plus the panel (`/pan
 | `--allowed-hosts` | `MULTIZEN_ALLOWED_HOSTS` | | `Host` values to accept, comma-separated, each with an optional `:port`, besides the bind address and loopback. |
 | `--allowed-origins` | `MULTIZEN_ALLOWED_ORIGINS` | | `Origin` values to accept besides those of the allowed hosts. |
 | `--public-url` | `MULTIZEN_PUBLIC_URL` | | Where clients reach this server: an allowed host and origin, and the base of panel and download links. |
-| `--trust-proxy` | `MULTIZEN_TRUST_PROXY` | off | Failed logins count against `X-Forwarded-For`'s rightmost hop. |
+| `--trust-proxy` | `MULTIZEN_TRUST_PROXY` | off | Failed logins count against `X-Forwarded-For`'s rightmost hop, and sockets with no token aren't limited per address. See [Limits](#limits). |
 | `--session-idle-ttl-ms` | `MULTIZEN_SESSION_IDLE_TTL_MS` | `1800000` | An MCP session with no request and no call in flight for this long is closed. |
-| `--max-sessions` | `MULTIZEN_MAX_SESSIONS` | `64` | Past this a new session gets `SESSION_LIMIT`. Also sizes the connection limit: see [Limits](#limits). |
-| `--max-sessions-per-token` | `MULTIZEN_MAX_SESSIONS_PER_TOKEN` | `32` | One token's share of them. Past it, that token's own oldest idle session is closed for the new one. With none idle, `SESSION_LIMIT`. |
+| `--max-sessions` | `MULTIZEN_MAX_SESSIONS` | `64` | Past this a new session gets `SESSION_LIMIT`. Also sizes the socket limits: see [Limits](#limits). |
+| `--max-sessions-per-token` | `MULTIZEN_MAX_SESSIONS_PER_TOKEN` | `16` | One token's share of them. Past it, that token's own oldest idle session is closed for the new one. With none idle, `SESSION_LIMIT`. |
 | `--lease-on-session-close` | `MULTIZEN_LEASE_ON_SESSION_CLOSE` | `keep` | What a session's end does to its leases. `keep`: they run on until their TTL, for a client coming back with its `lease_id`. `release`: they go with it. |
 | `--egress-policy` | `MULTIZEN_EGRESS_POLICY` | `block-private` | `block-private` or `allow-all`. See [Egress policy](#egress-policy). |
 | `--egress-allow` | `MULTIZEN_EGRESS_ALLOW` | | Exceptions, comma-separated: an IP, a CIDR, a name or `*.suffix`, each with an optional `:port`. |
@@ -165,7 +165,7 @@ MCP over Streamable HTTP (`/mcp`) and legacy SSE (`/sse`), plus the panel (`/pan
 
 `MULTIZEN_DEBUG=1` is not a log level. It makes CloakBrowser's driver read `navigator`, `Intl` and `RTCPeerConnection` in each page's main world and log that, which a page could notice. It is for debugging, not for production.
 
-`UV_THREADPOOL_SIZE` is Node's, and matters here: see [Limits](#limits). `bin/multizen-server.js` and the image set it to 64.
+`UV_THREADPOOL_SIZE` is Node's, and matters here: see [Limits](#limits). `bin/multizen-server.cjs` and the image set it to 64.
 
 ### `stdio`
 
@@ -173,6 +173,7 @@ MCP over Streamable HTTP (`/mcp`) and legacy SSE (`/sse`), plus the panel (`/pan
 multizen-server stdio [--data-dir <dir>] [--default-engine ...] [--uploads-root <dir>]
                       [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
                       [--display-mode ...] [--headless] [--egress-policy ...] [--egress-allow ...]
+                      [--upload-inbox-quota-bytes <n>]
 multizen-server stdio --connect <url> [--token-file <path>] [--keepalive-ms <ms>]
 ```
 
@@ -326,7 +327,7 @@ location / {
 }
 ```
 
-`--trust-proxy` is only for a proxy of yours that sets that header: anyone reaching the port directly could otherwise fake their address and dodge the login limit. The live check here used a plain HTTP hop of the same shape, not nginx itself.
+`--trust-proxy` is only for a proxy of yours that sets that header: anyone reaching the port directly could otherwise fake their address and dodge the login limit, and hold more sockets from one address than anyone else may: [Limits](#limits). The live check here used a plain HTTP hop of the same shape, not nginx itself.
 
 ## Egress policy
 
@@ -450,18 +451,22 @@ Both directories stay out of `.mzar` archives, and are ignored in one on import.
 | Handoff | 15 minutes, `--handoff-ttl-ms` | `status: expired` |
 | Lease | 5 minutes by default, 1 hour at most | Lapses |
 | MCP session | 30 idle minutes, 64 at once | Closed, `SESSION_LIMIT` |
-| Sessions per token | 32, `--max-sessions-per-token` | That token's oldest idle one closes, or `SESSION_LIMIT` with none idle |
-| Connections | The larger of 256 and 4 × `--max-sessions` | Dropped at accept |
+| Sessions per token | 16, `--max-sessions-per-token` | That token's oldest idle one closes, or `SESSION_LIMIT` with none idle |
+| Sockets with no valid token, per address | The larger of 256 and 4 × `--max-sessions`; an IPv6 /64 is one address; off with `--trust-proxy` | That address's oldest such socket closes |
+| Sockets with no valid token, in all | 4 × that: 1024 | The oldest such socket closes |
+| Sockets in all | 16 × that: 4096 | Dropped at accept |
+| Sending the headers, or finishing a TLS handshake | 10 s | 408, and the socket closes |
 | Failed logins | 10 a minute per address | 429 with `Retry-After` |
 | Request body | 22 MiB | 413 `FILE_TOO_LARGE` |
-| All request bodies in flight | 128 MiB, about six of the largest | 503 `RATE_LIMITED`, with `Retry-After` and `details.retry_after_ms` |
+| All request bodies in flight | 128 MiB as received, about six of the largest. One token: a quarter, 32 MiB. A body counts as at least 256 KiB | 503 `RATE_LIMITED`, with `Retry-After` and `details.retry_after_ms` |
+| A request body's arrival | 30 s, which the largest makes in at about 6 Mbit/s | 408 `TIMEOUT` (retryable), and the socket closes |
 | Inline upload and download | 16 MiB | `FILE_TOO_LARGE` |
 | Downloads per profile | 2 GiB, `--download-quota-bytes` | Stopped and deleted |
 | Download entries per profile | 1000, with URLs kept to 2048 characters | New downloads refused |
 | Upload inbox per profile | 1 GiB, `--upload-inbox-quota-bytes` | `FILE_TOO_LARGE` |
 | `timeout_ms` on any call | 120 s on a server | Lowered to that |
 | URL given to `navigate`, `new_tab` | 8192 characters on a server | `INVALID_INPUT` |
-| A browser's name lookup | 5 s | The connection fails, and says so |
+| A browser's name lookup | 10 s, after up to 10 s waiting for its turn | The connection fails, and says so |
 | A browser's connection through the bridge | 30 s to connect | The connection fails |
 | Lines the bridge logs, refused connections among them | 20 per 30 s, each distinct line once per 30 s | Dropped, so a page naming a new host each time can't fill the log |
 | Processes in the container | `pids_limit` 4096 in compose | Fork fails. A browser takes a few hundred threads |
@@ -470,7 +475,11 @@ Both directories stay out of `.mzar` archives, and are ignored in one on import.
 
 `close_profile` goes past the queue, and whoever waited gets `PROFILE_NOT_RUNNING` at once. A client that cancels or disconnects loses its place in line. Retryable errors say so in their `retryable` field, and those with a known wait carry `details.retry_after_ms`.
 
-**Name lookups and `UV_THREADPOOL_SIZE`.** A lookup holds one of Node's pool threads for as long as the resolver takes, and pages choose the names, so a page asking for names nobody answers could otherwise stall the server's file work. `bin/multizen-server.js` and the image set the pool to 64, which gives each bridge 8 lookups at a time. On Windows it can only be set before Node starts, so set `UV_THREADPOOL_SIZE=64` there yourself. Unset, the pool is 4, each browser gets one lookup at a time, and the server warns at start.
+**Who can hold sockets.** Anyone who reaches the port can hold one with no token, so those are what's limited per address. Past the limit the oldest of them closes, never the new one, and one stops counting at its first valid token. So idle sockets can't keep out someone with a token, even from the same address, which is everyone's behind a NAT or a port Docker publishes on loopback. A client sends its request at once, so only a burst past the limit, from one address, in one moment, could lose its oldest. Behind a proxy all clients are the proxy's one address, so `--trust-proxy` leaves only the overall limit. Keep the port reachable only from that proxy. A token's holder is held to its share of bodies and its sessions, but a download it doesn't read keeps its socket open, up to the 4096: revoke the token.
+
+**A token's bodies.** What counts is what has arrived, as a declared length costs nothing to send. Revoking a token drops what it was still sending. A client slower than about 6 Mbit/s can't get the largest upload through: put the file under `--uploads-root` and name it in `upload_file`, or send less at once.
+
+**Name lookups and `UV_THREADPOOL_SIZE`.** A lookup holds one of Node's pool threads for as long as the resolver takes, and pages choose the names, so a page asking for names nobody answers could otherwise stall the server's file work. `bin/multizen-server.cjs` and the image set the pool to 64, which gives each bridge 8 lookups at a time. On Windows it can only be set before Node starts, so set `UV_THREADPOOL_SIZE=64` there yourself. Unset, the pool is 4, each browser gets two lookups at a time, and the server warns at start. The 10 s is past glibc's resolver retry at 5 s, so a name its second try answers still connects.
 
 ## Data layout
 
@@ -554,7 +563,7 @@ The rest run real browsers, so they aren't in the gate. Build first (`corepack y
 | --- | --- |
 | `e2e.ts` | Everything an agent does, from a real SDK client, in flows: `http`, `sigint`, `stdio`, `tabs`, `concurrency`, `display`, `auth`, `reaper`, `relay` |
 | `egress-live.ts` | The egress policy, against listeners that count who reaches them, each row with a control |
-| `security-live.ts` | What keeps a hostile page, token or file from hurting the server: `downloads`, `uploads`, `navigate`, `modes`, `sessions`, `proxy`, `archive`, `warnings`, `corrupt`. Its `dns` flow only runs when named, where `/etc/resolv.conf` points at a host that drops UDP port 53 |
+| `security-live.ts` | What keeps a hostile page, token or file from hurting the server: `downloads`, `uploads`, `navigate`, `modes`, `sessions`, `proxy`, `archive`, `warnings`, `corrupt`, and with no browser the attacks on the port, `bodies` and `sockets`. Its `dns` flow only runs when named, where `/etc/resolv.conf` points at a host that drops UDP port 53 |
 | `acceptance/*` | The rest of the acceptance matrix: see [its README](scripts/acceptance/README.md) |
 
 Results and what wasn't run: [`docs/server-acceptance.md`](../../docs/server-acceptance.md).
@@ -582,9 +591,11 @@ At start the server probes for this and warns, since a per-binary AppArmor profi
 
 **`EGRESS_BLOCKED` on a page you meant to load.** That is the policy, and retrying won't change it. Add the host with `--egress-allow`, as you need to for any test page on this machine, with its port for anything on loopback.
 
-**`RATE_LIMITED`, 503.** Request bodies in flight have reached 128 MiB, as they do with several large uploads at once. Wait for `Retry-After` and send it again. The 429 kind is failed logins.
+**`RATE_LIMITED`, 503.** Request bodies in flight have reached 128 MiB, or this token's 32 MiB, as they do with several large uploads at once. Wait for `Retry-After` and send it again. The 429 kind is failed logins.
 
-**"UV_THREADPOOL_SIZE isn't set".** On Windows, set it to 64 before starting Node. Elsewhere you started `dist/cli.js` directly, not `bin/multizen-server.js`.
+**`TIMEOUT`, 408, on a large upload.** Its body didn't arrive within 30 s. On a slow link, put the file under `--uploads-root` and name it in `upload_file`, or send less at once.
+
+**"UV_THREADPOOL_SIZE isn't set".** On Windows, set it to 64 before starting Node. Elsewhere you started `dist/cli.js` directly, not `bin/multizen-server.cjs`.
 
 **A warning that the data directory is open to group or others.** It was made before this version, or by something else. Run `chmod 700` on it, in Docker on `/data`.
 

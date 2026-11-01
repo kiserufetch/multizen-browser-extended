@@ -1,4 +1,6 @@
 import { request } from "node:https";
+import { isIP } from "node:net";
+import { domainToASCII } from "node:url";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import type { ProxyConfig } from "@multizen/types";
@@ -287,7 +289,12 @@ function num(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/**
+ * A stored proxy may have been through no schema, and whatever a policy said about its host has to
+ * still be the host of this URL. With `80@169.254.169.254/#` for a port, it is the metadata address.
+ */
 function buildProxyUrl(p: ProxyConfig): string {
+  if (!Number.isInteger(p.port)) throw new Error("The proxy's port isn't a number.");
   const auth =
     p.username && p.password
       ? `${encodeURIComponent(p.username)}:${encodeURIComponent(p.password)}@`
@@ -295,5 +302,13 @@ function buildProxyUrl(p: ProxyConfig): string {
         ? `${encodeURIComponent(p.username)}@`
         : "";
   const scheme = p.type === "socks5" ? "socks5" : "http";
-  return `${scheme}://${auth}${p.host}:${p.port}`;
+  const url = `${scheme}://${auth}${p.host}:${p.port}`;
+  // A URL spells an address and a name its own way, so an address is only told apart from smuggled text.
+  const literal = isIP(p.host.replace(/^\[(.*)\]$/, "$1")) !== 0;
+  const { hostname } = new URL(url);
+  const named = p.host.toLowerCase();
+  if (!literal && hostname !== named && hostname !== domainToASCII(named)) {
+    throw new Error("The proxy's host isn't an address or a name.");
+  }
+  return url;
 }

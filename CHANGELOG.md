@@ -90,7 +90,7 @@ desktop: [`docs/server-mode.md`](docs/server-mode.md). What was checked and what
   (`--tls-cert`, `--tls-key`) or `--allow-insecure-remote`; behind a reverse proxy on
   loopback, `--allowed-hosts` or `--public-url` is enough. Failed logins are limited to
   10 a minute per address (`--trust-proxy` for a proxy of yours in front). Sessions close
-  after 30 idle minutes and there can be 64 of them, 32 per token (`--max-sessions-per-token`),
+  after 30 idle minutes and there can be 64 of them, 16 per token (`--max-sessions-per-token`),
   a call in flight never counting as idle. Proxy passwords are encrypted at rest with `MULTIZEN_SECRET_KEY` or
   `<data-dir>/secret.key`, plaintext ones at start, and `secrets rotate` changes the key.
   The owner's token is in `<data-dir>/owner-token`, for its owner: agents connect with one from
@@ -129,11 +129,15 @@ desktop: [`docs/server-mode.md`](docs/server-mode.md). What was checked and what
   On Windows they die with it, and Camoufox goes when its pipe closes, on both. The desktop has
   no journal and no reaper.
 - **`multizen-server`: what a hostile page, token or file can't do to it.** Past 128 MiB of request
-  bodies in flight a request gets 503 `RATE_LIMITED` with `Retry-After`, and sockets stop at the larger
-  of 256 and 4 × `--max-sessions`. `timeout_ms` stops at 120 s and URLs at 8192 characters. One
+  bodies in flight, counted as they arrive, or a token's quarter of that, a request gets 503
+  `RATE_LIMITED` with `Retry-After`. A body has 30 s to arrive, and revoking a token drops what it was
+  still sending. Anyone reaching the port can only hold sockets with no token, and those go oldest
+  first, past the larger of 256 and 4 × `--max-sessions` per address (`--trust-proxy` lifts that) and four
+  times that in all, with 10 s to send their headers, so they can't keep out someone with a token,
+  even from the same address. `timeout_ms` stops at 120 s and URLs at 8192 characters. One
   profile's base64 uploads may take 1 GiB (`--upload-inbox-quota-bytes`), cleared at close and at the
-  next start. A browser's name lookups have 5 s and its connections 30 s, with `UV_THREADPOOL_SIZE` at 64
-  from `bin/multizen-server.js` and the image (on Windows, set it before starting Node). The bridge logs
+  next start. A browser's name lookups have 10 s, after up to 10 s waiting their turn, and its connections 30 s, with `UV_THREADPOOL_SIZE` at 64
+  from `bin/multizen-server.cjs` and the image (on Windows, set it before starting Node). The bridge logs
   20 lines per 30 s at most. A server installs only CloakBrowser builds pinned with their SHA-256, and
   fails closed where none is, as on linux-arm64. Its files are private to its user (umask 077, data
   directory 0700), `server.lock` holds a hash of the command line, not the line, and tokens are refused

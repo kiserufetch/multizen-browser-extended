@@ -47,17 +47,34 @@ export function toToolError(e: unknown, tool: string): ToolErrorFields {
 }
 
 const QUOTED_HOST_PATH = /(['"])(?:[A-Za-z]:[\\/]|[\\/])[^'"]*\1/g;
-const BARE_HOST_PATH = /(?:\b[A-Za-z]:[\\/]|\\\\|(?<![\w:/.-])\/)[^\s'"]+/g;
+/** To the end of the line: nothing marks where a Windows path ends, as a space is legal in one. */
+const BARE_WINDOWS_PATH = /(?:\b[A-Za-z]:[\\/]|\\\\)[^'"\r\n]*/g;
+const BARE_POSIX_PATH = /(?<![\w:/.-])\/[^\s'"]+/g;
+
+function scrubbed(text: string): string {
+  return text
+    .replace(QUOTED_HOST_PATH, "$1<path>$1")
+    .replace(BARE_WINDOWS_PATH, "<path>")
+    .replace(BARE_POSIX_PATH, "<path>");
+}
 
 /**
- * For a token that isn't the owner's: an unexpected error tends to name a file on this host,
- * and where things live is no business of theirs. The operator's log keeps the original.
+ * For a token that isn't the owner's: an error tends to name a file on this host, typed ones too,
+ * and where things live is no business of theirs. The operator's log keeps the original. Left
+ * alone is what the caller wrote itself, as a selector like `//div` in an INVALID_INPUT.
  */
 export function withoutHostPaths(fields: ToolErrorFields): ToolErrorFields {
-  if (fields.code !== "INTERNAL_ERROR") return fields;
+  if (fields.code === "INVALID_INPUT") return fields;
   return {
     ...fields,
-    message: fields.message.replace(QUOTED_HOST_PATH, "$1<path>$1").replace(BARE_HOST_PATH, "<path>"),
+    message: scrubbed(fields.message),
+    ...(fields.details
+      ? {
+          details: Object.fromEntries(
+            Object.entries(fields.details).map(([k, v]) => [k, typeof v === "string" ? scrubbed(v) : v]),
+          ),
+        }
+      : {}),
   };
 }
 

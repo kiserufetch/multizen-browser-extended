@@ -434,16 +434,29 @@ function remoteFields(
 
 const DEFAULT_SESSION_IDLE_TTL_MS = 30 * 60_000;
 const DEFAULT_MAX_SESSIONS = 64;
-const DEFAULT_MAX_SESSIONS_PER_TOKEN = 32;
+/** A quarter of them, so that it takes more than a pair of tokens to fill the server. */
+const DEFAULT_MAX_SESSIONS_PER_TOKEN = 16;
 const UPLOAD_INBOX_QUOTA_BYTES = 1024 ** 3;
+
+const INBOX_OPTIONS: NonNullable<ParseArgsConfig["options"]> = {
+  "upload-inbox-quota-bytes": { type: "string" },
+};
 
 const HANDOFF_OPTIONS: NonNullable<ParseArgsConfig["options"]> = {
   "handoff-webhook": { type: "string" },
   "handoff-webhook-secret": { type: "string" },
   "handoff-ttl-ms": { type: "string" },
   "download-quota-bytes": { type: "string" },
-  "upload-inbox-quota-bytes": { type: "string" },
+  ...INBOX_OPTIONS,
 };
+
+function inboxFields(flags: ParsedFlags, env: Env): Pick<ServerConfig, "uploadInboxQuotaBytes"> {
+  const quota = flags.flag("upload-inbox-quota-bytes") ?? env.MULTIZEN_UPLOAD_INBOX_QUOTA_BYTES;
+  return {
+    uploadInboxQuotaBytes:
+      quota === undefined ? UPLOAD_INBOX_QUOTA_BYTES : parsePositiveInt("--upload-inbox-quota-bytes", quota),
+  };
+}
 
 function handoffFields(
   flags: ParsedFlags,
@@ -456,7 +469,6 @@ function handoffFields(
   const secret = flags.flag("handoff-webhook-secret") ?? env.MULTIZEN_HANDOFF_WEBHOOK_SECRET;
   const ttl = flags.flag("handoff-ttl-ms") ?? env.MULTIZEN_HANDOFF_TTL_MS;
   const quota = flags.flag("download-quota-bytes") ?? env.MULTIZEN_DOWNLOAD_QUOTA_BYTES;
-  const inboxQuota = flags.flag("upload-inbox-quota-bytes") ?? env.MULTIZEN_UPLOAD_INBOX_QUOTA_BYTES;
   if (secret && !webhook) throw new UsageError("--handoff-webhook-secret needs --handoff-webhook");
   return {
     ...(webhook ? { handoffWebhook: parseHttpUrl("--handoff-webhook", webhook).href } : {}),
@@ -464,10 +476,7 @@ function handoffFields(
     ...(ttl !== undefined ? { handoffTtlMs: parsePositiveInt("--handoff-ttl-ms", ttl) } : {}),
     downloadQuotaBytes:
       quota === undefined ? DOWNLOAD_QUOTA_BYTES : parsePositiveInt("--download-quota-bytes", quota),
-    uploadInboxQuotaBytes:
-      inboxQuota === undefined
-        ? UPLOAD_INBOX_QUOTA_BYTES
-        : parsePositiveInt("--upload-inbox-quota-bytes", inboxQuota),
+    ...inboxFields(flags, env),
   };
 }
 
@@ -528,7 +537,13 @@ export function parseServeConfig(
 export type StdioConfig =
   | ({ kind: "local"; dataDir: string; defaultEngine?: BrowserEngine; uploadsRoot?: string } & Pick<
       ServerConfig,
-      "maxBrowsers" | "browserQueueTimeoutMs" | "displayMode" | "headless" | "egressPolicy" | "egressAllow"
+      | "maxBrowsers"
+      | "browserQueueTimeoutMs"
+      | "displayMode"
+      | "headless"
+      | "egressPolicy"
+      | "egressAllow"
+      | "uploadInboxQuotaBytes"
     >)
   | { kind: "connect"; url: string; tokenFile?: string; keepAliveMs?: number };
 
@@ -546,6 +561,7 @@ export function parseStdioConfig(
     ...BROWSER_LIMIT_OPTIONS,
     ...DISPLAY_OPTIONS,
     ...EGRESS_OPTIONS,
+    ...INBOX_OPTIONS,
   });
   rejectPositionals(flags.positionals);
 
@@ -563,6 +579,7 @@ export function parseStdioConfig(
       ...browserLimitFields(flags, env),
       ...displayFields(flags, env),
       ...egressFields(flags, env),
+      ...inboxFields(flags, env),
     };
   }
 
@@ -576,6 +593,7 @@ export function parseStdioConfig(
     "headless",
     "egress-policy",
     "egress-allow",
+    "upload-inbox-quota-bytes",
   ];
   if (browserFlags.some((flag) => flags.isSet(flag))) {
     throw new UsageError(
@@ -586,12 +604,16 @@ export function parseStdioConfig(
   try {
     url = new URL(connect);
   } catch {
-    throw new UsageError(`--connect needs a URL, got "${connect}"`);
+    throw new UsageError("--connect needs a URL");
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new UsageError(`--connect needs an http(s) URL, got "${connect}"`);
+    throw new UsageError(`--connect needs an http(s) URL, got ${url.protocol}`);
   }
   if (url.pathname === "/") url.pathname = "/mcp";
+  // This URL gets logged, and fetch refuses one with credentials in an error that quotes it.
+  // A token goes in --token-file.
+  url.username = "";
+  url.password = "";
   return {
     kind: "connect",
     url: url.href,

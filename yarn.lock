@@ -1191,7 +1191,7 @@ __metadata:
     uuid: "npm:^11.0.5"
     zod: "npm:^3.23.8"
   bin:
-    multizen-server: ./bin/multizen-server.js
+    multizen-server: ./bin/multizen-server.cjs
   languageName: unknown
   linkType: soft
 

@@ -12,6 +12,7 @@ import {
 import { promisify } from "node:util";
 import type { Profile } from "@multizen/types";
 import { PROFILE_DOWNLOADS_DIR, PROFILE_UPLOADS_DIR, trimEndChars } from "@multizen/types";
+import { isProxyConfig } from "./proxyConfig.js";
 
 const scrypt = promisify(scryptCb);
 
@@ -220,6 +221,11 @@ export async function importProfile(
   // dir could escape the store or profile dir (used later by GC `rm -rf` and
   // `--load-extension`).
   restored.extensions = sanitizeRestoredExtensions(restored.extensions, restored.dataDir);
+  // No schema has seen this proxy, and its host and port end up in a URL. Refused rather than
+  // dropped: without its proxy this profile would go out from this machine's own address.
+  if (restored.proxy !== undefined && restored.proxy !== null && !isProxyConfig(restored.proxy)) {
+    throw new Error("This archive's proxy isn't a usable host and port, so nothing was imported.");
+  }
 
   await mkdir(restored.dataDir, { recursive: true });
 

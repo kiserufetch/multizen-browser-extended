@@ -5,7 +5,7 @@
   "type": "module",
   "description": "MultiZen headless server: MCP over HTTP or stdio with the real browser drivers, no Electron",
   "bin": {
-    "multizen-server": "./bin/multizen-server.js"
+    "multizen-server": "./bin/multizen-server.cjs"
   },
   "exports": {
     "./runtime": "./src/runtime.ts"

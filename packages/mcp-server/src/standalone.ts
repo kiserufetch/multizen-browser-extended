@@ -22,9 +22,9 @@ const REAL_SERVER_HINT = `multizen-mcp only runs a mock browser driver, and only
 
 For real browsers, run the MultiZen server:
   corepack yarn workspace @multizen/server build
-  node apps/server/bin/multizen-server.js stdio
+  node apps/server/bin/multizen-server.cjs stdio
 or over HTTP:
-  node apps/server/bin/multizen-server.js serve
+  node apps/server/bin/multizen-server.cjs serve
 
 Or connect to the MCP port of the running desktop app (Settings > MCP).
 `;

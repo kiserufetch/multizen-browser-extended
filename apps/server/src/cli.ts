@@ -23,6 +23,7 @@ Usage:
                         [--uploads-root <dir>] [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
                         [--display-mode auto|headed|xvfb|headless] [--headless]
                         [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
+                        [--upload-inbox-quota-bytes <n>]
   multizen-server stdio --connect <url> [--token-file <path>] [--keepalive-ms <ms>]
   multizen-server profile export <profile-id> [--out <file.mzar>] [--passphrase-file <path>] [--data-dir <dir>]
   multizen-server profile import <file.mzar> [--passphrase-file <path>] [--data-dir <dir>]
@@ -61,7 +62,7 @@ stdio --connect pings the server every --keepalive-ms (30000), which keeps its s
 out. Below a server's --session-idle-ttl-ms is what it takes. When the session is gone anyway, because
 the server restarted or the token was revoked, it says so on stderr and exits 1: restart it.
 
---max-sessions-per-token (32) keeps one token from taking all of --max-sessions (64): past it, that
+--max-sessions-per-token (16) keeps one token from taking all of --max-sessions (64): past it, that
 token's own oldest idle session is closed for the new one.
 
 --host beyond loopback needs --allow-remote, and TLS or --allow-insecure-remote. Behind a

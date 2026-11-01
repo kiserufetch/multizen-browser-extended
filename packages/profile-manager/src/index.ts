@@ -25,6 +25,7 @@ export {
   type GenerateFingerprintOptions,
 } from "./fingerprint.js";
 export { exportProfile, importProfile } from "./archive.js";
+export { isProxyConfig, isProxyHost } from "./proxyConfig.js";
 export {
   archiveFileName,
   exportProfileToArchive,

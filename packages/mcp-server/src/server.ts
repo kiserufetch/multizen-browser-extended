@@ -1,4 +1,3 @@
-import { isIP } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -13,6 +12,7 @@ import {
   localeCatalog,
   reducedUserAgent,
   deviceMemoryApiValue,
+  isProxyHost,
 } from "@multizen/profile-manager";
 import type {
   BrowserDriver,
@@ -195,14 +195,6 @@ const DEVICE_FAMILIES = [
   "linux-desktop-nvidia",
 ] as const;
 
-/**
- * An address or a plain name, nothing a URL built from it could read otherwise: this host goes
- * in a proxy URL, and `169.254.169.254:80/#` would make that URL's host the part before the `:`.
- */
-function isProxyHost(host: string): boolean {
-  return isIP(host.replace(/^\[(.*)\]$/, "$1")) !== 0 || /^[\p{L}\p{M}\p{N}._-]+$/u.test(host);
-}
-
 const ProxySchema = z.object({
   type: z.enum(["http", "socks5"]),
   host: z.string().min(1).max(253).refine(isProxyHost, { message: "Not an address or a host name" }),
@@ -382,7 +374,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
       return ok(result);
     } catch (e) {
       const fields = toToolError(e, name);
-      activityLog.finish(event, "error", fields.message, startedAt);
+      activityLog.finish(event, "error", fields.message, startedAt, fields.code);
       return err(principal.full ? fields : withoutHostPaths(fields));
     }
   });

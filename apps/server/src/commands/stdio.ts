@@ -18,6 +18,13 @@ import {
 import { preflightProcess, preflightUserNamespaces } from "../sandboxPreflight.ts";
 import type { ShutdownManager } from "../shutdown.ts";
 
+/** What a local session's tools are held to: the same as a `serve`'s. */
+export function localToolLimits(
+  config: Pick<Extract<StdioConfig, { kind: "local" }>, "uploadInboxQuotaBytes">,
+): { limits: typeof SERVER_TOOL_LIMITS; maxInboxBytes: number } {
+  return { limits: SERVER_TOOL_LIMITS, maxInboxBytes: config.uploadInboxQuotaBytes };
+}
+
 /** The holder's mode decides the advice: only a `serve` can be proxied to. */
 export function stdioLockHint(e: ServerLockHeldError, dataDir: string): string {
   const { mode, url, tokenFile } = e.holder;
@@ -75,7 +82,7 @@ async function runLocal(
     getDefaultEngine: runtime.getDefaultEngine,
     uploadsRoot: config.uploadsRoot,
     egress: runtime.egress,
-    limits: SERVER_TOOL_LIMITS,
+    ...localToolLimits(config),
   });
   const transport = new StdioServerTransport(process.stdin, protocolStdout);
   transport.onclose = () => void shutdown.run("transport-closed", 0);

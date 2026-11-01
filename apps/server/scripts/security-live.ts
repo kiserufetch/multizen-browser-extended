@@ -6,12 +6,16 @@
  *   corepack yarn workspace @multizen/server build
  *   corepack yarn workspace @multizen/server exec tsx scripts/security-live.ts \
  *     --data-dir %TEMP%\mztsec --engine cloakbrowser --engine-version-dir <dir with chrome.exe> \
- *     [--engine camoufox --camoufox-install <dir>] [--only downloads,proxy,...]
+ *     [--engine camoufox --camoufox-install <dir>] [--only downloads,proxy,...] [--cli <cli.js>]
  *
  * --only names flows, all of them when left out except `dns`, which needs a resolver that answers
  * nothing: run this where /etc/resolv.conf points at a host that drops UDP port 53. `corrupt` swaps
  * the real pinned engine download for bad bytes from a local fixture, through the runtime's
- * host.request, and runs no server.
+ * host.request, and runs no server. `bodies` and `sockets` attack the port and need no browser, and
+ * --only with just those three doesn't wait for an engine.
+ *
+ * --cli runs those against another build's cli.js, as `dist/cli.js` of an earlier image: what these
+ * flows show about the attacks is only worth something if that one fails them.
  *
  * Each row says what was observed. A row that threw reads as FAIL, with what happened.
  */
@@ -30,7 +34,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
-import { createServer as createNetServer, type AddressInfo, type Server as NetServer } from "node:net";
+import { connect as netConnect, createServer as createNetServer, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -47,6 +51,7 @@ const { values } = parseArgs({
     "engine-version-dir": { type: "string" },
     "camoufox-install": { type: "string" },
     only: { type: "string" },
+    cli: { type: "string" },
     keep: { type: "boolean" },
   },
 });
@@ -57,15 +62,17 @@ const dataDirFlag = values["data-dir"];
 if (!dataDirFlag) throw new Error("--data-dir is required");
 const DATA_DIR = resolve(dataDirFlag);
 const ENGINE = values.engine ?? "cloakbrowser";
-const IS_CAMOUFOX = ENGINE === "camoufox";
-const CLI = join(fileURLToPath(new URL("..", import.meta.url)), "dist", "cli.js");
+const CLI = values.cli ? resolve(values.cli) : join(fileURLToPath(new URL("..", import.meta.url)), "dist", "cli.js");
 if (!existsSync(CLI)) throw new Error(`${CLI} is missing: build the server first`);
 const FLOWS = new Set(
-  (values.only ?? "downloads,uploads,navigate,sessions,proxy,archive,modes,warnings,corrupt").split(","),
+  (values.only ?? "downloads,uploads,navigate,sessions,proxy,archive,modes,warnings,corrupt,bodies,sockets").split(","),
 );
 const ENGINE_READY_BUDGET_MS = 15 * 60_000;
 /** A hostile page's worst, in the old code: 6 s of a stopped event loop per download. */
 const RESPONSIVE_MS = 1_500;
+/** The flows that start no browser. */
+const NO_BROWSER_FLOWS = new Set(["corrupt", "bodies", "sockets"]);
+const MIB = 1024 * 1024;
 
 let failures = 0;
 function row(name: string, ok: boolean, observed: string): void {
@@ -492,39 +499,6 @@ async function flowNavigate(server: Serve, client: Client, closedPort: number): 
   await must(client, "close_profile", { profile_id: id });
 }
 
-function raw(
-  port: number,
-  opts: { token: string; headers?: Record<string, string>; body?: string; stall?: number },
-): Promise<{ status: number; text: string; headers: Record<string, unknown>; destroy?: () => void }> {
-  return new Promise((done, fail) => {
-    const req = httpRequest(
-      {
-        host: "127.0.0.1",
-        port,
-        method: "POST",
-        path: "/mcp",
-        headers: {
-          accept: "application/json, text/event-stream",
-          "content-type": "application/json",
-          authorization: `Bearer ${opts.token}`,
-          ...opts.headers,
-        },
-      },
-      (res) => {
-        let text = "";
-        res.on("data", (chunk) => (text += String(chunk)));
-        res.on("end", () => done({ status: res.statusCode ?? 0, text, headers: res.headers }));
-      },
-    );
-    req.on("error", fail);
-    if (opts.stall !== undefined) {
-      req.write("{");
-      return;
-    }
-    req.end(opts.body);
-  });
-}
-
 async function flowSessions(server: Serve, owner: string): Promise<void> {
   const reader = tokenCreate("sec-reader", "read");
   await attempt("S5 sessions per token", async () => {
@@ -555,33 +529,387 @@ async function flowSessions(server: Serve, owner: string): Promise<void> {
     );
     await Promise.all([...clients, fourth, fifth, ownerClient].map((c) => c.close().catch(() => {})));
   });
+}
 
-  await attempt("S5 body budget", async () => {
-    const twentyMb = 20 * 1024 * 1024;
-    const stalled: Array<Promise<unknown>> = [];
-    const results: Array<{ status: number; text: string }> = [];
-    for (let i = 0; i < 8; i++) {
-      stalled.push(
-        raw(server.port, { token: owner, headers: { "content-length": String(twentyMb) }, stall: 1 }).then(
-          (reply) => results.push(reply),
-          () => {},
-        ),
-      );
-      await wait(50);
-    }
-    await until("the refusals", () => results.length >= 2, 10_000);
-    const reply = results[0]!;
-    const responsive = await connect(server, owner);
-    const started = performance.now();
-    await must(responsive, "list_profiles", {});
-    const tookMs = Math.round(performance.now() - started);
-    await responsive.close();
-    row(
-      "S5 body budget",
-      results.length === 2 && reply.status === 503 && /"code":"RATE_LIMITED"/.test(reply.text),
-      `8 stalled POSTs of 20 MB, budget 128 MB: ${results.length} refused with ${reply.status} ${/"code":"(\w+)"/.exec(reply.text)?.[1]}; list_profiles still takes ${tookMs} ms`,
+// ── attacks on the port ──────────────────────────────────────────────────────
+
+/** Every request here on a socket of its own: what is at stake is whether a new one gets in. */
+function onNewSocket(
+  port: number,
+  opts: { method?: string; path: string; token?: string; session?: string; body?: string; timeoutMs?: number },
+): Promise<{ status: number; text: string; session?: string }> {
+  return new Promise((done, fail) => {
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        method: opts.method ?? "GET",
+        path: opts.path,
+        agent: false,
+        timeout: opts.timeoutMs ?? 10_000,
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
+          ...(opts.session ? { "mcp-session-id": opts.session } : {}),
+        },
+      },
+      (res) => {
+        let text = "";
+        res.on("data", (chunk) => (text += String(chunk)));
+        res.on("end", () => {
+          const session = res.headers["mcp-session-id"];
+          done({ status: res.statusCode ?? 0, text, ...(typeof session === "string" ? { session } : {}) });
+        });
+      },
     );
+    req.on("timeout", () => req.destroy(new Error("no answer in time")));
+    req.on("error", fail);
+    req.end(opts.body);
   });
+}
+
+function jsonRpc(id: number, method: string, params: Record<string, unknown>): string {
+  return JSON.stringify({ jsonrpc: "2.0", id, method, params });
+}
+
+const INITIALIZE = jsonRpc(1, "initialize", {
+  protocolVersion: "2025-03-26",
+  capabilities: {},
+  clientInfo: { name: "security-live", version: "0" },
+});
+
+/**
+ * /healthz, then a token's initialize and a tool call, as a client just arriving would. Says how it
+ * went: a server locked out from under its owner shows here as a refusal or a dropped socket.
+ */
+async function arriving(port: number, token: string): Promise<{ ok: boolean; said: string }> {
+  for (let tries = 1; ; tries++) {
+    const started = performance.now();
+    try {
+      const healthz = await onNewSocket(port, { path: "/healthz" });
+      if (healthz.status !== 200) return { ok: false, said: `/healthz ${healthz.status}` };
+      const initialized = await onNewSocket(port, { method: "POST", path: "/mcp", token, body: INITIALIZE });
+      if (initialized.status !== 200 || !initialized.session) {
+        return { ok: false, said: `initialize ${initialized.status} ${/"code":"(\w+)"/.exec(initialized.text)?.[1] ?? ""}` };
+      }
+      const listed = await onNewSocket(port, {
+        method: "POST",
+        path: "/mcp",
+        token,
+        session: initialized.session,
+        body: jsonRpc(2, "tools/call", { name: "list_profiles", arguments: {} }),
+      });
+      if (listed.status !== 200 || !listed.text.includes("profiles")) {
+        return { ok: false, said: `list_profiles ${listed.status}` };
+      }
+      return { ok: true, said: `/healthz, initialize and list_profiles answered in ${Math.round(performance.now() - started)} ms` };
+    } catch (e) {
+      const message = (e as Error).message;
+      if (IS_WINDOWS && tries < 4 && message.includes("ETIMEDOUT")) {
+        process.stdout.write(`note a loopback ETIMEDOUT, not a refusal: try ${tries + 1}\n`);
+        await wait(2_000);
+        continue;
+      }
+      return { ok: false, said: `on a new socket: ${message}` };
+    }
+  }
+}
+
+interface HeldPost {
+  /** Its answer, or null if the socket closed with none. */
+  reply: Promise<{ status: number; text: string } | null>;
+  closed: Promise<void>;
+  /** Everything `sent` has gone out, or the socket has gone. */
+  written: Promise<void>;
+  /** Why it never got anywhere, as an attack that didn't happen proves nothing. */
+  failure(): string | null;
+  destroy(): void;
+}
+
+/** A POST that says how long it will be, sends `sent` of that and then never finishes. */
+function heldPost(port: number, token: string, declared: number, sent?: Buffer): HeldPost {
+  let setReply = (_: { status: number; text: string } | null): void => {};
+  let setClosed = (): void => {};
+  let setWritten = (): void => {};
+  const reply = new Promise<{ status: number; text: string } | null>((done) => (setReply = done));
+  const closed = new Promise<void>((done) => (setClosed = done));
+  const written = new Promise<void>((done) => (setWritten = done));
+  let failure: string | null = null;
+  const req = httpRequest(
+    {
+      host: "127.0.0.1",
+      port,
+      method: "POST",
+      path: "/mcp",
+      agent: false,
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        // As a real client's: on a closing one, a refusal resets what is still being sent, answer included.
+        connection: "keep-alive",
+        "content-length": String(declared),
+      },
+    },
+    (res) => {
+      let text = "";
+      res.on("data", (chunk) => (text += String(chunk)));
+      res.on("end", () => setReply({ status: res.statusCode ?? 0, text }));
+    },
+  );
+  let connected = false;
+  req.on("socket", (socket) => socket.once("connect", () => (connected = true)));
+  req.on("error", (e) => {
+    if (!connected) failure = e.message;
+  });
+  req.on("close", () => {
+    setReply(null);
+    setClosed();
+    setWritten();
+  });
+  if (sent) req.write(sent, () => setWritten());
+  else {
+    req.flushHeaders();
+    setWritten();
+  }
+  return { reply, closed, written, failure: () => failure, destroy: () => req.destroy() };
+}
+
+function mustHaveConnected(posts: HeldPost[]): void {
+  const failed = posts.map((post) => post.failure()).find((failure) => failure !== null);
+  if (failed) throw new Error(`a POST of the attack never got there: ${failed}`);
+}
+
+const within = <T>(work: Promise<T>, ms: number): Promise<T | "not in time"> =>
+  Promise.race([work, wait(ms).then(() => "not in time" as const)]);
+
+/** N1: a token with nothing but `read`, and POSTs that say much and send little. */
+async function flowBodies(): Promise<void> {
+  const server = await serve([]);
+  try {
+    const { port } = server;
+    const owner = ownerToken();
+    const reader = tokenCreate("n1-reader", "read");
+
+    const held: HeldPost[] = [];
+    let heldAt = 0;
+    await attempt("N1 declared, not sent", async () => {
+      // The finding's numbers: 128 MiB of promises.
+      for (const post of held.splice(0)) post.destroy();
+      heldAt = performance.now();
+      for (let i = 0; i < 5; i++) held.push(heldPost(port, reader, 23_068_672));
+      held.push(heldPost(port, reader, 18_874_368));
+      await wait(500);
+      mustHaveConnected(held);
+      const ownerArrives = await arriving(port, owner);
+      const readerArrives = await arriving(port, reader);
+      row(
+        "N1 declared, not sent",
+        ownerArrives.ok && readerArrives.ok,
+        `a read-only token holds 6 POSTs saying 5 x 23068672 and 18874368 bytes, none sent. The owner: ${ownerArrives.said}. That token's next: ${readerArrives.said}`,
+      );
+    });
+
+    await attempt("N1 the deadline", async () => {
+      const first = await within(held[0]!.reply, 40_000);
+      const tookS = Math.round((performance.now() - heldAt) / 100) / 10;
+      const answered = first !== "not in time" && first?.status === 408 && /"code":"TIMEOUT"/.test(first.text);
+      const socketsGone = await within(Promise.all(held.map((post) => post.closed)), 3_000);
+      row(
+        "N1 the deadline",
+        answered && tookS < 34 && socketsGone !== "not in time",
+        first === "not in time"
+          ? `still no answer after ${tookS} s`
+          : `the first answered ${first?.status} ${/"code":"(\w+)"/.exec(first?.text ?? "")?.[1]} after ${tookS} s; all 6 sockets closed: ${socketsGone !== "not in time"}`,
+      );
+    });
+    for (const post of held) post.destroy();
+
+    await attempt("N1 bytes actually sent", async () => {
+      // What the charges of the POSTs above need to go.
+      await wait(300);
+      const posts: HeldPost[] = [];
+      // All of the budget for everyone, as real bytes, one POST after another.
+      for (const size of [20, 20, 20, 20, 20, 20, 8]) {
+        const post = heldPost(port, reader, size * MIB + 1, Buffer.alloc(size * MIB, 32));
+        posts.push(post);
+        await within(post.written, 30_000);
+        await wait(100);
+      }
+      mustHaveConnected(posts);
+      const answers = await Promise.all(posts.map((post) => within(post.reply, 2_000)));
+      const refused = answers.filter((answer) => answer !== "not in time" && answer?.status === 503).length;
+      const ownerArrives = await arriving(port, owner);
+      for (const post of posts) post.destroy();
+      row(
+        "N1 bytes actually sent",
+        refused >= 5 && ownerArrives.ok,
+        `one token sends 128 MiB in 7 POSTs and stalls: ${refused} refused past its 32 MiB. The owner: ${ownerArrives.said}`,
+      );
+    });
+
+    await attempt("N1 revoked mid-body", async () => {
+      const gone = tokenCreate("n1-gone", "read");
+      const post = heldPost(port, gone, 10 * MIB, Buffer.alloc(MIB, 32));
+      await within(post.written, 5_000);
+      mustHaveConnected([post]);
+      const started = performance.now();
+      const res = spawnSync(process.execPath, [CLI, "token", "revoke", "n1-gone", "--data-dir", DATA_DIR], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      if (res.status !== 0) throw new Error(`token revoke failed: ${res.stdout}${res.stderr}`);
+      const closed = await within(post.closed, 10_000);
+      post.destroy();
+      row(
+        "N1 revoked mid-body",
+        closed !== "not in time",
+        closed === "not in time"
+          ? "still open 10 s after the revoke"
+          : `the socket closed ${Math.round(performance.now() - started)} ms after \`token revoke\``,
+      );
+    });
+  } finally {
+    await server.stop();
+  }
+}
+
+interface IdleSockets {
+  open(): number;
+  closed(): number;
+  firstClosedAfterMs(): number | null;
+  /** Of a connect that never happened: an attack that didn't happen proves nothing. */
+  lastError(): string;
+  stop(): void;
+}
+
+/** Connected, saying nothing, no token. With `reopen`, whatever the server closes comes back. */
+async function holdIdle(port: number, count: number, opts: { localAddress?: string; reopen?: boolean } = {}): Promise<IdleSockets> {
+  let lastError = "";
+  const started = performance.now();
+  const sockets = new Set<Socket>();
+  let open = 0;
+  let closed = 0;
+  let firstClosedAfterMs: number | null = null;
+  let stopped = false;
+  const one = (): Promise<void> =>
+    new Promise((done) => {
+      const socket = netConnect({ port, host: "127.0.0.1", ...(opts.localAddress ? { localAddress: opts.localAddress } : {}) });
+      sockets.add(socket);
+      let connected = false;
+      socket.resume();
+      socket.on("error", (e) => {
+        if (!connected) lastError = e.message;
+      });
+      socket.once("connect", () => {
+        connected = true;
+        open += 1;
+        done();
+      });
+      socket.once("close", () => {
+        sockets.delete(socket);
+        if (connected) {
+          open -= 1;
+          closed += 1;
+          firstClosedAfterMs ??= Math.round(performance.now() - started);
+        }
+        done();
+        if (opts.reopen && !stopped) setTimeout(() => void one(), 50);
+      });
+    });
+  for (let i = 0; i < count; i += 64) {
+    await Promise.all(Array.from({ length: Math.min(64, count - i) }, one));
+  }
+  return {
+    open: () => open,
+    closed: () => closed,
+    firstClosedAfterMs: () => firstClosedAfterMs,
+    lastError: () => lastError,
+    stop: () => {
+      stopped = true;
+      for (const socket of sockets) socket.destroy();
+    },
+  };
+}
+
+/** N2: nobody with a token, only sockets, from one address or from many. */
+async function flowSockets(): Promise<void> {
+  const server = await serve([]);
+  try {
+    const { port } = server;
+    const owner = ownerToken();
+
+    await attempt("N2 256 idle sockets", async () => {
+      // The finding's number, from an address of its own.
+      const idle = await holdIdle(port, 256, { localAddress: "127.0.0.2" });
+      await wait(300);
+      const ownerArrives = await arriving(port, owner);
+      const open = idle.open();
+      idle.stop();
+      if (open < 256) throw new Error(`only ${open} of the 256 connected: ${idle.lastError()}`);
+      row("N2 256 idle sockets", ownerArrives.ok, `${open} held from 127.0.0.2 with no token. The owner on 127.0.0.1: ${ownerArrives.said}`);
+    });
+
+    await attempt("N2 from the owner's own address", async () => {
+      // As everyone is behind Docker's published port or a NAT, and more than the backstop's share.
+      const idle = await holdIdle(port, IS_WINDOWS ? 400 : 1_500);
+      await wait(500);
+      const open = idle.open();
+      const ownerArrives = await arriving(port, owner);
+      idle.stop();
+      row(
+        "N2 from the owner's own address",
+        ownerArrives.ok && open <= 256,
+        `${IS_WINDOWS ? 400 : 1_500} tried from 127.0.0.1, ${open} left open. The owner, also on 127.0.0.1: ${ownerArrives.said}`,
+      );
+    });
+
+    if (!IS_WINDOWS) {
+      await attempt("N2 from many addresses", async () => {
+        // Past the 4096 backstop if nothing else stopped them.
+        const held = await Promise.all(
+          Array.from({ length: 20 }, (_, i) => holdIdle(port, 256, { localAddress: `127.0.1.${i + 1}` })),
+        );
+        await wait(500);
+        const open = held.reduce((sum, idle) => sum + idle.open(), 0);
+        const ownerArrives = await arriving(port, owner);
+        for (const idle of held) idle.stop();
+        row(
+          "N2 from many addresses",
+          ownerArrives.ok && open <= 1_024,
+          `20 addresses, 256 sockets each, 5120 tried, ${open} left open. The owner: ${ownerArrives.said}`,
+        );
+      });
+    }
+
+    await attempt("N2 kept up past the headers timeout", async () => {
+      const idle = await holdIdle(port, 256, { localAddress: "127.0.0.2", reopen: true });
+      if (idle.open() < 256) {
+        idle.stop();
+        throw new Error(`only ${idle.open()} of the 256 connected: ${idle.lastError()}`);
+      }
+      const started = performance.now();
+      let tries = 0;
+      const failed: string[] = [];
+      while (performance.now() - started < 13_000) {
+        const ownerArrives = await arriving(port, owner);
+        tries += 1;
+        if (!ownerArrives.ok) failed.push(ownerArrives.said);
+        await wait(500);
+      }
+      const first = idle.firstClosedAfterMs();
+      const closed = idle.closed();
+      idle.stop();
+      row(
+        "N2 kept up past the headers timeout",
+        failed.length === 0 && first !== null && first < 13_000,
+        `256 sockets reopened as they close, 13 s: the server first closed one after ${first} ms, ${closed} in all. The owner got in ${tries - failed.length} of ${tries} times${failed.length ? `: ${failed[0]}` : ""}`,
+      );
+    });
+  } finally {
+    await server.stop();
+  }
 }
 
 function storeProxy(id: string, host: string, port: number): void {
@@ -889,6 +1217,14 @@ async function flowCorrupt(): Promise<void> {
 async function main(): Promise<void> {
   prepareDataDir();
   if (FLOWS.has("corrupt")) await flowCorrupt();
+  if (FLOWS.has("bodies")) await flowBodies();
+  if (FLOWS.has("sockets")) await flowSockets();
+  if ([...FLOWS].every((flow) => NO_BROWSER_FLOWS.has(flow))) {
+    if (!values.keep) cleanDataDir();
+    process.stdout.write(`${failures === 0 ? "ALL OK" : `${failures} FAILED`}\n`);
+    process.exitCode = failures === 0 ? 0 : 1;
+    return;
+  }
   const fixture = await startFixture();
   const closedPort = await freePort();
   const base = `http://127.0.0.1:${fixture.port}`;

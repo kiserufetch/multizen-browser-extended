@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pinnedCloakBrowserManifest } from "@multizen/browser-runtime";
+import type { ActivityEvent } from "@multizen/mcp-server";
 import { ProfileManager } from "@multizen/profile-manager";
 import type { ExtensionConfig } from "@multizen/types";
 import { dataPaths } from "./config.ts";
@@ -19,6 +20,7 @@ import {
   serverFirefoxPrefs,
   type ServerRuntime,
   SERVER_TOOL_LIMITS,
+  toolCallLogFields,
 } from "./runtime.ts";
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
@@ -503,6 +505,32 @@ test("display: without --headless nothing is forced, and a bad setting is simply
     await runtime.close();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
+});
+
+test("a tool call's log line has what a page threw in no form, and a typed message without its URL", () => {
+  const failed = (tool: string, errorCode: string, summary: string): ActivityEvent => ({
+    id: "1",
+    timestamp: "t",
+    tool,
+    args: {},
+    status: "error",
+    summary,
+    errorCode,
+  });
+  const secret = "session=SECRET-COOKIE";
+  // What Camoufox answers for `throw new Error(document.cookie)`.
+  const page = toolCallLogFields(failed("evaluate_js", "INTERNAL_ERROR", `Error: ${secret}`));
+  assert.equal(page.code, "INTERNAL_ERROR");
+  assert.equal(JSON.stringify(page).includes(secret), false);
+  // Whichever code an engine maps it to.
+  assert.equal(JSON.stringify(toolCallLogFields(failed("evaluate_js", "TIMEOUT", secret))).includes(secret), false);
+  assert.equal(JSON.stringify(toolCallLogFields(failed("navigate", "INTERNAL_ERROR", secret))).includes(secret), false);
+
+  const typed = toolCallLogFields(failed("navigate", "NAVIGATION_FAILED", "failed at https://h.test/a?token=abc"));
+  assert.equal(typed.code, "NAVIGATION_FAILED");
+  assert.equal(typed.error, "failed at https://h.test");
+  const fine = toolCallLogFields({ id: "2", timestamp: "t", tool: "navigate", args: {}, status: "ok", summary: "x" });
+  assert.equal("error" in fine || "code" in fine, false);
 });
 
 test("a server holds tool calls to a URL length and a wait", () => {

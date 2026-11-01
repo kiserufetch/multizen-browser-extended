@@ -95,12 +95,13 @@ const CLOAKBROWSER_MAX_PAGES = 5; // up to 500 releases scanned, 5 API calls
 const CLOAKBROWSER_DOWNLOAD_BASE =
   "https://github.com/CloakHQ/CloakBrowser/releases/download";
 
-// Known-good pinned release tags per platform asset. Used only as a fallback
-// when the GitHub API is unreachable / rate-limited, or when the asset is not
-// found within the page-scan window. Tag format is `chromium-v<version>`.
-// A stale or wrong pin is no worse than having none (the direct URL simply
-// 404s and we surface the original enumeration error); a correct pin keeps
-// clean installs working through an API outage. Bump when raising the floor.
+// Known-good pinned release tags per platform asset, in `chromium-v<version>` form. On a
+// server (`pinned`) these are the only builds allowed, each with its hash from
+// CLOAKBROWSER_PIN_SHA256, and a platform without one installs nothing. On a desktop
+// they are only a fallback, for when the GitHub API is unreachable or rate-limited or the
+// asset isn't within the page-scan window: there a stale pin is no worse than none (the
+// direct URL simply 404s and we surface the original enumeration error). Bump when
+// raising the floor.
 const CLOAKBROWSER_PINS: Record<string, string> = {
   "cloakbrowser-windows-x64.zip": "chromium-v146.0.7680.177.5",
   "cloakbrowser-linux-x64.tar.gz": "chromium-v146.0.7680.177.5",

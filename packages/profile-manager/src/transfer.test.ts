@@ -4,7 +4,7 @@ import { createCipheriv, createHash, randomBytes, scryptSync } from "node:crypto
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BrowserEngine, CreateProfileInput, ExtensionConfig } from "@multizen/types";
+import type { BrowserEngine, CreateProfileInput, ExtensionConfig, ProxyConfig } from "@multizen/types";
 import { ProfileManager } from "./ProfileManager.js";
 import { exportProfile } from "./archive.js";
 import {
@@ -190,6 +190,43 @@ test("uploads and downloads stay out of an archive; only those two top-level dir
     const restoredBrowserDir = join(restored, "engines", "cloakbrowser");
     assert.equal(readFileSync(join(restoredBrowserDir, "Cookies"), "utf8"), "cookie-bytes");
     assert.equal(readFileSync(join(restoredBrowserDir, "downloads", "state"), "utf8"), "browser-owned");
+  });
+});
+
+test("an archive's proxy goes through the same check as a tool's: a bad one refuses the import", async () => {
+  await withSides(async (from, to, dir) => {
+    const profile = create(from);
+    const importing = (name: string): ReturnType<typeof importProfileFromArchive> =>
+      importProfileFromArchive(to.pm, join(dir, name), "pw", {
+        profilesRoot: to.profilesRoot,
+        extensionStoreRoot: to.extensionStoreRoot,
+        defaultEngine: "cloakbrowser",
+      });
+    const hostile: readonly unknown[] = [
+      // With this one a URL's host is the metadata address, whatever the policy said about 8.8.8.8.
+      { type: "http", host: "8.8.8.8", port: "80@169.254.169.254/#" },
+      { type: "http", host: "169.254.169.254:80/#", port: 8080 },
+      { type: "http", host: "8.8.8.8", port: 0 },
+      { type: "http", host: "8.8.8.8", port: 70000 },
+      { type: "http", host: "8.8.8.8", port: 80.5 },
+      { type: "ftp", host: "8.8.8.8", port: 80 },
+      { type: "http", host: "", port: 80 },
+      { type: "http", host: "a".repeat(254), port: 80 },
+      { type: "http", host: "8.8.8.8", port: 80, password: 5 },
+      "http://8.8.8.8:80",
+    ];
+    let index = 0;
+    for (const proxy of hostile) {
+      const name = `hostile-${index++}.mzar`;
+      await exportProfile({ ...profile, proxy: proxy as unknown as ProxyConfig }, "pw", join(dir, name));
+      await assert.rejects(importing(name), /isn't a usable host and port/, JSON.stringify(proxy));
+    }
+    assert.equal(to.pm.list().length, 0);
+    assert.equal(existsSync(join(to.profilesRoot, profile.id)), false, "nothing was written");
+
+    const fine: ProxyConfig = { type: "socks5", host: "proxy.example.test", port: 1080, username: "u", password: "p" };
+    await exportProfile({ ...profile, proxy: fine }, "pw", join(dir, "fine.mzar"));
+    assert.deepEqual(to.pm.get((await importing("fine.mzar")).id)?.proxy, fine);
   });
 });
 

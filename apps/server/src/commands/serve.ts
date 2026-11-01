@@ -30,11 +30,35 @@ import type { ShutdownManager } from "../shutdown.ts";
 /** HTTP stop closes sessions and sockets; it has no slow path of its own. */
 const HTTP_STOP_BUDGET_MS = 3_000;
 
-/** Room for about six of the largest uploads at once. Past it, RATE_LIMITED. */
+/** Room for about six of the largest uploads at once, one token's part for one and a bit. Past it, RATE_LIMITED. */
 const MAX_BODY_BYTES_IN_FLIGHT = 128 * 1024 * 1024;
-/** A session holds a stream and a POST or two. Past this, sockets are dropped: file descriptors aren't free. */
+/** Only a bound on what a stalled body holds. Sending the largest upload in it takes about 6 Mbit/s. */
+const BODY_READ_TIMEOUT_MS = 30_000;
+/** A client sends its headers at once. What sits there saying nothing is holding a socket. */
+const HEADERS_TIMEOUT_MS = 10_000;
+/** A session holds a stream and a POST or two. */
 const CONNECTIONS_PER_SESSION = 4;
-const MIN_MAX_CONNECTIONS = 256;
+const MIN_SOCKETS_PER_ADDRESS = 256;
+/** Past this many of those, sockets are dropped: file descriptors aren't free. Only a backstop. */
+const MAX_CONNECTIONS_FACTOR = 16;
+/** So however many addresses they come from, sockets with no token leave room for those with one. */
+const ANONYMOUS_DIVISOR = 4;
+
+/**
+ * Who can hold how many sockets. Anyone reaching the port can hold those with no token, so those are
+ * limited per address, at what all the sessions of a server could need from one host, and the
+ * oldest goes first. Behind a proxy all clients are one address, and what that proxy opens has sent
+ * its request by then, so there the overall limit is the only one: `--trust-proxy` says a proxy is there.
+ */
+export function connectionLimits(config: Pick<ServerConfig, "maxSessions" | "trustProxy">): {
+  maxConnections: number;
+  anonymousSockets: { perAddress: number; total: number };
+} {
+  const perAddress = Math.max(MIN_SOCKETS_PER_ADDRESS, config.maxSessions * CONNECTIONS_PER_SESSION);
+  const maxConnections = perAddress * MAX_CONNECTIONS_FACTOR;
+  const total = Math.floor(maxConnections / ANONYMOUS_DIVISOR);
+  return { maxConnections, anonymousSockets: { perAddress: config.trustProxy ? total : perAddress, total } };
+}
 
 /** No usable token and no `--no-auth`: the server must not start. */
 export class NoOwnerTokenError extends Error {}
@@ -152,7 +176,9 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
       maxSessionsPerPrincipal: config.maxSessionsPerToken,
     },
     maxBodyBytesInFlight: MAX_BODY_BYTES_IN_FLIGHT,
-    maxConnections: Math.max(MIN_MAX_CONNECTIONS, config.maxSessions * CONNECTIONS_PER_SESSION),
+    bodyReadTimeoutMs: BODY_READ_TIMEOUT_MS,
+    headersTimeoutMs: HEADERS_TIMEOUT_MS,
+    ...connectionLimits(config),
     ...(config.leaseOnSessionClose === "release"
       ? { onSessionClosed: (sessionId: string) => runtime.shared.leases.dropSession(sessionId) }
       : {}),

@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { holderIsAlive, processIdentity, type ServerLockDeps } from "./serverLock.ts";
+import { hashOfCmdline, holderIsAlive, processIdentity, type ServerLockDeps } from "./serverLock.ts";
 
 const DESKTOP_LOCK_FILE = "desktop.lock";
 /** Where a desktop keeps its database and profiles, under its user data directory. */
@@ -12,7 +12,10 @@ export interface DesktopLockRecord {
   pid: number;
   /** Platform-native process start time. Opaque, only compared for equality. */
   startTime: string;
-  cmdline: string | null;
+  /** Only compared too, so only its hash is kept, as in `server.lock`. */
+  cmdlineSha256: string | null;
+  /** The clear form an earlier version wrote: such a file can outlive that version's crash. */
+  cmdline?: string | null;
   acquiredAt: string;
 }
 
@@ -50,10 +53,12 @@ export async function writeDesktopLock(
     hostname: deps.hostname(),
     pid: deps.pid,
     startTime: own.startTime,
-    cmdline: own.cmdline,
+    cmdlineSha256: own.cmdline === null ? null : hashOfCmdline(own.cmdline),
     acquiredAt: new Date().toISOString(),
   };
-  writeFileSync(path, JSON.stringify(record, null, 2));
+  // Over a file left by an earlier run, whose mode a plain write would keep.
+  rmSync(path, { force: true });
+  writeFileSync(path, JSON.stringify(record, null, 2), { mode: 0o600 });
   return {
     path,
     release: () => {
@@ -75,7 +80,7 @@ function readRecord(path: string): DesktopLockRecord | null {
       typeof parsed.pid === "number" &&
       typeof parsed.startTime === "string"
     ) {
-      return { cmdline: null, acquiredAt: "", ...parsed } as DesktopLockRecord;
+      return { cmdlineSha256: null, acquiredAt: "", ...parsed } as DesktopLockRecord;
     }
   } catch {
     // Missing, or nothing a desktop wrote.

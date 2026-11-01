@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -62,11 +62,42 @@ test("the desktop writes its pid, start time and host, and takes them away at qu
     const stored = JSON.parse(readFileSync(lock.path, "utf8")) as Record<string, unknown>;
     assert.equal(stored.pid, DESKTOP_PID);
     assert.equal(stored.startTime, DESKTOP.startTime);
-    assert.equal(stored.cmdline, DESKTOP.cmdline);
     assert.equal(stored.hostname, "box");
     lock.release();
     assert.equal(existsSync(lock.path), false);
     assert.doesNotThrow(() => lock.release());
+  });
+});
+
+test("the lock keeps a hash of the command line, private to its user, and still tells who holds it", async () => {
+  await withDir(async (dir) => {
+    const secret = "electron app --token=SECRET";
+    const holder: ProcessIdentity = { startTime: DESKTOP.startTime, cmdline: secret };
+    // Over a file an earlier version left, whose mode a plain write would have kept.
+    writeFileSync(join(dir, "desktop.lock"), "{}", { mode: 0o644 });
+    const lock = await writeDesktopLock(dir, { ...deps({ [DESKTOP_PID]: holder }), pid: DESKTOP_PID });
+    const raw = readFileSync(lock.path, "utf8");
+    assert.equal(raw.includes("SECRET"), false);
+    assert.equal(raw.includes(secret), false);
+    const stored = JSON.parse(raw) as Record<string, unknown>;
+    assert.equal("cmdline" in stored, false);
+    assert.equal(typeof stored.cmdlineSha256, "string");
+    if (process.platform !== "win32") assert.equal(statSync(lock.path).mode & 0o777, 0o600);
+
+    assert.equal((await liveDesktopLockHolder(dir, deps({ [DESKTOP_PID]: holder })))?.pid, DESKTOP_PID);
+    assert.equal(
+      await liveDesktopLockHolder(dir, deps({ [DESKTOP_PID]: { ...holder, cmdline: "notepad" } })),
+      null,
+      "another program with its pid and start time",
+    );
+    lock.release();
+  });
+});
+
+test("a lock in the clear, from before the hash, still reads", async () => {
+  await withDir(async (dir) => {
+    writeRecord(dir);
+    assert.equal((await liveDesktopLockHolder(dir, deps()))?.pid, DESKTOP_PID);
   });
 });
 

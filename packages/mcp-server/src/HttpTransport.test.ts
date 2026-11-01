@@ -2,12 +2,13 @@ import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  Agent as HttpAgent,
   createServer as createHttpServer,
   request as httpRequest,
   type IncomingHttpHeaders,
   type IncomingMessage,
 } from "node:http";
-import { request as httpsRequest } from "node:https";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { createServer as createNetServer } from "node:net";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -23,6 +24,7 @@ import { ActivityLog } from "./ActivityLog.js";
 import { AuthFailureLimiter } from "./auth/AuthFailureLimiter.js";
 import { createPrincipal, type Principal } from "./auth/principal.js";
 import {
+  addressGroup,
   DEFAULT_MAX_REQUEST_BYTES,
   HttpTransport,
   type HttpRoute,
@@ -1292,59 +1294,238 @@ test("legacy SSE counts against the same cap, and its oldest idle stream goes th
   );
 });
 
-/** A POST that declares its size and then stalls, as a slow client's would. */
-function stalledPost(port: number, bytes: number, token: string): { destroy: () => void } {
-  const req = httpRequest({
-    host: "127.0.0.1",
-    port,
-    method: "POST",
-    path: "/mcp",
-    headers: { ...MCP_HEADERS, ...bearer(token), "content-length": String(bytes) },
-  });
-  req.on("error", () => {});
-  req.write("{");
-  return { destroy: () => req.destroy() };
+interface HeldPost {
+  /** Its answer, or null when the socket closed with none. */
+  reply: Promise<RawReply | null>;
+  closed: Promise<void>;
+  destroy: () => void;
 }
 
-test("bodies in flight have a budget: past it a typed refusal, and it comes back when they end", async () => {
+/** A POST that declares its size, sends `sent` of it and then stalls, as a slow client's would. */
+function stalledPost(port: number, bytes: number, token: string, sent = "{"): HeldPost {
+  let setClosed = (): void => {};
+  const closed = new Promise<void>((resolve) => (setClosed = resolve));
+  let setReply = (_: RawReply | null): void => {};
+  const reply = new Promise<RawReply | null>((resolve) => (setReply = resolve));
+  const req = httpRequest(
+    {
+      host: "127.0.0.1",
+      port,
+      method: "POST",
+      path: "/mcp",
+      // A socket of its own, as what is on hold shouldn't be reused for what comes next, and one
+      // kept alive, or an answer would end it whatever the server's limits.
+      agent: false,
+      headers: { ...MCP_HEADERS, ...bearer(token), connection: "keep-alive", "content-length": String(bytes) },
+    },
+    (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => (text += chunk));
+      res.on("end", () => setReply({ status: res.statusCode ?? 0, headers: res.headers, text }));
+      res.on("error", () => setReply(null));
+    },
+  );
+  req.on("error", () => setReply(null));
+  req.on("close", () => {
+    setReply(null);
+    setClosed();
+  });
+  if (sent) req.write(sent);
+  else req.flushHeaders();
+  return { reply, closed, destroy: () => req.destroy() };
+}
+
+function bodyBytesInFlight(t: HttpTransport): number {
+  return (t as unknown as { bodyBytesInFlight: number }).bodyBytesInFlight;
+}
+
+/** The transport's own count of requests seen, since nothing on the wire says one has arrived. */
+function countingRequests(authenticate: (req: IncomingMessage) => Principal | null): {
+  authenticate: (req: IncomingMessage) => Principal | null;
+  seen: () => number;
+} {
+  let seen = 0;
+  return {
+    seen: () => seen,
+    authenticate: (req) => {
+      seen += 1;
+      return authenticate(req);
+    },
+  };
+}
+
+const MIB = 1024 * 1024;
+
+test("a declared length holds nothing: six POSTs saying 128 MiB, no body sent, leave everyone's answer", async () => {
+  const counted = countingRequests(tokensFor(READER, OWNER));
   await withTransport(
-    { authenticate: tokensFor(READER, OWNER), maxBodyBytesInFlight: 1_000, maxRequestBytes: 800 },
-    async (port) => {
-      const holding = stalledPost(port, 700, "reader");
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    { authenticate: counted.authenticate, maxBodyBytesInFlight: 128 * MIB },
+    async (port, t) => {
+      const held = [
+        ...Array.from({ length: 5 }, () => stalledPost(port, 22 * MIB, "reader", "")),
+        stalledPost(port, 18 * MIB, "reader", ""),
+      ];
+      await until(() => counted.seen() >= held.length, "the server to see them");
+      const least = 128 * MIB / 512;
+      assert.equal(bodyBytesInFlight(t), held.length * least, "what they cost is what any request costs");
+      for (const token of ["owner", "reader"]) {
+        const answer = await rawRequest(port, {
+          method: "POST",
+          headers: { ...MCP_HEADERS, ...bearer(token) },
+          body: INITIALIZE,
+        });
+        assert.equal(answer.status, 200, answer.text);
+      }
+      for (const post of held) post.destroy();
+      await until(() => bodyBytesInFlight(t) === 0, "their charges to go");
+    },
+  );
+});
+
+test("a token's bytes stop at its quarter of the budget: past it a typed refusal, and others go on", async () => {
+  await withTransport(
+    { authenticate: tokensFor(READER, OWNER), maxBodyBytesInFlight: 4_000, maxRequestBytes: 3_000 },
+    async (port, t) => {
+      const holding = stalledPost(port, 2_000, "reader", "x".repeat(900));
+      await until(() => bodyBytesInFlight(t) >= 900, "those bytes to arrive");
 
       const refused = await rawRequest(port, {
         method: "POST",
-        headers: { ...MCP_HEADERS, ...bearer("owner"), "content-length": "400" },
-        body: "x".repeat(400),
+        headers: { ...MCP_HEADERS, ...bearer("reader") },
+        body: INITIALIZE.padEnd(200, " "),
       });
       assert.equal(refused.status, 503);
       assert.equal(refused.headers["retry-after"], "1");
       const { error } = JSON.parse(refused.text) as {
-        error: { data: { code: string; retryable: boolean; details: { retry_after_ms: number } } };
+        error: { message: string; data: { code: string; retryable: boolean; details: { retry_after_ms: number } } };
       };
+      assert.match(error.message, /This token's requests/);
       assert.equal(error.data.code, "RATE_LIMITED");
       assert.equal(error.data.retryable, true);
       assert.equal(error.data.details.retry_after_ms, 1_000);
 
-      // A small one still fits, and its charge goes when it is answered.
+      // Someone else's still fits, again and again, and each gives back what it took.
       for (let i = 0; i < 5; i++) {
         const ok = await rawRequest(port, {
           method: "POST",
           headers: { ...MCP_HEADERS, ...bearer("owner") },
-          body: INITIALIZE.padEnd(280, " "),
+          body: INITIALIZE.padEnd(800, " "),
         });
-        assert.equal(ok.status, 200);
+        assert.equal(ok.status, 200, ok.text);
       }
 
       holding.destroy();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await until(() => bodyBytesInFlight(t) < 900, "the stalled one's charge to go");
       const after = await rawRequest(port, {
         method: "POST",
-        headers: { ...MCP_HEADERS, ...bearer("owner"), "content-length": "400" },
-        body: INITIALIZE.padEnd(400, " "),
+        headers: { ...MCP_HEADERS, ...bearer("reader") },
+        body: INITIALIZE.padEnd(800, " "),
       });
       assert.equal(after.status, 200, "the stalled one gave its budget back");
+    },
+  );
+});
+
+test("the budget over all tokens holds too, however fair each one's share", async () => {
+  const tokens = ["a", "b", "c", "d", "e"];
+  await withTransport(
+    {
+      authenticate: tokensFor(...tokens.map((id) => principal(id))),
+      maxBodyBytesInFlight: 1_000,
+      maxRequestBytes: 800,
+    },
+    async (port, t) => {
+      const held = tokens.slice(0, 4).map((token) => stalledPost(port, 500, token, "x".repeat(240)));
+      await until(() => bodyBytesInFlight(t) >= 960, "their bytes to arrive");
+      const refused = await rawRequest(port, {
+        method: "POST",
+        headers: { ...MCP_HEADERS, ...bearer("e") },
+        body: "x".repeat(100),
+      });
+      assert.equal(refused.status, 503);
+      assert.match(refused.text, /this server's 1000 bytes/);
+      for (const post of held) post.destroy();
+    },
+  );
+});
+
+test("however many stalled bodies a token opens, each costs enough that they can't hold every socket", async () => {
+  const counted = countingRequests(tokensFor(READER, OWNER));
+  await withTransport(
+    { authenticate: counted.authenticate, maxBodyBytesInFlight: 5_120 },
+    async (port) => {
+      const held = Array.from({ length: 129 }, () => stalledPost(port, 500, "reader", ""));
+      await until(() => counted.seen() >= held.length, "the server to see them", 15_000);
+      const replies = await Promise.race([
+        Promise.any(held.map((post) => post.reply.then((reply) => reply ?? Promise.reject(new Error("closed"))))),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 3_000)),
+      ]);
+      assert.equal(replies?.status, 503, "the 129th is refused");
+      const owner = await rawRequest(port, {
+        method: "POST",
+        headers: { ...MCP_HEADERS, ...bearer("owner") },
+        body: INITIALIZE,
+      });
+      assert.equal(owner.status, 200);
+      for (const post of held) post.destroy();
+    },
+  );
+});
+
+test("a body has a deadline: 408, the socket closes, and what it held comes back", async () => {
+  await withTransport(
+    { authenticate: tokensFor(READER), maxBodyBytesInFlight: 4_000, bodyReadTimeoutMs: 150 },
+    async (port, t) => {
+      const fine = await rawRequest(port, {
+        method: "POST",
+        headers: { ...MCP_HEADERS, ...bearer("reader") },
+        body: INITIALIZE,
+      });
+      assert.equal(fine.status, 200, "one that arrives in time");
+
+      const stalled = stalledPost(port, 500, "reader", "x".repeat(100));
+      const reply = await stalled.reply;
+      assert.equal(reply?.status, 408);
+      const { error } = JSON.parse(reply!.text) as { error: { data: { code: string; retryable: boolean } } };
+      assert.equal(error.data.code, "TIMEOUT");
+      assert.equal(error.data.retryable, true);
+      assert.equal(reply!.headers.connection, "close");
+      await stalled.closed;
+      await until(() => bodyBytesInFlight(t) === 0, "its charge to go");
+    },
+  );
+});
+
+test("a refused body whose client never finishes is cut at the deadline too", async () => {
+  await withTransport(
+    { authenticate: tokensFor(READER), maxBodyBytesInFlight: 400, bodyReadTimeoutMs: 150 },
+    async (port) => {
+      const started = performance.now();
+      const refused = stalledPost(port, 500, "reader", "x".repeat(300));
+      assert.equal((await refused.reply)?.status, 503);
+      await refused.closed;
+      assert.ok(performance.now() - started < 3_000, "sooner than the keep-alive's own 5 s would have");
+    },
+  );
+});
+
+test("the end of a token drops the bodies it was still sending, and no one else's", async () => {
+  await withTransport(
+    { authenticate: tokensFor(READER, OWNER), maxBodyBytesInFlight: 4_000 },
+    async (port, t) => {
+      const readers = [stalledPost(port, 500, "reader", "x".repeat(100)), stalledPost(port, 500, "reader", "x".repeat(100))];
+      const owners = stalledPost(port, 500, "owner", "x".repeat(100));
+      await until(() => bodyBytesInFlight(t) >= 300, "their bytes to arrive");
+
+      await t.closeSessionsFor("reader");
+      await Promise.all(readers.map((post) => post.closed));
+      await until(() => bodyBytesInFlight(t) <= 100, "their charges to go");
+      let ownersClosed = false;
+      void owners.closed.then(() => (ownersClosed = true));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(ownersClosed, false);
+      owners.destroy();
     },
   );
 });
@@ -1390,10 +1571,214 @@ test("sockets past maxConnections are dropped, and those within it work", async 
   });
 });
 
+/** Idle sockets: connected, and saying nothing. */
+async function holdSockets(port: number, count: number, localAddress?: string): Promise<Socket[]> {
+  const sockets: Socket[] = [];
+  for (let i = 0; i < count; i++) {
+    const socket = netConnect({ port, host: "127.0.0.1", ...(localAddress ? { localAddress } : {}) });
+    socket.on("error", () => {});
+    // Or what the server says last would sit unread, and this end would never see it close.
+    socket.resume();
+    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    sockets.push(socket);
+  }
+  return sockets;
+}
+
+const stillOpen = (sockets: Socket[]): Socket[] => sockets.filter((socket) => !socket.destroyed && !socket.closed);
+
+async function ownerGetsThrough(port: number): Promise<void> {
+  const healthz = await rawRequest(port, { path: "/healthz" });
+  assert.equal(healthz.status, 200);
+  const answer = await rawRequest(port, {
+    method: "POST",
+    headers: { ...MCP_HEADERS, ...bearer("owner") },
+    body: INITIALIZE,
+  });
+  assert.equal(answer.status, 200, answer.text);
+}
+
+test("idle sockets with no token can't keep out someone with one, even from the same address", async () => {
+  await withTransport(
+    {
+      authenticate: tokensFor(OWNER),
+      publicHealthz: true,
+      maxConnections: 20,
+      anonymousSockets: { perAddress: 4, total: 8 },
+    },
+    async (port) => {
+      const idle = await holdSockets(port, 30);
+      await until(() => stillOpen(idle).length <= 4, "the oldest to be closed");
+      assert.deepEqual(stillOpen(idle), idle.slice(-4), "the newest stay, as one of those may be about to speak");
+      await ownerGetsThrough(port);
+      for (const socket of idle) socket.destroy();
+    },
+  );
+});
+
+test("one address's sockets don't cost another address its own", async () => {
+  await withTransport(
+    { authenticate: tokensFor(OWNER), publicHealthz: true, anonymousSockets: { perAddress: 3, total: 100 } },
+    async (port) => {
+      const mine = await holdSockets(port, 3, "127.0.0.1");
+      const theirs = await holdSockets(port, 20, "127.0.0.2");
+      await until(() => stillOpen(theirs).length <= 3, "their oldest to be closed");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(stillOpen(mine).length, 3);
+      for (const socket of [...mine, ...theirs]) socket.destroy();
+    },
+  );
+});
+
+test("many addresses are held to the overall limit, oldest first, and the owner still gets through", async () => {
+  await withTransport(
+    {
+      authenticate: tokensFor(OWNER),
+      publicHealthz: true,
+      maxConnections: 30,
+      anonymousSockets: { perAddress: 4, total: 10 },
+    },
+    async (port) => {
+      const idle: Socket[] = [];
+      for (const address of ["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5"]) {
+        idle.push(...(await holdSockets(port, 4, address)));
+      }
+      await until(() => stillOpen(idle).length <= 10, "the oldest to be closed");
+      assert.deepEqual(stillOpen(idle), idle.slice(-10));
+      await ownerGetsThrough(port);
+      for (const socket of idle) socket.destroy();
+    },
+  );
+});
+
+test("a valid token takes a socket out of the count, a /healthz or a wrong token doesn't", async () => {
+  await withTransport(
+    { authenticate: tokensFor(OWNER), publicHealthz: true, anonymousSockets: { perAddress: 2, total: 100 } },
+    async (port) => {
+      const agent = new HttpAgent({ keepAlive: true, maxSockets: 1 });
+      const ask = (path: string, token: string): Promise<{ status: number; reused: boolean }> =>
+        new Promise((resolve, reject) => {
+          const req = httpRequest({ host: "127.0.0.1", port, path, agent, headers: bearer(token) }, (res) => {
+            res.resume();
+            res.on("end", () => resolve({ status: res.statusCode ?? 0, reused: req.reusedSocket }));
+          });
+          req.on("error", reject);
+          req.end();
+        });
+      try {
+        assert.equal((await ask("/nothing", "owner")).status, 404);
+
+        const spoken = (head: string): Promise<Socket> =>
+          holdSockets(port, 1).then(async ([socket]) => {
+            const answered = new Promise((resolve) => socket!.once("data", resolve));
+            socket!.write(head);
+            await answered;
+            return socket!;
+          });
+        const probing = await spoken("GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
+        const wrong = await spoken(`GET /nothing HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer nope\r\n\r\n`);
+        const idle = await holdSockets(port, 6);
+        await until(() => stillOpen(idle).length <= 2, "the oldest to be closed");
+        assert.equal(probing.closed || probing.destroyed, true, "a probe proves nothing");
+        assert.equal(wrong.closed || wrong.destroyed, true, "nor does a wrong token");
+
+        const again = await ask("/nothing", "owner");
+        assert.equal(again.reused, true, "the owner's own socket was left alone");
+        for (const socket of idle) socket.destroy();
+      } finally {
+        agent.destroy();
+      }
+    },
+  );
+});
+
+test("TLS: a token proves the socket under it, and an idle one is held to the handshake's time", async () => {
+  const certs = {
+    cert: readFileSync(new URL("./testdata/tls-test-only.crt", import.meta.url)),
+    key: readFileSync(new URL("./testdata/tls-test-only.key", import.meta.url)),
+  };
+  await withTransport(
+    {
+      authenticate: tokensFor(OWNER),
+      tls: certs,
+      headersTimeoutMs: 200,
+      anonymousSockets: { perAddress: 2, total: 100 },
+    },
+    async (port) => {
+      const agent = new HttpsAgent({ keepAlive: true, maxSockets: 1, rejectUnauthorized: false });
+      const ask = (): Promise<{ status: number; reused: boolean }> =>
+        new Promise((resolve, reject) => {
+          const req = httpsRequest(
+            { host: "127.0.0.1", port, path: "/nothing", agent, headers: bearer("owner") },
+            (res) => {
+              res.resume();
+              res.on("end", () => resolve({ status: res.statusCode ?? 0, reused: req.reusedSocket }));
+            },
+          );
+          req.on("error", reject);
+          req.end();
+        });
+      try {
+        assert.equal((await ask()).status, 404);
+        const idle = await holdSockets(port, 6);
+        await until(() => stillOpen(idle).length <= 2, "the oldest to be closed");
+        assert.equal((await ask()).reused, true, "the owner's own socket was left alone");
+        await until(() => stillOpen(idle).length === 0, "the handshake's time to end them", 5_000);
+      } finally {
+        agent.destroy();
+      }
+    },
+  );
+});
+
+test("a socket has this long to send its headers: none, or some of them", async () => {
+  await withTransport({ authenticate: tokensFor(OWNER), headersTimeoutMs: 100 }, async (port) => {
+    const [silent, partial] = await holdSockets(port, 2);
+    partial!.write("GET /healthz HTTP/1.1\r\nHost:");
+    const closedSoon = (socket: Socket): Promise<void> =>
+      new Promise((resolve, reject) => {
+        const giveUp = setTimeout(() => reject(new Error("still open")), 5_000);
+        socket.once("close", () => {
+          clearTimeout(giveUp);
+          resolve();
+        });
+      });
+    await Promise.all([closedSoon(silent!), closedSoon(partial!)]);
+    const owner = await rawRequest(port, {
+      method: "POST",
+      headers: { ...MCP_HEADERS, ...bearer("owner") },
+      body: INITIALIZE,
+    });
+    assert.equal(owner.status, 200, "one that does speak isn't held to it");
+  });
+});
+
+test("a socket counts against its address, an IPv6 client's against its /64", () => {
+  assert.equal(addressGroup("203.0.113.9"), "203.0.113.9");
+  assert.equal(addressGroup("::ffff:203.0.113.9"), "203.0.113.9");
+  assert.equal(addressGroup("2001:db8:1:2:a::1"), "2001:db8:1:2::/64");
+  assert.equal(addressGroup("2001:0db8:1:2:b:c:d:e"), "2001:db8:1:2::/64");
+  assert.notEqual(addressGroup("2001:db8:1:3::1"), addressGroup("2001:db8:1:2::1"));
+  assert.equal(addressGroup("2001:db8::1"), "2001:db8:0:0::/64");
+  assert.equal(addressGroup("::1"), "0:0:0:0::/64");
+  assert.equal(addressGroup("fe80::1%eth0"), "fe80:0:0:0::/64");
+});
+
 test("with none of these options, as on a desktop, one principal opens all it likes and nothing is charged", async () => {
   await withTransport({ authenticate: tokensFor(OWNER), maxRequestBytes: 800 }, async (port, t) => {
     for (let i = 0; i < 40; i++) await openSession(port, "owner");
     assert.equal(t.status().streamable, 40);
-    assert.equal((t as unknown as { server: { maxConnections?: number } }).server.maxConnections, undefined);
+    const server = (t as unknown as { server: { maxConnections?: number; headersTimeout: number } }).server;
+    assert.equal(server.maxConnections, undefined);
+    assert.equal(server.headersTimeout, 60_000, "Node's own");
+    const idle = await holdSockets(port, 30);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(stillOpen(idle).length, 30, "no socket is anyone's to close");
+    assert.equal((t as unknown as { anonymousSockets: Map<string, unknown> }).anonymousSockets.size, 0);
+    for (const socket of idle) socket.destroy();
+    const stalled = stalledPost(port, 500, "owner", "x");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(bodyBytesInFlight(t), 0);
+    stalled.destroy();
   });
 });

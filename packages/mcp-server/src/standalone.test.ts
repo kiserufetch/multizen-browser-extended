@@ -19,7 +19,7 @@ test("without --mock it explains how to run the real server, exits 2, leaves std
   });
   assert.equal(res.status, 2, res.stderr);
   assert.equal(res.stdout, "");
-  assert.match(res.stderr, /multizen-server\.js stdio/);
+  assert.match(res.stderr, /multizen-server\.cjs stdio/);
   assert.match(res.stderr, /--mock/);
 });
 

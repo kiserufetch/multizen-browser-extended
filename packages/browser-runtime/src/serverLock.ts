@@ -74,7 +74,7 @@ export interface ServerLock {
   release(): void;
 }
 
-function hashOfCmdline(cmdline: string): string {
+export function hashOfCmdline(cmdline: string): string {
   return createHash("sha256").update(cmdline).digest("hex");
 }
 
@@ -182,7 +182,7 @@ function parseRecord(raw: string): ServerLockRecord | null {
 export async function holderIsAlive(
   record: Pick<ServerLockRecord, "hostname" | "pid" | "startTime"> & {
     cmdlineSha256?: string | null;
-    /** A desktop's lock has it in the clear, having no secret on its command line. */
+    /** What a desktop's lock held before it kept the hash. Such a file can outlive that version's crash. */
     cmdline?: string | null;
   },
   deps: ServerLockDeps,

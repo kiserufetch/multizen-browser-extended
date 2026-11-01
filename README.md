@@ -246,8 +246,8 @@ From source (Node 22+, Corepack):
 ```sh
 corepack yarn install
 corepack yarn workspace @multizen/server build
-node apps/server/bin/multizen-server.js serve --headless
-node apps/server/bin/multizen-server.js token create --name agent    # in another shell
+node apps/server/bin/multizen-server.cjs serve --headless
+node apps/server/bin/multizen-server.cjs token create --name agent    # in another shell
 ```
 
 Or in Docker, where browsers run under Xvfb by default, as a non-root user with the Chromium sandbox on and no way to turn it off:

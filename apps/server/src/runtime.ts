@@ -3,6 +3,7 @@ import {
   bindHandoffToBrowser,
   createSharedMcpState,
   InMemoryHumanHandoff,
+  type ActivityEvent,
   type SharedMcpState,
 } from "@multizen/mcp-server";
 import { ProfileManager } from "@multizen/profile-manager";
@@ -224,6 +225,25 @@ export async function takeOverFromPreviousRun(dataDir: string): Promise<ProcessJ
  * What `scripts/detection-baseline` varies to compare a launch with the desktop's. No flag
  * and no tool reaches this: the server itself never passes any of it.
  */
+/**
+ * A tool call as the log has it. A failed `evaluate_js` carries whatever the page threw, cookies
+ * included, and an unexpected error whatever was at hand, so of those only the code goes in. Any
+ * other message is ours, and meant not to hold a whole URL. One from anywhere else may.
+ */
+export function toolCallLogFields(e: ActivityEvent): Record<string, unknown> {
+  const quiet = e.tool === "evaluate_js" || e.errorCode === "INTERNAL_ERROR";
+  return {
+    tool: e.tool,
+    status: e.status,
+    actor: e.actor,
+    durationMs: e.durationMs,
+    profileId: e.profileId,
+    ...(e.status === "error"
+      ? { code: e.errorCode, ...(quiet ? {} : { error: withOriginsOnly(e.summary ?? "") }) }
+      : {}),
+  };
+}
+
 export interface MeasurementOverrides {
   /** Replaces {@link serverDisabledFeatures}. The desktop's launch has none. */
   disabledFeatures?: readonly string[];
@@ -282,8 +302,8 @@ export async function buildRuntime(
   }
   if (egress.enforced && !process.env.UV_THREADPOOL_SIZE) {
     log.warn(
-      "UV_THREADPOOL_SIZE isn't set, so browsers can only look up one name each at a time. " +
-        "bin/multizen-server.js and the image set it. On Windows it only works set before Node starts: set it to 64.",
+      "UV_THREADPOOL_SIZE isn't set, so browsers can only look up two names each at a time. " +
+        "bin/multizen-server.cjs and the image set it. On Windows it only works set before Node starts: set it to 64.",
     );
   }
   const openLoopback = egress.enforced ? egress.loopbackAllowedOnAnyPort() : [];
@@ -341,15 +361,7 @@ export async function buildRuntime(
   // Never the arguments or a successful result: those can hold cookies or page text.
   activityLog.on("event", (e) => {
     if (e.status === "pending") return;
-    log.info("tool call", {
-      tool: e.tool,
-      status: e.status,
-      actor: e.actor,
-      durationMs: e.durationMs,
-      profileId: e.profileId,
-      // A driver's message is meant not to hold a whole URL. One from anywhere else may.
-      ...(e.status === "error" ? { error: withOriginsOnly(e.summary ?? "") } : {}),
-    });
+    log.info("tool call", toolCallLogFields(e));
   });
 
   const handoff = new InMemoryHumanHandoff(

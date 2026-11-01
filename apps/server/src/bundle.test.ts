@@ -143,7 +143,12 @@ test("the built CLI starts: help, no command, an unknown command", () => {
 });
 
 test("the start sizes libuv's pool before anything can use it, and the image does too", () => {
-  const bin = readFileSync(join(APP_ROOT, "bin", "multizen-server.js"), "utf8");
+  // An ES module entry is read through that pool on Node before about 22.20, so it has to be CommonJS.
+  const entry = (JSON.parse(readFileSync(join(APP_ROOT, "package.json"), "utf8")) as { bin: Record<string, string> }).bin[
+    "multizen-server"
+  ]!;
+  assert.match(entry, /\.cjs$/);
+  const bin = readFileSync(join(APP_ROOT, entry), "utf8");
   const set = bin.indexOf("UV_THREADPOOL_SIZE");
   assert.ok(set !== -1 && set < bin.indexOf("import("), "set ahead of loading the server");
   const image = readFileSync(join(APP_ROOT, "..", "..", "docker", "Dockerfile"), "utf8");

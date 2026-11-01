@@ -5,7 +5,7 @@ import {
   type Server as HttpServer,
 } from "node:http";
 import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
-import { isIPv6 } from "node:net";
+import { isIPv6, type Socket } from "node:net";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
@@ -19,7 +19,7 @@ import {
   isJSONRPCRequest,
   isJSONRPCResultResponse,
 } from "@modelcontextprotocol/sdk/types.js";
-import { clientAddress, type AuthFailureLimiter } from "./auth/AuthFailureLimiter.js";
+import { clientAddress, withoutMappedPrefix, type AuthFailureLimiter } from "./auth/AuthFailureLimiter.js";
 import { FULL_PRINCIPAL, type Principal } from "./auth/principal.js";
 
 /**
@@ -30,6 +30,8 @@ export const DEFAULT_MAX_REQUEST_BYTES = 22 * 1024 * 1024;
 
 const SWEEP_MIN_INTERVAL_MS = 25;
 const SWEEP_MAX_INTERVAL_MS = 30_000;
+/** How often Node looks for a request past its time. Its default, 30 s, would dwarf a headers timeout. */
+const CONNECTIONS_CHECK_INTERVAL_MS = 1_000;
 
 export interface RouteContext {
   /** Null on a public route, which has to authenticate by its own means. */
@@ -99,12 +101,24 @@ export interface HttpTransportOptions {
   /** POST bodies above this get 413 FILE_TOO_LARGE. Default {@link DEFAULT_MAX_REQUEST_BYTES}. */
   maxRequestBytes?: number;
   /**
-   * What all POST bodies still being read or handled may add up to. Past it a request gets 503
-   * RATE_LIMITED: the per-request limit alone lets a few clients hold the whole heap. Off unless given.
+   * What all POST bodies still being read or handled may add up to, in bytes that have arrived, as
+   * a declared length costs nothing to send. Past it, or past a token's quarter of it, a request
+   * gets 503 RATE_LIMITED: the per-request limit alone lets a few clients hold the whole heap. A body
+   * counts as a 512th of it however little has arrived, since it holds a socket. Off unless given.
    */
   maxBodyBytesInFlight?: number;
+  /** How long a POST body may take to arrive. Past it, 408 TIMEOUT and the socket closes. Off unless given. */
+  bodyReadTimeoutMs?: number;
   /** Sockets beyond this are dropped by the OS-level accept. Off unless given. */
   maxConnections?: number;
+  /**
+   * Sockets that haven't shown a valid token, which is all anyone reaching the port can hold, per
+   * client address (for IPv6 a /64) and in all. Past either the oldest of them goes, not the new one,
+   * so these can't keep out someone with a token, even from the same address. Off unless given.
+   */
+  anonymousSockets?: { perAddress: number; total: number };
+  /** How long a connection may take to send its headers, or a TLS handshake to finish. Default: Node's. */
+  headersTimeoutMs?: number;
   /** /healthz answers only `{ok:true}`, to anyone. Default: as any other route, behind auth. */
   publicHealthz?: boolean;
   /** Tried before authentication, for a request with an allowed Host. */
@@ -161,6 +175,23 @@ function parseHost(value: string): HostName | null {
     name: match[1]!.replace(/\.$/, ""),
     ...(port !== undefined && port !== "80" && port !== "443" ? { port } : {}),
   };
+}
+
+/** Which address a socket counts against. An IPv6 client usually has a whole /64 to itself. */
+export function addressGroup(remoteAddress: string): string {
+  const address = withoutMappedPrefix(remoteAddress);
+  if (!isIPv6(address)) return address;
+  const [head = "", tail = ""] = address.split("%")[0]!.split("::");
+  const headGroups = head ? head.split(":") : [];
+  const tailGroups = tail ? tail.split(":") : [];
+  const zeros = Array<string>(8 - headGroups.length - tailGroups.length).fill("0");
+  const prefix = [...headGroups, ...zeros, ...tailGroups].slice(0, 4);
+  return `${prefix.map((group) => parseInt(group, 16).toString(16)).join(":")}::/64`;
+}
+
+/** The same for a TLS socket as for the TCP one under it, which is all a `connection` event gives. */
+function peerOf(socket: Socket): string {
+  return `${socket.remoteAddress}|${socket.remotePort}`;
 }
 
 /**
@@ -221,6 +252,12 @@ export class HttpTransport {
   private openingSessions = 0;
   private readonly openingByPrincipal = new Map<string, number>();
   private bodyBytesInFlight = 0;
+  private readonly bodyBytesByPrincipal = new Map<string, number>();
+  /** Still arriving, so that the end of a token can drop them. */
+  private readonly bodiesArriving = new Set<{ principalId: string; socket: Socket }>();
+  /** By peer, oldest first: a Map keeps insertion order. */
+  private readonly anonymousSockets = new Map<string, { socket: Socket; group: string }>();
+  private readonly anonymousByGroup = new Map<string, number>();
   private sweep: ReturnType<typeof setInterval> | undefined;
   private stopping = false;
 
@@ -256,10 +293,64 @@ export class HttpTransport {
         else res.end();
       });
     };
+    const headersTimeout = opts.headersTimeoutMs;
+    const timeouts =
+      headersTimeout === undefined
+        ? {}
+        : { headersTimeout, connectionsCheckingInterval: CONNECTIONS_CHECK_INTERVAL_MS };
     this.server = opts.tls
-      ? createHttpsServer({ cert: opts.tls.cert, key: opts.tls.key }, listener)
-      : createHttpServer(listener);
+      ? createHttpsServer(
+          {
+            cert: opts.tls.cert,
+            key: opts.tls.key,
+            ...timeouts,
+            // Before its handshake a socket has no HTTP parser for the timeout above to watch.
+            ...(headersTimeout === undefined ? {} : { handshakeTimeout: headersTimeout }),
+          },
+          listener,
+        )
+      : createHttpServer(timeouts, listener);
     if (opts.maxConnections !== undefined) this.server.maxConnections = opts.maxConnections;
+    const limits = opts.anonymousSockets;
+    if (limits) this.server.on("connection", (socket: Socket) => this.admitAnonymous(socket, limits));
+  }
+
+  /** Every socket starts here, and leaves at its first valid token or when it closes. */
+  private admitAnonymous(socket: Socket, limits: { perAddress: number; total: number }): void {
+    // Gone already: the client hung up before this turn of the loop.
+    if (socket.remoteAddress === undefined) return;
+    const peer = peerOf(socket);
+    const group = addressGroup(socket.remoteAddress);
+    this.forgetAnonymous(peer);
+    this.anonymousSockets.set(peer, { socket, group });
+    const inGroup = (this.anonymousByGroup.get(group) ?? 0) + 1;
+    this.anonymousByGroup.set(group, inGroup);
+    socket.once("close", () => {
+      if (this.anonymousSockets.get(peer)?.socket === socket) this.forgetAnonymous(peer);
+    });
+    if (inGroup > limits.perAddress) {
+      this.dropOldestAnonymous((entry) => entry.group === group);
+    } else if (this.anonymousSockets.size > limits.total) {
+      this.dropOldestAnonymous(() => true);
+    }
+  }
+
+  private dropOldestAnonymous(of: (entry: { group: string }) => boolean): void {
+    for (const [peer, entry] of this.anonymousSockets) {
+      if (!of(entry)) continue;
+      this.forgetAnonymous(peer);
+      entry.socket.destroy();
+      return;
+    }
+  }
+
+  private forgetAnonymous(peer: string): void {
+    const entry = this.anonymousSockets.get(peer);
+    if (!entry) return;
+    this.anonymousSockets.delete(peer);
+    const inGroup = (this.anonymousByGroup.get(entry.group) ?? 1) - 1;
+    if (inGroup > 0) this.anonymousByGroup.set(entry.group, inGroup);
+    else this.anonymousByGroup.delete(entry.group);
   }
 
   async start(): Promise<void> {
@@ -327,9 +418,13 @@ export class HttpTransport {
 
   /**
    * Ends every session of a token that stopped being valid. Closing a transport aborts
-   * what its calls wait on, so its queued calls go too, and its streams end.
+   * what its calls wait on, so its queued calls go too, and its streams end. What it was
+   * still sending goes as well, which also gives back what that held of the body budget.
    */
   async closeSessionsFor(principalId: string): Promise<void> {
+    for (const body of this.bodiesArriving) {
+      if (body.principalId === principalId) body.socket.destroy();
+    }
     await Promise.all(
       [...this.sseSessions.values(), ...this.streamableSessions.values()]
         .filter((session) => session.principalId === principalId)
@@ -505,6 +600,7 @@ export class HttpTransport {
       this.refuseCredential(res, address);
       return;
     }
+    this.forgetAnonymous(peerOf(req.socket));
     // The SDK hands this to each tool handler as `extra.authInfo`.
     (req as AuthedRequest).auth = {
       token: "",
@@ -581,11 +677,12 @@ export class HttpTransport {
   private async readPostBody(
     req: IncomingMessage,
     res: ServerResponse,
+    principalId: string,
   ): Promise<{ body: unknown } | undefined> {
-    const account = this.bodyAccount(res);
+    const account = this.bodyAccount(res, principalId);
     let raw: Buffer;
     try {
-      raw = await readRequestBody(req, this.maxRequestBytes, account);
+      raw = await readRequestBody(req, this.maxRequestBytes, account, this.watchBody(req, res, principalId));
     } catch (e) {
       if (e instanceof BodyBudgetError) {
         res.setHeader("retry-after", String(BODY_BUDGET_RETRY_AFTER_S));
@@ -594,6 +691,9 @@ export class HttpTransport {
           retryable: true,
           details: { retry_after_ms: BODY_BUDGET_RETRY_AFTER_S * 1000 },
         });
+      } else if (e instanceof BodyDeadlineError) {
+        res.setHeader("connection", "close");
+        jsonRpcError(res, 408, -32000, `TIMEOUT: ${e.message}`, { code: "TIMEOUT", retryable: true });
       } else if (e instanceof RequestTooLargeError) {
         jsonRpcError(res, 413, -32000, `FILE_TOO_LARGE: ${e.message}`, {
           code: "FILE_TOO_LARGE",
@@ -614,25 +714,60 @@ export class HttpTransport {
   }
 
   /**
-   * Charges a body to the budget as it arrives, the size it declares up front. It stays charged
-   * until its response ends, as its parsed form lives as long as the call does.
+   * Charges a body to the budget as it arrives, never what it says it will send: that costs nothing
+   * to say, and would let one token hold the budget with no bytes at all. It stays charged until
+   * its response ends, as its parsed form lives as long as the call does. The least it costs bounds
+   * how many sockets stalled bodies can hold, which their bytes wouldn't.
    */
-  private bodyAccount(res: ServerResponse): ((bytes: number) => void) | undefined {
+  private bodyAccount(res: ServerResponse, principalId: string): ((bytes: number) => void) | undefined {
     const budget = this.opts.maxBodyBytesInFlight;
     if (budget === undefined) return undefined;
+    const share = Math.floor(budget / BODY_SHARE_DIVISOR);
+    const least = Math.max(1, Math.floor(budget / BODY_LEAST_DIVISOR));
     let charged = 0;
-    res.once("close", () => {
-      this.bodyBytesInFlight -= charged;
-      charged = 0;
-    });
+    const charge = (bytes: number): void => {
+      this.bodyBytesInFlight += bytes;
+      const own = (this.bodyBytesByPrincipal.get(principalId) ?? 0) + bytes;
+      if (own > 0) this.bodyBytesByPrincipal.set(principalId, own);
+      else this.bodyBytesByPrincipal.delete(principalId);
+      charged += bytes;
+    };
+    res.once("close", () => charge(-charged));
     return (bytes) => {
-      if (bytes <= charged) return;
-      if (this.bodyBytesInFlight + bytes - charged > budget) {
+      const more = Math.max(bytes, least) - charged;
+      if (more <= 0) return;
+      if (this.bodyBytesInFlight + more > budget) {
         throw new BodyBudgetError(`Requests in flight hold this server's ${budget} bytes for bodies.`);
       }
-      this.bodyBytesInFlight += bytes - charged;
-      charged = bytes;
+      if ((this.bodyBytesByPrincipal.get(principalId) ?? 0) + more > share) {
+        throw new BodyBudgetError(`This token's requests in flight hold its ${share} bytes for bodies.`);
+      }
+      charge(more);
     };
+  }
+
+  /**
+   * Bounds how long a body may take to arrive, and lets the end of its token drop it. This outlives
+   * the read: a refused body's answer goes out while the rest is still read and thrown away.
+   */
+  private watchBody(req: IncomingMessage, res: ServerResponse, principalId: string): AbortSignal {
+    const read = new AbortController();
+    const body = { principalId, socket: req.socket };
+    this.bodiesArriving.add(body);
+    const timeoutMs = this.opts.bodyReadTimeoutMs;
+    const deadline =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            if (res.headersSent) req.socket.destroy();
+            else read.abort(new BodyDeadlineError(`The request's body didn't arrive within ${timeoutMs} ms.`));
+          }, timeoutMs);
+    deadline?.unref?.();
+    req.once("close", () => {
+      clearTimeout(deadline);
+      this.bodiesArriving.delete(body);
+    });
+    return read.signal;
   }
 
   /**
@@ -671,7 +806,7 @@ export class HttpTransport {
         await existing.transport.handleRequest(req, res);
         return;
       }
-      const parsed = await this.readPostBody(req, res);
+      const parsed = await this.readPostBody(req, res, principal.id);
       if (!parsed) return;
       this.armClientGone(req, res);
       await existing.transport.handleRequest(req, res, parsed.body);
@@ -684,7 +819,7 @@ export class HttpTransport {
       return;
     }
 
-    const parsed = await this.readPostBody(req, res);
+    const parsed = await this.readPostBody(req, res, principal.id);
     if (!parsed) return;
 
     if (!isInitializeRequest(parsed.body)) {
@@ -816,7 +951,7 @@ export class HttpTransport {
       return;
     }
     session.lastActivityAt = Date.now();
-    const parsed = await this.readPostBody(req, res);
+    const parsed = await this.readPostBody(req, res, principal.id);
     if (!parsed) return;
     // The SDK reads `null` as nothing parsed, and would wait on a body already consumed.
     if (parsed.body === null) {
@@ -859,19 +994,27 @@ function jsonRpcError(
 
 export class RequestTooLargeError extends Error {}
 class BodyBudgetError extends Error {}
+class BodyDeadlineError extends Error {}
 
 const BODY_BUDGET_RETRY_AFTER_S = 1;
+/** One token's part of the budget for bodies. */
+const BODY_SHARE_DIVISOR = 4;
+/** What a body costs however little has arrived: 128 at once for a token, 512 in all. */
+const BODY_LEAST_DIVISOR = 512;
 
 /**
  * The whole body, up to a limit. Past it the rest is still read and thrown away rather
  * than the socket being cut: a client still sending would otherwise lose the answer to
  * a reset. Node's own request timeout bounds a client that never stops. `account` hears of
- * the size so far, the declared size first, and throws to refuse the request the same way.
+ * the size so far, starting at 0, and throws to refuse the request the same way. `signal`
+ * gives up the same way, with its reason. A declared size only ever refuses at once: it's
+ * no reason to set anything aside, as nothing need follow it.
  */
 export function readRequestBody(
   req: IncomingMessage,
   limitBytes: number,
   account?: (bytes: number) => void,
+  signal?: AbortSignal,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const tooLarge = (): RequestTooLargeError =>
@@ -883,7 +1026,7 @@ export function readRequestBody(
       return;
     }
     try {
-      if (declared > 0) account?.(declared);
+      account?.(0);
     } catch (e) {
       req.resume();
       reject(e as Error);
@@ -891,6 +1034,14 @@ export function readRequestBody(
     }
     let chunks: Buffer[] | null = [];
     let size = 0;
+    signal?.addEventListener(
+      "abort",
+      () => {
+        chunks = null;
+        reject(signal.reason as Error);
+      },
+      { once: true },
+    );
     req.on("data", (chunk: Buffer) => {
       if (!chunks) return;
       size += chunk.length;

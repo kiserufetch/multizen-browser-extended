@@ -14,6 +14,8 @@ export interface ActivityEvent {
   status: "pending" | "ok" | "error";
   /** Result summary or error message */
   summary?: string;
+  /** Of a call that failed. Unlike the message, it can't hold what a page said. */
+  errorCode?: string;
   durationMs?: number;
 }
 
@@ -55,9 +57,10 @@ export class ActivityLog extends EventEmitter {
     return event;
   }
 
-  finish(event: ActivityEvent, status: "ok" | "error", summary: string, startedAt: number): void {
+  finish(event: ActivityEvent, status: "ok" | "error", summary: string, startedAt: number, errorCode?: string): void {
     event.status = status;
     event.summary = summary.slice(0, 500);
+    if (errorCode !== undefined) event.errorCode = errorCode;
     event.durationMs = Date.now() - startedAt;
     this.emit("event", event);
   }

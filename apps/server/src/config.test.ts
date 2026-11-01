@@ -15,7 +15,10 @@ import {
   parseTokenCommand,
   UsageError,
   type PlatformFacts,
+  type StdioConfig,
 } from "./config.ts";
+import { localToolLimits } from "./commands/stdio.ts";
+import { connectionLimits } from "./commands/serve.ts";
 
 const LINUX: PlatformFacts = { platform: "linux", home: "/home/u", inContainer: false };
 
@@ -191,6 +194,7 @@ test("stdio: local by default, --connect switches to the relay", () => {
     headless: false,
     egressPolicy: "block-private",
     egressAllow: [],
+    uploadInboxQuotaBytes: 1024 ** 3,
   });
   assert.deepEqual(
     parseStdioConfig(["--connect", "http://127.0.0.1:7777/mcp", "--token-file", "t"], {}, LINUX),
@@ -232,6 +236,31 @@ for (const [name, argv, pattern] of [
 test("--connect runs no browsers, so the egress flags don't apply", () => {
   for (const flag of [["--egress-policy", "allow-all"], ["--egress-allow", "10.0.0.1"]]) {
     assert.throws(() => parseStdioConfig(["--connect", "http://x", ...flag], {}, LINUX), /runs no browsers/);
+  }
+});
+
+test("stdio has the same inbox quota as serve, and --connect none to give", () => {
+  const local = parseStdioConfig([], {}, LINUX) as Extract<StdioConfig, { kind: "local" }>;
+  assert.equal(local.uploadInboxQuotaBytes, parseServeConfig([], {}, LINUX).uploadInboxQuotaBytes);
+  assert.equal(localToolLimits(local).maxInboxBytes, local.uploadInboxQuotaBytes);
+  const flag = parseStdioConfig(["--upload-inbox-quota-bytes", "1000"], {}, LINUX) as typeof local;
+  assert.equal(flag.uploadInboxQuotaBytes, 1000);
+  const env = parseStdioConfig([], { MULTIZEN_UPLOAD_INBOX_QUOTA_BYTES: "2000" }, LINUX) as typeof local;
+  assert.equal(env.uploadInboxQuotaBytes, 2000);
+  assert.throws(
+    () => parseStdioConfig(["--connect", "http://x", "--upload-inbox-quota-bytes", "1"], {}, LINUX),
+    /runs no browsers/,
+  );
+});
+
+test("stdio --connect keeps no userinfo in what it connects to and logs, and doesn't repeat it", () => {
+  const config = parseStdioConfig(["--connect", "http://mzuser:hunter2@127.0.0.1:7777/mcp"], {}, LINUX);
+  assert.deepEqual(config, { kind: "connect", url: "http://127.0.0.1:7777/mcp", tokenFile: undefined });
+  for (const bad of ["ftp://mzuser:hunter2@h/", "http://mzuser:hunter2@"]) {
+    assert.throws(
+      () => parseStdioConfig(["--connect", bad], {}, LINUX),
+      (e: Error) => e instanceof UsageError && !e.message.includes("hunter2"),
+    );
   }
 });
 
@@ -630,9 +659,23 @@ test("a webhook must be http(s), and a secret needs a webhook", () => {
   assert.throws(() => parseServeConfig(["--download-quota-bytes", "x"], {}, LINUX), UsageError);
 });
 
+test("socket limits: one address can't reach the backstop, and a proxy's one address isn't held to less than all", () => {
+  const direct = connectionLimits(parseServeConfig([], {}, LINUX));
+  assert.deepEqual(direct, { maxConnections: 4096, anonymousSockets: { perAddress: 256, total: 1024 } });
+
+  // Everyone behind the proxy is one address: the old limit for the whole server is its limit here.
+  const proxied = connectionLimits(parseServeConfig(["--trust-proxy"], {}, LINUX));
+  assert.equal(proxied.anonymousSockets.perAddress, proxied.anonymousSockets.total);
+  assert.equal(proxied.maxConnections, direct.maxConnections);
+
+  const many = connectionLimits(parseServeConfig(["--max-sessions", "500"], {}, LINUX));
+  assert.deepEqual(many, { maxConnections: 32_000, anonymousSockets: { perAddress: 2000, total: 8000 } });
+});
+
 test("per-token sessions and the upload inbox have defaults, flags and variables", () => {
   const base = parseServeConfig([], {}, LINUX);
-  assert.equal(base.maxSessionsPerToken, 32);
+  assert.equal(base.maxSessionsPerToken, 16);
+  assert.ok(base.maxSessionsPerToken * 2 < base.maxSessions, "two tokens can't fill the server");
   assert.equal(base.uploadInboxQuotaBytes, 1024 ** 3);
   const flags = parseServeConfig(["--max-sessions-per-token", "5", "--upload-inbox-quota-bytes", "1000"], {}, LINUX);
   assert.equal(flags.maxSessionsPerToken, 5);

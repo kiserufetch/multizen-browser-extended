@@ -144,6 +144,30 @@ test("a real tools/call logs through the allowlist", async () => {
   await client.close();
 });
 
+test("a failed call says its code beside its message", async () => {
+  const driver = new MockBrowserDriver();
+  await driver.launch("p");
+  driver.evaluateJs = async () => {
+    throw new Error(SECRET);
+  };
+  const activityLog = new ActivityLog();
+  const { server } = createMultizenMcpServer({
+    profileManager: {} as unknown as ProfileManager,
+    browserDriver: driver,
+    activityLog,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "0.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  await client.callTool({ name: "evaluate_js", arguments: { profile_id: "p", expression: "1" } });
+  await client.close();
+  const event = activityLog.recent().at(-1)!;
+  assert.equal(event.status, "error");
+  assert.equal(event.errorCode, "INTERNAL_ERROR");
+  assert.equal(event.summary, SECRET, "the desktop's feed keeps it");
+});
+
 test("display_mode reaches the activity feed on the tools that take it", () => {
   const log = new ActivityLog();
   assert.equal(log.startCall("launch_profile", { profile_id: "p", display_mode: "headless" }).args.display_mode, "headless");

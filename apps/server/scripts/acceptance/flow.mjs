@@ -10,7 +10,7 @@ import { pinnedCloakBrowserManifest } from "@multizen/browser-runtime";
 export const IS_WINDOWS = process.platform === "win32";
 export const HERE = import.meta.dirname;
 export const REPO = resolve(HERE, "../../../..");
-export const CLI = join(REPO, "apps/server/bin/multizen-server.js");
+export const CLI = join(REPO, "apps/server/bin/multizen-server.cjs");
 
 export const freePort = () =>
   new Promise((done) => {

@@ -72,7 +72,7 @@ export class AuthFailureLimiter {
   }
 }
 
-function withoutMappedPrefix(address: string): string {
+export function withoutMappedPrefix(address: string): string {
   return address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
 }
 

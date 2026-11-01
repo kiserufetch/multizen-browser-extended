@@ -7,6 +7,27 @@ import { resolveProxyLaunchGeo } from "./launchGeo";
 import { probeProxyGeo } from "./proxyGeo";
 import { StrictGeoCoherenceError } from "./launchTimezone";
 
+test("the probe dials the host a policy judged, or nothing: a port or a host can't move it", async () => {
+  for (const [hostile, why] of [
+    [{ type: "http", host: "8.8.8.8", port: "80@169.254.169.254/#" }, /port isn't a number/],
+    [{ type: "socks5", host: "8.8.8.8", port: "80@169.254.169.254/#" }, /port isn't a number/],
+    [{ type: "http", host: "x@169.254.169.254/#", port: 8080 }, /host isn't an address or a name/],
+    [{ type: "http", host: "169.254.169.254:80/#", port: 8080 }, /host isn't an address or a name/],
+  ] as const) {
+    await assert.rejects(probeProxyGeo(hostile as unknown as ProxyConfig, { timeoutMs: 200 }), why);
+  }
+});
+
+test("the probe still takes every host that can connect, in any form it did", async () => {
+  for (const host of ["127.0.0.1", "[::1]", "[0:0:0:0:0:0:0:1]", "EXAMPLE.invalid", "пример.invalid", "a.invalid."]) {
+    // Fails later and otherwise: nothing listens, and no such names resolve.
+    await assert.rejects(probeProxyGeo({ type: "http", host, port: 9 }, { timeoutMs: 200 }), (e: Error) => {
+      assert.doesNotMatch(e.message, /isn't an address or a name|isn't a number/, host);
+      return true;
+    });
+  }
+});
+
 const proxy = { type: "socks5", host: "127.0.0.1", port: 1080 } as unknown as ProxyConfig;
 const fp = {
   locale: "en-US",

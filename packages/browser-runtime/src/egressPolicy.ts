@@ -280,26 +280,41 @@ const systemLookup: EgressLookup = (host) => dns.lookup(host, { all: true });
 
 /** libuv's own, unless UV_THREADPOOL_SIZE says otherwise. The server's start sets that to 64. */
 const DEFAULT_THREADPOOL_SIZE = 4;
-/** What a lookup may take before its connection is refused. The resolver may take far longer. */
-const LOOKUP_TIMEOUT_MS = 5_000;
+/**
+ * What a lookup may take before its connection is refused. The resolver may take far longer, and it
+ * retries at 5 s by default in glibc: a limit right there fails a name that its second try would answer.
+ */
+const LOOKUP_TIMEOUT_MS = 10_000;
+/** Below this a browser's page and its one slow name take turns, and a page has many. */
+const MIN_BRIDGE_LOOKUPS = 2;
 
 function threadpoolSize(): number {
   return Number(process.env.UV_THREADPOOL_SIZE) || DEFAULT_THREADPOOL_SIZE;
 }
 
 /**
- * A lookup that holds at most `limit` of libuv's threads at once and answers within `timeoutMs`.
- * dns.lookup takes a thread for as long as the resolver takes and can't be cancelled, and the same
- * threads do this process's file work, so a page asking for names a resolver never answers could
- * stop everything else. A call that times out only stops waiting: its thread counts until it is back.
+ * A lookup that holds at most `limit` of libuv's threads at once. dns.lookup takes a thread for as
+ * long as the resolver takes and can't be cancelled, and the same threads do this process's file
+ * work, so a page asking for names a resolver never answers could stop everything else. A call
+ * waits `queueTimeoutMs` for its turn and then gets `timeoutMs` of its own, so a turn that comes
+ * late doesn't cost it the time to get an answer. One that times out only stops waiting: its thread
+ * counts until it is back.
  */
-export function boundedLookup(lookup: EgressLookup, limit: number, timeoutMs = LOOKUP_TIMEOUT_MS): EgressLookup {
+export function boundedLookup(
+  lookup: EgressLookup,
+  limit: number,
+  timeoutMs = LOOKUP_TIMEOUT_MS,
+  queueTimeoutMs = timeoutMs,
+): EgressLookup {
   let running = 0;
   const queue: Array<() => void> = [];
   return (host) =>
     new Promise((resolve, reject) => {
+      let turnLate: ReturnType<typeof setTimeout> | undefined;
       const start = (): void => {
+        clearTimeout(turnLate);
         running++;
+        const timer = setTimeout(() => reject(new Error(`no answer within ${timeoutMs} ms`)), timeoutMs);
         // In an async function so a lookup that throws, rather than rejects, still gives its turn back.
         void (async () => lookup(host))()
           .then(resolve, reject)
@@ -309,13 +324,15 @@ export function boundedLookup(lookup: EgressLookup, limit: number, timeoutMs = L
             queue.shift()?.();
           });
       };
-      const timer = setTimeout(() => {
-        const waiting = queue.indexOf(start);
-        if (waiting !== -1) queue.splice(waiting, 1);
-        reject(new Error(`no answer within ${timeoutMs} ms`));
-      }, timeoutMs);
-      if (running < limit) start();
-      else queue.push(start);
+      if (running < limit) {
+        start();
+        return;
+      }
+      queue.push(start);
+      turnLate = setTimeout(() => {
+        queue.splice(queue.indexOf(start), 1);
+        reject(new Error(`no turn to look it up within ${queueTimeoutMs} ms`));
+      }, queueTimeoutMs);
     });
 }
 
@@ -348,7 +365,7 @@ export class EgressPolicy {
 
   /** A bridge's own share, so one page can only run out of its own: an eighth of the pool. */
   bridgeLookup(): EgressLookup {
-    return boundedLookup(this.rawLookup, Math.max(1, threadpoolSize() >> 3), this.lookupTimeoutMs);
+    return boundedLookup(this.rawLookup, Math.max(MIN_BRIDGE_LOOKUPS, threadpoolSize() >> 3), this.lookupTimeoutMs);
   }
 
   private allowsIp(bytes: Bytes, port: number): boolean {

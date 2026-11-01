@@ -532,13 +532,79 @@ function hangingLookup(): { lookup: EgressLookup; started: string[]; finish: () 
   };
 }
 
+test("boundedLookup's clock starts with the lookup: a late turn still gets its whole time", async () => {
+  const turns: Array<() => void> = [];
+  const lookup: EgressLookup = () =>
+    new Promise((resolve) => turns.push(() => resolve([{ address: "93.184.216.34" }])));
+  const bounded = boundedLookup(lookup, 1, 300, 5_000);
+  const first = bounded("a");
+  const second = bounded("b");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(turns.length, 1);
+  turns[0]!();
+  await first;
+  // Under the old clock, counted from the call, this one would have 100 ms left now.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(turns.length, 2);
+  turns[1]!();
+  assert.deepEqual(await second, [{ address: "93.184.216.34" }]);
+});
+
+test("boundedLookup's wait for a turn has its own limit, and saying so takes no thread", async () => {
+  const { lookup, started, finish } = hangingLookup();
+  const bounded = boundedLookup(lookup, 1, 5_000, 40);
+  const running = bounded("a");
+  const waiting = bounded("b").catch((e: Error) => e.message);
+  assert.match(String(await waiting), /no turn to look it up within 40 ms/);
+  assert.deepEqual(started, ["a"]);
+  finish();
+  await running;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, ["a"], "the one that gave up never started");
+});
+
+test("a lookup has 10 s, past glibc's retry at 5 s: a second try's answer counts", async () => {
+  const policy = new EgressPolicy({
+    mode: "block-private",
+    lookup: () =>
+      new Promise((resolve) => setTimeout(() => resolve([{ address: "93.184.216.34" }]), 5_500)),
+  });
+  assert.deepEqual(await policy.checkDirect("slow.test", 80, policy.bridgeLookup()), {
+    allowed: true,
+    connectTo: ["93.184.216.34"],
+  });
+});
+
+test("a browser has two lookups at a time on the smallest pool, an eighth of a large one", async () => {
+  const shareOf = async (poolSize: string | undefined): Promise<number> => {
+    const before = process.env.UV_THREADPOOL_SIZE;
+    if (poolSize === undefined) delete process.env.UV_THREADPOOL_SIZE;
+    else process.env.UV_THREADPOOL_SIZE = poolSize;
+    try {
+      const { lookup, started, finish } = hangingLookup();
+      const policy = new EgressPolicy({ mode: "block-private", lookup, lookupTimeoutMs: 20 });
+      const bridge = policy.bridgeLookup();
+      await Promise.all(Array.from({ length: 20 }, (_, i) => policy.checkDirect(`n${i}.test`, 80, bridge)));
+      finish();
+      return started.length;
+    } finally {
+      if (before === undefined) delete process.env.UV_THREADPOOL_SIZE;
+      else process.env.UV_THREADPOOL_SIZE = before;
+    }
+  };
+  assert.equal(await shareOf(undefined), 2);
+  assert.equal(await shareOf("8"), 2);
+  assert.equal(await shareOf("64"), 8);
+});
+
 test("boundedLookup runs its limit at once, and each call answers within its time, queued or not", async () => {
   const { lookup, started, finish } = hangingLookup();
   const bounded = boundedLookup(lookup, 2, 50);
   const calls = ["a", "b", "c", "d"].map((host) => bounded(host).catch((e: Error) => e.message));
   assert.deepEqual(started, ["a", "b"]);
   const answers = await Promise.all(calls);
-  for (const answer of answers) assert.match(String(answer), /no answer within 50 ms/);
+  for (const answer of answers.slice(0, 2)) assert.match(String(answer), /no answer within 50 ms/);
+  for (const answer of answers.slice(2)) assert.match(String(answer), /no turn to look it up within 50 ms/);
   assert.deepEqual(started, ["a", "b"], "gave up waiting, and never started");
 
   // Those two threads are still taken, however long ago their callers gave up.
