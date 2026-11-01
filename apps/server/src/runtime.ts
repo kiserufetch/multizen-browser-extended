@@ -11,9 +11,10 @@ import {
   sweepOrphans,
 } from "@multizen/browser-runtime";
 import pkg from "../package.json" with { type: "json" };
-import { dataPaths, type ServerConfig } from "./config.ts";
+import { dataPaths, type Env, type ServerConfig } from "./config.ts";
 import { errorFields, log } from "./log.ts";
 import { createNodeHost } from "./nodeHost.ts";
+import { SECRET_KEY_ENV, takeKeyFromEnv, unlockSecrets } from "./secretKey.ts";
 import { withinBudget } from "./shutdown.ts";
 
 export const SERVER_VERSION: string = pkg.version;
@@ -87,10 +88,13 @@ function sweepExtensionStore(profileManager: ProfileManager, extensionStoreRoot:
 /**
  * Opens the database and rebases rows left outside this data dir (a moved data
  * dir, a copied database). A row that can't be rebased refuses the start: launching
- * it would open an empty directory, logged out, with no error.
+ * it would open an empty directory, logged out, with no error. Then it encrypts what
+ * isn't yet, and refuses the start if what is can't be opened: see {@link unlockSecrets}.
  */
-export function openProfiles(dataDir: string): ProfileManager {
-  const { dbPath, profilesRoot, extensionStoreRoot } = dataPaths(dataDir);
+export function openProfiles(dataDir: string, env: Env = process.env): ProfileManager {
+  const { dbPath, profilesRoot, extensionStoreRoot, secretKeyPath } = dataPaths(dataDir);
+  // First thing, so no path out of here leaves it for a spawned browser to inherit.
+  const keyFromEnv = takeKeyFromEnv(SECRET_KEY_ENV, env);
   const profileManager = new ServerProfileManager({ dbPath, profilesRoot, extensionStoreRoot });
   const { rebased, unresolved } = profileManager.reconcileDataDirs();
   if (unresolved.length > 0) {
@@ -105,6 +109,12 @@ export function openProfiles(dataDir: string): ProfileManager {
     );
   }
   if (rebased.length > 0) log.info("profile data dirs rebased", { profiles: rebased, profilesRoot });
+  try {
+    unlockSecrets(profileManager, { dbPath, keyPath: secretKeyPath }, keyFromEnv);
+  } catch (e) {
+    profileManager.close();
+    throw e;
+  }
   return profileManager;
 }
 
@@ -220,6 +230,7 @@ export async function buildRuntime(
     log.info("tool call", {
       tool: e.tool,
       status: e.status,
+      actor: e.actor,
       durationMs: e.durationMs,
       profileId: e.profileId,
       ...(e.status === "error" ? { error: e.summary } : {}),

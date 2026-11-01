@@ -6,9 +6,13 @@ import {
   dataPaths,
   defaultDataDir,
   defaultMaxBrowsers,
+  isWildcardHost,
+  parseExpiry,
   parseProfileCommand,
+  parseSecretsCommand,
   parseServeConfig,
   parseStdioConfig,
+  parseTokenCommand,
   UsageError,
   type PlatformFacts,
 } from "./config.ts";
@@ -109,7 +113,7 @@ for (const [name, argv, pattern] of [
   ["port zero", ["--port", "0"], /--port/],
   ["a non-numeric port", ["--port", "abc"], /--port/],
   ["an unknown engine", ["--default-engine", "chrome"], /Unknown engine/],
-  ["a flag from a later stage", ["--allow-remote"], /allow-remote/],
+  ["an unknown flag", ["--allow-everything"], /allow-everything/],
   ["a stray argument", ["extra"], /Unexpected argument/],
 ] as Array<[string, string[], RegExp]>) {
   test(`serve rejects ${name}`, () => {
@@ -297,4 +301,227 @@ test("--connect runs no browsers, so it takes no display flags", () => {
       /--connect runs no browsers/,
     );
   }
+});
+
+// ── remote access ────────────────────────────────────────────────────────────
+
+const LAN = ["--host", "10.0.0.5"];
+const LAN_ALLOWED = [...LAN, "--allow-remote"];
+const TLS_FLAGS = ["--tls-cert", "c.pem", "--tls-key", "k.pem"];
+const ANY = ["--host", "0.0.0.0", "--allow-remote", "--allow-insecure-remote"];
+
+for (const [name, argv] of [
+  ["loopback, by default", []],
+  ["a loopback address of any spelling", ["--host", "127.0.0.2"]],
+  ["IPv6 loopback", ["--host", "::1"]],
+  ["IPv6 loopback in brackets", ["--host", "[::1]"]],
+  ["loopback behind a proxy: only --allowed-hosts", ["--allowed-hosts", "example.test"]],
+  ["loopback behind a proxy: only --public-url", ["--public-url", "https://example.test"]],
+  ["--allow-remote on loopback, which changes nothing", ["--allow-remote"]],
+  ["--no-auth on loopback", ["--no-auth"]],
+  ["a LAN address with TLS", [...LAN_ALLOWED, ...TLS_FLAGS]],
+  ["a LAN address with plain HTTP, asked for twice", [...LAN_ALLOWED, "--allow-insecure-remote"]],
+  ["TLS on loopback", TLS_FLAGS],
+  ["any address, with a name for clients to use", [...ANY, "--allowed-hosts", "a.test"]],
+  ["any address, with a public URL", [...ANY, "--public-url", "https://a.test"]],
+] as Array<[string, string[]]>) {
+  test(`serve accepts ${name}`, () => {
+    assert.doesNotThrow(() => parseServeConfig(argv, {}, LINUX));
+  });
+}
+
+for (const [name, argv, pattern] of [
+  ["a LAN address alone", LAN, /--allow-remote/],
+  ["a LAN address with TLS but no --allow-remote", [...LAN, ...TLS_FLAGS], /--allow-remote/],
+  ["a LAN address with only --allow-insecure-remote", [...LAN, "--allow-insecure-remote"], /--allow-remote/],
+  ["plain HTTP on a LAN address, asked for once", LAN_ALLOWED, /--allow-insecure-remote/],
+  ["a host name that isn't loopback", ["--host", "server.lan"], /--allow-remote/],
+  ["IPv6 any address alone", ["--host", "::"], /--allow-remote/],
+  ["any address with no name for clients", ANY, /--allowed-hosts or --public-url/],
+  ["a certificate with no key", ["--tls-cert", "c.pem"], /only work together/],
+  ["a key with no certificate", ["--tls-key", "k.pem"], /only work together/],
+  ["--no-auth beyond loopback", ["--no-auth", ...LAN_ALLOWED, "--allow-insecure-remote"], /--no-auth only/],
+  ["--no-auth with extra hosts", ["--no-auth", "--allowed-hosts", "a.test"], /--no-auth only/],
+  ["--no-auth with a public URL", ["--no-auth", "--public-url", "https://a.test"], /--no-auth only/],
+  ["a wildcard in the allowed hosts", ["--allowed-hosts", "*"], /--allowed-hosts/],
+  ["a pattern in the allowed hosts", ["--allowed-hosts", "*.example.test"], /--allowed-hosts/],
+  ["a URL in the allowed hosts", ["--allowed-hosts", "https://a.test"], /--allowed-hosts/],
+  ["a path in the allowed origins", ["--allowed-origins", "https://a.test/x"], /--allowed-origins/],
+  ["a non-http origin", ["--allowed-origins", "ftp://a.test"], /--allowed-origins/],
+  ["a non-http public URL", ["--public-url", "ftp://a.test"], /--public-url/],
+  ["a public URL that isn't one", ["--public-url", "a.test"], /--public-url/],
+  ["an empty host", ["--host", ""], /--host/],
+  ["a zero session TTL", ["--session-idle-ttl-ms", "0"], /--session-idle-ttl-ms/],
+  ["a session limit that isn't a number", ["--max-sessions", "lots"], /--max-sessions/],
+] as Array<[string, string[], RegExp]>) {
+  test(`serve refuses ${name}`, () => {
+    assert.throws(() => parseServeConfig(argv, {}, LINUX), (e: unknown) => {
+      assert.ok(e instanceof UsageError, String(e));
+      assert.match(e.message, pattern);
+      return true;
+    });
+  });
+}
+
+test("server session defaults: 30 minutes idle, 64 sessions; flags and environment override", () => {
+  const defaults = parseServeConfig([], {}, LINUX);
+  assert.equal(defaults.sessionIdleTtlMs, 30 * 60_000);
+  assert.equal(defaults.maxSessions, 64);
+  assert.equal(defaults.trustProxy, false);
+  assert.deepEqual(defaults.allowedHosts, []);
+  assert.deepEqual(defaults.allowedOrigins, []);
+  assert.equal("tls" in defaults, false);
+  assert.equal("publicUrl" in defaults, false);
+  assert.equal(defaults.loopback, true);
+
+  const env = { MULTIZEN_SESSION_IDLE_TTL_MS: "5000", MULTIZEN_MAX_SESSIONS: "2" };
+  assert.equal(parseServeConfig([], env, LINUX).sessionIdleTtlMs, 5000);
+  assert.equal(parseServeConfig([], env, LINUX).maxSessions, 2);
+  const flags = parseServeConfig(["--session-idle-ttl-ms", "7", "--max-sessions", "3"], env, LINUX);
+  assert.equal(flags.sessionIdleTtlMs, 7);
+  assert.equal(flags.maxSessions, 3);
+});
+
+test("remote settings from the environment follow the same rules", () => {
+  const remote = {
+    MULTIZEN_HOST: "0.0.0.0",
+    MULTIZEN_ALLOW_REMOTE: "1",
+    MULTIZEN_ALLOW_INSECURE_REMOTE: "1",
+    MULTIZEN_ALLOWED_HOSTS: "localhost:7777, 127.0.0.1:7777",
+    MULTIZEN_ALLOWED_ORIGINS: "https://app.test",
+    MULTIZEN_TRUST_PROXY: "1",
+  };
+  const config = parseServeConfig([], remote, LINUX);
+  assert.equal(config.host, "0.0.0.0");
+  assert.equal(config.loopback, false);
+  assert.deepEqual(config.allowedHosts, ["localhost:7777", "127.0.0.1:7777"]);
+  assert.deepEqual(config.allowedOrigins, ["https://app.test"]);
+  assert.equal(config.trustProxy, true);
+
+  assert.throws(() => parseServeConfig([], { MULTIZEN_HOST: "0.0.0.0" }, LINUX), /--allow-remote/);
+  assert.throws(() => parseServeConfig([], { ...remote, MULTIZEN_NO_AUTH: "1" }, LINUX), /--no-auth only/);
+  assert.equal(
+    parseServeConfig([], { MULTIZEN_TLS_CERT: "c", MULTIZEN_TLS_KEY: "k" }, LINUX).tls?.certPath,
+    resolve("c"),
+  );
+});
+
+test("--public-url joins the allowed hosts and origins, port and all", () => {
+  const config = parseServeConfig(
+    ["--public-url", "https://Example.test:8443/", "--allowed-hosts", "other.test", "--allowed-origins", "https://app.test"],
+    {},
+    LINUX,
+  );
+  assert.equal(config.publicUrl, "https://example.test:8443");
+  assert.deepEqual(config.allowedHosts, ["other.test", "example.test:8443"]);
+  assert.deepEqual(config.allowedOrigins, ["https://app.test", "https://example.test:8443"]);
+  assert.deepEqual(parseServeConfig(["--public-url", "https://a.test"], {}, LINUX).allowedHosts, ["a.test"]);
+});
+
+test("allowed hosts: a bare IPv6 address gets its brackets, or no port could be told from it", () => {
+  assert.deepEqual(parseServeConfig(["--allowed-hosts", "::1,[::1]:8080,a.test:1"], {}, LINUX).allowedHosts, [
+    "[::1]",
+    "[::1]:8080",
+    "a.test:1",
+  ]);
+});
+
+test("a wildcard bind is recognised, and TLS paths come back resolved", () => {
+  assert.equal(isWildcardHost("0.0.0.0"), true);
+  assert.equal(isWildcardHost("::"), true);
+  assert.equal(isWildcardHost("10.0.0.5"), false);
+  assert.deepEqual(parseServeConfig(TLS_FLAGS, {}, LINUX).tls, {
+    certPath: resolve("c.pem"),
+    keyPath: resolve("k.pem"),
+  });
+});
+
+// ── token and secrets commands ───────────────────────────────────────────────
+
+test("token create: read and act by default, on every profile, and never raw", () => {
+  const command = parseTokenCommand(["create", "--name", "r"], {}, LINUX);
+  assert.ok(command.action === "create");
+  assert.deepEqual(command.input.groups, ["read", "act"]);
+  assert.deepEqual(command.input.names, []);
+  assert.equal(command.input.profiles, "*");
+  assert.equal("expiresAt" in command.input, false);
+  assert.equal(command.dataDir, resolve(join("/home/u", ".local", "share", "multizen-server")));
+});
+
+test("token create: --tools takes groups and tool names; --panel means the operator group", () => {
+  const input = (...flags: string[]) => {
+    const command = parseTokenCommand(["create", "--name", "n", ...flags], {}, LINUX);
+    assert.ok(command.action === "create");
+    return command.input;
+  };
+  assert.deepEqual(input("--tools", "read").groups, ["read"]);
+  const mixed = input("--tools", "read, click_ref,raw,cdp_send");
+  assert.deepEqual(mixed.groups, ["read", "raw"]);
+  assert.deepEqual(mixed.names, ["click_ref", "cdp_send"]);
+
+  assert.deepEqual(input("--panel").groups, ["read", "act", "operator"]);
+  assert.deepEqual(input("--panel", "--tools", "read").groups, ["read", "operator"]);
+  assert.deepEqual(input("--tools", "operator", "--panel").groups, ["operator"]);
+
+  assert.deepEqual(input("--profiles", "p1, p2").profiles, ["p1", "p2"]);
+  assert.equal(input("--profiles", "*").profiles, "*");
+});
+
+test("token create: --expires takes a duration or a date, in the future", () => {
+  const now = Date.parse("2026-06-01T00:00:00Z");
+  assert.equal(parseExpiry("90s", now).toISOString(), "2026-06-01T00:01:30.000Z");
+  assert.equal(parseExpiry("45m", now).toISOString(), "2026-06-01T00:45:00.000Z");
+  assert.equal(parseExpiry("12h", now).toISOString(), "2026-06-01T12:00:00.000Z");
+  assert.equal(parseExpiry("30d", now).toISOString(), "2026-07-01T00:00:00.000Z");
+  assert.equal(parseExpiry("2027-01-01", now).toISOString(), "2027-01-01T00:00:00.000Z");
+  assert.throws(() => parseExpiry("soon", now), /--expires/);
+  assert.throws(() => parseExpiry("2020-01-01", now), /in the future/);
+  assert.throws(() => parseExpiry("0d", now), /in the future/);
+
+  const command = parseTokenCommand(["create", "--name", "n", "--expires", "1h"], {}, LINUX);
+  assert.ok(command.action === "create" && (command.input.expiresAt?.getTime() ?? 0) > Date.now());
+});
+
+test("token list and revoke", () => {
+  assert.deepEqual(parseTokenCommand(["list", "--data-dir", "d"], {}, LINUX), {
+    action: "list",
+    dataDir: resolve("d"),
+  });
+  assert.deepEqual(parseTokenCommand(["revoke", "t_1", "--data-dir", "d"], {}, LINUX), {
+    action: "revoke",
+    dataDir: resolve("d"),
+    target: "t_1",
+  });
+});
+
+for (const [name, argv, pattern] of [
+  ["no action", [], /needs "create", "list" or "revoke"/],
+  ["an unknown action", ["rotate"], /needs "create", "list" or "revoke"/],
+  ["create with no name", ["create"], /needs --name/],
+  ["an unknown tool or group", ["create", "--name", "n", "--tools", "cliks"], /--tools takes groups/],
+  ["an empty tool list", ["create", "--name", "n", "--tools", ","], /names nothing/],
+  ["an empty profile list", ["create", "--name", "n", "--profiles", ","], /names nothing/],
+  ["a stray argument to create", ["create", "x", "--name", "n"], /Unexpected argument/],
+  ["revoke with no target", ["revoke"], /needs a token's id or name/],
+  ["a create flag on list", ["list", "--name", "n"], /only apply to token create/],
+  ["a create flag on revoke", ["revoke", "t", "--panel"], /only apply to token create/],
+  ["a stray argument to list", ["list", "x"], /Unexpected argument/],
+] as Array<[string, string[], RegExp]>) {
+  test(`token rejects ${name}`, () => {
+    assert.throws(() => parseTokenCommand(argv, {}, LINUX), (e: unknown) => {
+      assert.ok(e instanceof UsageError);
+      assert.match(e.message, pattern);
+      return true;
+    });
+  });
+}
+
+test("secrets rotate", () => {
+  assert.deepEqual(parseSecretsCommand(["rotate", "--data-dir", "d"], {}, LINUX), {
+    action: "rotate",
+    dataDir: resolve("d"),
+  });
+  assert.throws(() => parseSecretsCommand([], {}, LINUX), /needs "rotate"/);
+  assert.throws(() => parseSecretsCommand(["other"], {}, LINUX), /needs "rotate"/);
+  assert.throws(() => parseSecretsCommand(["rotate", "x"], {}, LINUX), /Unexpected argument/);
 });

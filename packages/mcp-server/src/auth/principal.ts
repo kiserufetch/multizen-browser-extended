@@ -42,3 +42,12 @@ export function principalFrom(
 ): Principal {
   return (extra?.authInfo?.extra?.principal as Principal | undefined) ?? fallback;
 }
+
+/**
+ * What a call may wait on. The SDK aborts `extra.signal` when the client cancels or the
+ * session closes; HttpTransport adds its signal for the client's connection dropping.
+ */
+export function callSignal(extra: PrincipalCarrier & { signal: AbortSignal }): AbortSignal {
+  const gone = extra.authInfo?.extra?.clientGone as AbortSignal | undefined;
+  return gone ? AbortSignal.any([extra.signal, gone]) : extra.signal;
+}

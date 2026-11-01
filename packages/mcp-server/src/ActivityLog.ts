@@ -5,6 +5,8 @@ export interface ActivityEvent {
   timestamp: string;
   /** Tool name as called via MCP, e.g. "navigate" */
   tool: string;
+  /** The name of the token that made the call. */
+  actor?: string;
   profileId?: string;
   /** Sanitized args (no secrets) */
   args: Record<string, unknown>;
@@ -39,11 +41,12 @@ export class ActivityLog extends EventEmitter {
     return super.emit(event, ...args);
   }
 
-  startCall(tool: string, args: Record<string, unknown>): ActivityEvent {
+  startCall(tool: string, args: Record<string, unknown>, actor?: string): ActivityEvent {
     const event: ActivityEvent = {
       id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       timestamp: new Date().toISOString(),
       tool,
+      ...(actor !== undefined ? { actor } : {}),
       profileId: typeof args.profile_id === "string" ? args.profile_id : undefined,
       args: sanitize(tool, args),
       status: "pending",

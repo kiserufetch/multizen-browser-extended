@@ -16,6 +16,7 @@ import type {
   DisplayMode,
 } from "@multizen/types";
 import { defaultFingerprint } from "./fingerprint.js";
+import { isSealed, SecretKeyError, type SecretBox } from "./secretBox.js";
 
 interface ProfileRow {
   id: string;
@@ -42,6 +43,14 @@ interface ProfileRow {
 export interface ProfileManagerOptions {
   dbPath: string;
   profilesRoot: string;
+  /** Encrypts proxy passwords at rest. The desktop passes none and stores them as they are. */
+  secrets?: SecretBox;
+}
+
+/** How the proxy passwords in the database are held. */
+export interface StoredSecrets {
+  sealed: number;
+  plaintext: number;
 }
 
 export interface DataDirReconciliation {
@@ -54,10 +63,12 @@ export interface DataDirReconciliation {
 export class ProfileManager {
   private readonly db: Database.Database;
   private readonly profilesRoot: string;
+  private secrets: SecretBox | undefined;
 
   constructor(opts: ProfileManagerOptions) {
     mkdirSync(opts.profilesRoot, { recursive: true });
     this.profilesRoot = opts.profilesRoot;
+    this.secrets = opts.secrets;
     this.db = new Database(opts.dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
@@ -144,7 +155,7 @@ export class ProfileManager {
         lastOpenedAt: r.last_opened_at ?? undefined,
         isRunning: false,
         icon: r.icon ?? undefined,
-        proxy: r.proxy ? (JSON.parse(r.proxy) as ProxyConfig) : undefined,
+        proxy: r.proxy ? this.readProxy(r.proxy) : undefined,
         timezone: fingerprint.timezone,
         proxyCountry: r.proxy_country ?? undefined,
         device: fingerprint.device,
@@ -206,7 +217,7 @@ export class ProfileManager {
         profile.name,
         profile.notes ?? null,
         JSON.stringify(profile.tags),
-        profile.proxy ? JSON.stringify(profile.proxy) : null,
+        this.writeProxy(profile.proxy),
         JSON.stringify(profile.fingerprint),
         JSON.stringify(profile.extensions ?? []),
         profile.icon ?? null,
@@ -249,7 +260,7 @@ export class ProfileManager {
         profile.name,
         profile.notes ?? null,
         JSON.stringify(profile.tags),
-        profile.proxy ? JSON.stringify(profile.proxy) : null,
+        this.writeProxy(profile.proxy),
         JSON.stringify(profile.fingerprint),
         JSON.stringify(profile.extensions ?? []),
         profile.icon ?? null,
@@ -322,7 +333,7 @@ export class ProfileManager {
         merged.name,
         merged.notes ?? null,
         JSON.stringify(merged.tags),
-        merged.proxy ? JSON.stringify(merged.proxy) : null,
+        this.writeProxy(merged.proxy),
         JSON.stringify(merged.fingerprint),
         JSON.stringify(merged.extensions ?? []),
         merged.icon ?? null,
@@ -402,6 +413,103 @@ export class ProfileManager {
     return { rebased: rebase.map((r) => r.id), unresolved };
   }
 
+  /** From here on, passwords are sealed with this box and opened with it. */
+  useSecrets(secrets: SecretBox): void {
+    this.secrets = secrets;
+  }
+
+  private storedProxies(): Array<{ id: ProfileId; proxy: ProxyConfig }> {
+    const rows = this.db
+      .prepare(`SELECT id, proxy FROM profiles WHERE proxy IS NOT NULL`)
+      .all() as Array<{ id: ProfileId; proxy: string }>;
+    return rows.map((row) => ({ id: row.id, proxy: JSON.parse(row.proxy) as ProxyConfig }));
+  }
+
+  /** Counts without opening anything, so it works with no key at hand. */
+  storedSecrets(): StoredSecrets {
+    const counts: StoredSecrets = { sealed: 0, plaintext: 0 };
+    for (const { proxy } of this.storedProxies()) {
+      if (proxy.password) counts[isSealed(proxy.password) ? "sealed" : "plaintext"] += 1;
+    }
+    return counts;
+  }
+
+  /** Whether every sealed password opens with this box. */
+  canOpenStoredSecrets(box: SecretBox): boolean {
+    try {
+      for (const { proxy } of this.storedProxies()) {
+        if (proxy.password && isSealed(proxy.password)) box.open(proxy.password);
+      }
+      return true;
+    } catch (e) {
+      if (e instanceof SecretKeyError) return false;
+      throw e;
+    }
+  }
+
+  /**
+   * Seals what older code left in plaintext. Sealed values are opened on the way, so a
+   * wrong key is found now and by profile, not at some later launch. All or nothing.
+   */
+  sealStoredSecrets(): number {
+    const box = this.secrets;
+    if (!box) throw new SecretKeyError("Sealing needs a secret key");
+    const setProxy = this.db.prepare(`UPDATE profiles SET proxy = ? WHERE id = ?`);
+    return this.db.transaction(() => {
+      let sealed = 0;
+      for (const { id, proxy } of this.storedProxies()) {
+        if (!proxy.password) continue;
+        if (isSealed(proxy.password)) {
+          try {
+            box.open(proxy.password);
+          } catch (e) {
+            throw new SecretKeyError(
+              `The proxy password of profile ${id} can't be opened with this key. ` +
+                "Use the key it was encrypted with.",
+              { cause: e },
+            );
+          }
+          continue;
+        }
+        setProxy.run(JSON.stringify({ ...proxy, password: box.seal(proxy.password) }), id);
+        sealed += 1;
+      }
+      return sealed;
+    })();
+  }
+
+  /**
+   * Re-encrypts every sealed password under `next`, which is the box from here on. All
+   * or nothing, so a failure leaves the database readable with the key it had.
+   */
+  rotateStoredSecrets(next: SecretBox): number {
+    const current = this.secrets;
+    if (!current) throw new SecretKeyError("Rotating needs the current secret key");
+    const setProxy = this.db.prepare(`UPDATE profiles SET proxy = ? WHERE id = ?`);
+    const rotated = this.db.transaction(() => {
+      let count = 0;
+      for (const { id, proxy } of this.storedProxies()) {
+        if (!proxy.password) continue;
+        const plaintext = isSealed(proxy.password) ? current.open(proxy.password) : proxy.password;
+        setProxy.run(JSON.stringify({ ...proxy, password: next.seal(plaintext) }), id);
+        count += 1;
+      }
+      return count;
+    })();
+    this.secrets = next;
+    return rotated;
+  }
+
+  /**
+   * Rewrites the database and empties the WAL. An UPDATE leaves the old value in the WAL
+   * and in free pages of the file, which is where a password sealed later would survive.
+   */
+  purgeOldValues(): void {
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
+    this.db.exec("VACUUM");
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
+  }
+
   /**
    * Every extension reference across all profiles, used by the shared-store GC
    * to decide whether a store entry is still referenced (derived refcount — no
@@ -420,13 +528,31 @@ export class ProfileManager {
     return out;
   }
 
+  /** A row written before there was a box reads as it is, until it is next written. */
+  private readProxy(stored: string): ProxyConfig {
+    const proxy = JSON.parse(stored) as ProxyConfig;
+    if (!proxy.password || !isSealed(proxy.password)) return proxy;
+    if (!this.secrets) {
+      throw new SecretKeyError(
+        "This database holds encrypted proxy passwords and no secret key was given.",
+      );
+    }
+    return { ...proxy, password: this.secrets.open(proxy.password) };
+  }
+
+  private writeProxy(proxy: ProxyConfig | undefined): string | null {
+    if (!proxy) return null;
+    if (!this.secrets || !proxy.password) return JSON.stringify(proxy);
+    return JSON.stringify({ ...proxy, password: this.secrets.seal(proxy.password) });
+  }
+
   private rowToProfile(row: ProfileRow): Profile {
     return {
       id: row.id,
       name: row.name,
       notes: row.notes ?? undefined,
       tags: JSON.parse(row.tags) as string[],
-      proxy: row.proxy ? (JSON.parse(row.proxy) as ProxyConfig) : undefined,
+      proxy: row.proxy ? this.readProxy(row.proxy) : undefined,
       fingerprint: JSON.parse(row.fingerprint) as FingerprintConfig,
       extensions: normalizeExtensions(row.extensions),
       icon: row.icon ?? undefined,

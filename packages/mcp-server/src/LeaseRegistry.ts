@@ -144,6 +144,13 @@ export class LeaseRegistry {
     return held;
   }
 
+  /** A token that stopped being valid keeps no claim on anything. */
+  dropPrincipal(principalId: string): void {
+    for (const [profileId, lease] of this.leases) {
+      if (lease.holder.principalId === principalId) this.leases.delete(profileId);
+    }
+  }
+
   /** For a call that would change the profile. */
   assertAccess(profileId: ProfileId, who: LeaseHolder): void {
     const lease = this.active(profileId);

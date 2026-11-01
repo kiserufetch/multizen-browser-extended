@@ -1,4 +1,12 @@
-export { ProfileManager, type DataDirReconciliation } from "./ProfileManager.js";
+export { ProfileManager, type DataDirReconciliation, type StoredSecrets } from "./ProfileManager.js";
+export {
+  createSecretBox,
+  generateSecretKey,
+  isSealed,
+  parseSecretKey,
+  SecretKeyError,
+  type SecretBox,
+} from "./secretBox.js";
 export {
   defaultFingerprint,
   generateFingerprint,

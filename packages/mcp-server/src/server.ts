@@ -23,7 +23,7 @@ import type {
 } from "@multizen/types";
 import { BROWSER_ENGINES, DISPLAY_MODES, MultizenError, resolveEngine } from "@multizen/types";
 import { ActivityLog } from "./ActivityLog.js";
-import { principalFrom, type Principal } from "./auth/principal.js";
+import { callSignal, principalFrom, type Principal } from "./auth/principal.js";
 import {
   assertProfileExists,
   assertProfileRunning,
@@ -316,17 +316,17 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const name = req.params.name;
     const args = req.params.arguments ?? {};
-    const event = activityLog.startCall(name, args);
+    const principal = principalFrom(extra, opts.principal);
+    const event = activityLog.startCall(name, args, principal.name);
     const startedAt = Date.now();
 
     try {
-      const principal = principalFrom(extra, opts.principal);
       const sessionId = extra.sessionId ?? "local";
       lastSessionId = sessionId;
       const result = await runGated(
         name,
         args,
-        { principal, sessionId, signal: extra.signal, shared, driver: browserDriver },
+        { principal, sessionId, signal: callSignal(extra), shared, driver: browserDriver },
         (driver) =>
           dispatch(name, args, {
             profileManager,

@@ -26,6 +26,8 @@ export interface ToolPolicy {
   preempts?: boolean;
   /** Checks a lease itself, because a holder that reconnected has to get through. */
   ownLeaseCheck?: boolean;
+  /** Makes something no list of profiles could already name, so it takes `profiles: "*"`. */
+  needsAllProfiles?: boolean;
 }
 
 function hints(
@@ -105,7 +107,7 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
   release_profile: { group: "act", annotations: LOCAL_CHANGE, scope: "profile", ...unlocked, ownLeaseCheck: true },
 
   // profile-admin
-  create_profile: { group: "profile-admin", annotations: hints(false, false, false, false), scope: "none", ...unlocked },
+  create_profile: { group: "profile-admin", annotations: hints(false, false, false, false), scope: "none", ...unlocked, needsAllProfiles: true },
   // Only the database: a live browser keeps what it launched with, so nothing to queue behind.
   update_profile: { group: "profile-admin", annotations: hints(false, true, true, false), ...pageWrite, lock: "none" },
   delete_profile: { group: "profile-admin", annotations: hints(false, true, true, false), ...pageWrite },

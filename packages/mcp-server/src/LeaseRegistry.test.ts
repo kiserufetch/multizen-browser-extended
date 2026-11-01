@@ -143,3 +143,18 @@ test("release ends it; force ends it whoever holds it and says if there was one"
   leases.assertAccess("p", BOB);
   assert.equal(leases.forceRelease("p"), false);
 });
+
+test("a token that ended loses its leases, and only its leases", () => {
+  const registry = new LeaseRegistry();
+  const revoked = { principalId: "revoked", principalName: "revoked", sessionId: "s1" };
+  const kept = { principalId: "kept", principalName: "kept", sessionId: "s2" };
+  registry.acquire("p1", revoked);
+  registry.acquire("p2", revoked);
+  registry.acquire("p3", kept);
+
+  registry.dropPrincipal("revoked");
+
+  assert.doesNotThrow(() => registry.assertAccess("p1", kept));
+  assert.doesNotThrow(() => registry.assertAccess("p2", kept));
+  assert.throws(() => registry.assertAccess("p3", revoked), /leased by kept/);
+});

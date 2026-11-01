@@ -7,8 +7,8 @@
  *   corepack yarn workspace @multizen/server build
  *   corepack yarn workspace @multizen/server exec tsx scripts/e2e.ts \
  *     --data-dir %TEMP%\mzts2 --engine-version-dir <dir with chrome.exe> \
- *     [--engine cloakbrowser|camoufox] [--flows http,sigint,stdio,tabs,concurrency,display]
- *     [--keep] [--camoufox-install <dir>] [--headless]
+ *     [--engine cloakbrowser|camoufox] [--flows http,sigint,stdio,tabs,concurrency,display,auth]
+ *     [--keep] [--camoufox-install <dir>] [--headless] [--lan-address <ip>]
  *
  * --engine-version-dir links an installed engine into the temp data dir through a
  * junction on the version directory only, so nothing the server does to its own
@@ -40,16 +40,30 @@
  * with its cookies intact (a short real window), session restore in headless, and an
  * unpacked extension loading in headless.
  *
+ * The auth flow, not run by default, covers tokens and remote access: what a read token
+ * and a scoped token can see and call, a revoke from another process stopping a client, its
+ * stream, its queued call and its lease, a bind on --lan-address (a host-only adapter is a
+ * good choice; it binds there for a moment) with TLS and a wrong Host and Origin, the shape
+ * of a reverse proxy on loopback, and a proxy password encrypted on disk that still gets a
+ * browser through a local SOCKS proxy. It needs openssl for its certificate.
+ *
  * --engine camoufox runs the same flows on Camoufox, minus what is CDP's or CloakBrowser's:
  * there are no OOPIF targets, cdp_send refuses, its pid is unknown (so nothing is killed
  * from outside), and no chrome:// pages. Its engine installs into the data dir.
  *
  * Windows only: the signal delivery, the junction and the process scan all are.
  */
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { createServer as createNetServer, type AddressInfo } from "node:net";
+import {
+  createServer as createHttpServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import { request as httpsRequest } from "node:https";
+import { connect as netConnect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
+import { networkInterfaces } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -68,6 +82,7 @@ const { values } = parseArgs({
     flows: { type: "string" },
     keep: { type: "boolean" },
     headless: { type: "boolean" },
+    "lan-address": { type: "string" },
   },
 });
 if (process.platform !== "win32") throw new Error("This check only runs on Windows");
@@ -1675,6 +1690,19 @@ async function disconnectChecks(url: string, token: string, id: string): Promise
   expect((await clicks()) === before, "the queued click of a terminated session fired");
   pass("a session's end drops its queued click");
 
+  // A Streamable client gone with no DELETE, as a process that died would be.
+  before = await clicks();
+  holding = holdFor(2_000);
+  await new Promise((done) => setTimeout(done, 300));
+  const vanishing = await httpClient(url, token);
+  void queueClick(vanishing);
+  await new Promise((done) => setTimeout(done, 300));
+  await vanishing.close();
+  await holding;
+  await new Promise((done) => setTimeout(done, 800));
+  expect((await clicks()) === before, "the queued click of a client gone without DELETE fired");
+  pass("a client gone without DELETE loses its queued click");
+
   // Legacy SSE: the stream closing is the session closing.
   before = await clicks();
   holding = holdFor(2_000);
@@ -2162,6 +2190,481 @@ async function displayFlow(fixture: Fixture): Promise<void> {
   if (!IS_CAMOUFOX) await extensionChecks(fixture);
 }
 
+// ── tokens, remote access, secrets ───────────────────────────────────────────
+
+function cli(args: string[]): SpawnSyncReturns<string> {
+  return spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
+}
+
+/** Another process, as an operator's would be. Returns the token it printed. */
+function createToken(...flags: string[]): string {
+  const res = cli(["token", "create", "--data-dir", DATA_DIR, ...flags]);
+  expect(res.status === 0, `token create failed: ${res.stderr}`);
+  const token = res.stdout.trim();
+  expect(/^mz_t_[0-9a-f]+_[A-Za-z0-9_-]{43}$/.test(token), "token create printed something else");
+  return token;
+}
+
+async function toolNamesOf(client: Client): Promise<string[]> {
+  return (await client.listTools()).tools.map((t) => t.name);
+}
+
+async function stopServe(serve: Running): Promise<void> {
+  sendConsoleCtrl(serve.child.pid!, "CTRL_BREAK");
+  const code = await serve.exited;
+  expect(code === 0, `exit code ${code}:\n${serve.output()}`);
+}
+
+interface RawAnswer {
+  status: number;
+  text: string;
+}
+
+function rawHttp(
+  url: string,
+  opts: { headers?: Record<string, string>; ca?: Buffer } = {},
+): Promise<RawAnswer> {
+  const target = new URL(url);
+  const send = target.protocol === "https:" ? httpsRequest : httpRequest;
+  return new Promise((done, fail) => {
+    const req = send(
+      {
+        host: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        headers: opts.headers ?? {},
+        // Node would check the certificate against the Host header these tests forge. The
+        // real client above has already checked it against the address.
+        ...(opts.ca ? { ca: opts.ca, checkServerIdentity: () => undefined } : {}),
+      },
+      (res) => {
+        let text = "";
+        res.setEncoding("utf8");
+        res.on("data", (c: string) => (text += c));
+        res.on("end", () => done({ status: res.statusCode ?? 0, text }));
+      },
+    );
+    req.on("error", fail);
+    req.end();
+  });
+}
+
+/** What the page says about the fixture's button, which only a click changes. */
+async function buttonState(client: Client, id: string): Promise<unknown> {
+  const read = await call(client, "evaluate_js", {
+    profile_id: id,
+    expression: "document.getElementById('out').textContent",
+  });
+  return (read.result as { value?: unknown }).value;
+}
+
+async function permissionChecks(fixture: Fixture): Promise<void> {
+  const serve = await startServe();
+  try {
+    const owner = await httpClient(serve.url, serve.token);
+    const id = String((await call(owner, "create_profile", { name: "auth-a", ...ENGINE_ARGS })).id);
+    const other = String((await call(owner, "create_profile", { name: "auth-b", ...ENGINE_ARGS })).id);
+    const launched = await launch(owner, id);
+    await call(owner, "navigate", { profile_id: id, url: fixture.url });
+
+    const ownerTools = await toolNamesOf(owner);
+    if (!IS_CAMOUFOX) {
+      expect(typeof launched.cdpEndpoint === "string", "the owner's launch lost its cdpEndpoint");
+      expect(ownerTools.includes("cdp_send_no_safety"), "the owner can't see cdp_send_no_safety");
+      const version = await call(owner, "cdp_send_no_safety", {
+        profile_id: id,
+        method: "Browser.getVersion",
+      });
+      expect(typeof version.product === "string", `cdp_send_no_safety: ${JSON.stringify(version)}`);
+      pass("the owner token sees cdp_send_no_safety, and it works", String(version.product));
+    }
+
+    const reader = await httpClient(serve.url, createToken("--name", "r", "--tools", "read"));
+    const readerTools = await toolNamesOf(reader);
+    for (const hidden of ["click", "cdp_send_no_safety", "cdp_send", "create_profile", "resume_human"]) {
+      expect(!readerTools.includes(hidden), `a read token can see ${hidden}`);
+    }
+    expect(readerTools.includes("extract"), "a read token can't see extract");
+    const refused = await callError(reader, "click", { profile_id: id, selector: "#the-button" });
+    expect(refused.code === "FORBIDDEN", `click with a read token: ${JSON.stringify(refused)}`);
+    const refusedRaw = await callError(reader, "cdp_send_no_safety", {
+      profile_id: id,
+      method: "Browser.getVersion",
+    });
+    expect(refusedRaw.code === "FORBIDDEN", `raw with a read token: ${JSON.stringify(refusedRaw)}`);
+    expect((await buttonState(owner, id)) === "not clicked yet", "the refused click reached the page");
+    pass("a read token: no click or cdp_send_no_safety in tools/list, FORBIDDEN on calling them");
+    await reader.close();
+
+    const actor = await httpClient(serve.url, createToken("--name", "a"));
+    const again = await launch(actor, id);
+    expect(!("cdpEndpoint" in again) && !("pid" in again), `launch for act: ${JSON.stringify(again)}`);
+    pass("launch_profile without raw hides cdpEndpoint and pid", Object.keys(again).join(","));
+    await actor.close();
+
+    const scoped = await httpClient(
+      serve.url,
+      createToken("--name", "s", "--profiles", id, "--tools", "read,act,profile-admin"),
+    );
+    const { profiles } = await call(scoped, "list_profiles");
+    const visible = (profiles as Array<{ id: string }>).map((p) => p.id);
+    expect(visible.length === 1 && visible[0] === id, `a scoped token sees ${visible.join(",")}`);
+    const foreign = await callError(scoped, "extract", { profile_id: other });
+    expect(foreign.code === "FORBIDDEN", `another profile: ${JSON.stringify(foreign)}`);
+    const created = await callError(scoped, "create_profile", { name: "nope" });
+    expect(created.code === "FORBIDDEN", `create_profile: ${JSON.stringify(created)}`);
+    pass("a profile-scoped token sees and reaches only its profile, and can't create one");
+    await scoped.close();
+
+    await revokeChecks(serve.url, id, owner);
+    await call(owner, "close_profile", { profile_id: id });
+    await closeAndExit(serve, owner);
+    await assertNoLeftovers("the permissions run");
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
+/** Everything a token holds ends when another process revokes it. */
+async function revokeChecks(url: string, id: string, owner: Client): Promise<void> {
+  const token = createToken("--name", "doomed");
+  const doomed = await httpClient(url, token);
+  await call(doomed, "list_tabs", { profile_id: id });
+
+  const stream = await fetch(new URL("/sse", url), { headers: { authorization: `Bearer ${token}` } });
+  expect(stream.status === 200, `/sse: ${stream.status}`);
+  const reader = stream.body!.getReader();
+  await reader.read();
+  const closed = (async () => {
+    for (;;) if ((await reader.read()).done) return Date.now();
+  })().catch(() => Date.now());
+
+  const holding = rawCall(owner, "evaluate_js", { profile_id: id, expression: busyPage(2_500) });
+  await new Promise((done) => setTimeout(done, 300));
+  const queued = doomed
+    .callTool({ name: "click", arguments: { profile_id: id, selector: "#the-button" } }, undefined, {
+      timeout: 120_000,
+    })
+    .catch(() => {});
+  await new Promise((done) => setTimeout(done, 300));
+
+  const res = cli(["token", "revoke", "doomed", "--data-dir", DATA_DIR]);
+  expect(res.status === 0, `token revoke failed: ${res.stderr}`);
+  const revokedAt = Date.now();
+  let nextRequest = "";
+  await doomed.listTools().catch((e: unknown) => {
+    nextRequest = String(e);
+  });
+  expect(/unauthorized/.test(nextRequest), `after the revoke: ${nextRequest || "the call worked"}`);
+  const closedAfter = (await closed) - revokedAt;
+  expect(closedAfter < 2_000, `the stream stayed open ${closedAfter} ms`);
+  pass("revoke from another process", `next request refused, stream closed after ${closedAfter} ms`);
+
+  await holding;
+  await new Promise((done) => setTimeout(done, 800));
+  expect((await buttonState(owner, id)) === "not clicked yet", "the revoked token's queued click fired");
+  pass("revoke drops the token's queued call");
+  await doomed.close();
+  await queued;
+
+  const leaseToken = createToken("--name", "holder");
+  const holder = await httpClient(url, leaseToken);
+  await call(holder, "acquire_profile", { profile_id: id, ttl_ms: 600_000 });
+  const leased = await callError(owner, "click", { profile_id: id, selector: "#the-button" });
+  expect(leased.code === "PROFILE_LEASED", `with a lease out: ${JSON.stringify(leased)}`);
+  expect(cli(["token", "revoke", "holder", "--data-dir", DATA_DIR]).status === 0, "token revoke failed");
+  await holder.listTools().catch(() => {});
+  await call(owner, "click", { profile_id: id, selector: "#the-button" });
+  expect((await buttonState(owner, id)) === "button was clicked", "the click after the lease went nowhere");
+  pass("revoke drops the token's leases");
+  await holder.close();
+}
+
+function opensslBinary(): string {
+  const candidates = [
+    "openssl",
+    "C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe",
+    "C:\\Program Files\\Git\\usr\\bin\\openssl.exe",
+  ];
+  for (const candidate of candidates) {
+    if (spawnSync(candidate, ["version"], { windowsHide: true }).status === 0) return candidate;
+  }
+  throw new Error("FAILED: this check needs openssl to make its certificate");
+}
+
+function selfSignedCert(dir: string, address: string): { cert: string; key: string } {
+  mkdirSync(dir, { recursive: true });
+  const cert = join(dir, "cert.pem");
+  const key = join(dir, "key.pem");
+  const res = spawnSync(
+    opensslBinary(),
+    [
+      "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+      "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=mz-e2e",
+      "-addext", `subjectAltName=IP:${address}`,
+    ],
+    { encoding: "utf8", windowsHide: true },
+  );
+  expect(res.status === 0, `openssl failed: ${res.stderr}`);
+  return { cert, key };
+}
+
+/** A real SDK client, in a process of its own: only that can trust a CA from its environment. */
+function sdkClientWithCa(url: string, token: string, ca: string): string {
+  const script = `
+    import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+    import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+    const client = new Client({ name: "e2e-tls", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(process.env.MZ_URL), {
+      requestInit: { headers: { authorization: "Bearer " + process.env.MZ_TOKEN } },
+    }));
+    const { tools } = await client.listTools();
+    process.stdout.write(String(tools.length));
+    await client.close();
+  `;
+  const res = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: APP_ROOT,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 60_000,
+    env: { ...process.env, NODE_EXTRA_CA_CERTS: ca, MZ_URL: url, MZ_TOKEN: token },
+  });
+  expect(res.status === 0, `the TLS client failed: ${res.stderr}`);
+  return res.stdout;
+}
+
+function lanAddress(): string {
+  const chosen = values["lan-address"];
+  if (chosen) return chosen;
+  for (const addresses of Object.values(networkInterfaces())) {
+    const found = addresses?.find((a) => a.family === "IPv4" && !a.internal);
+    if (found) return found.address;
+  }
+  throw new Error("FAILED: no non-loopback address to bind: pass --lan-address");
+}
+
+async function remoteBindChecks(): Promise<void> {
+  const address = lanAddress();
+  const port = await freePort();
+  const bind = ["serve", "--data-dir", DATA_DIR, "--host", address, "--port", String(port), ...SERVER_FLAGS];
+
+  const bare = cli(bind);
+  expect(bare.status === 2 && /--allow-remote/.test(bare.stdout), `no flags: ${bare.status} ${bare.stdout}`);
+  const insecure = cli([...bind, "--allow-remote"]);
+  expect(
+    insecure.status === 2 && /--allow-insecure-remote/.test(insecure.stdout),
+    `no TLS: ${insecure.status} ${insecure.stdout}`,
+  );
+  pass("a LAN address is refused without the flags", address);
+
+  const { cert, key } = selfSignedCert(join(DATA_DIR, "tls"), address);
+  const serve = await startServe(["--host", address, "--allow-remote", "--tls-cert", cert, "--tls-key", key]);
+  try {
+    const servePort = new URL(serve.url).port;
+    const origin = `https://${address}:${servePort}`;
+    const url = `${origin}/mcp`;
+    const ca = readFileSync(cert);
+    const authed = { authorization: `Bearer ${serve.token}` };
+
+    const tools = sdkClientWithCa(url, serve.token, cert);
+    expect(Number(tools) > 0, `tools over TLS: ${tools}`);
+    pass("--allow-remote with TLS: a real client over https on that address", `${tools} tools`);
+
+    const gated = await rawHttp(url, { headers: authed, ca });
+    expect(gated.status === 400, `the right Host: ${gated.status} ${gated.text}`);
+    const wrongHost = await rawHttp(url, { headers: { ...authed, host: "evil.test" }, ca });
+    expect(wrongHost.status === 403, `a wrong Host: ${wrongHost.status}`);
+    const wrongOrigin = await rawHttp(url, { headers: { ...authed, origin: "https://evil.test" }, ca });
+    expect(wrongOrigin.status === 403, `a wrong Origin: ${wrongOrigin.status}`);
+    const rightOrigin = await rawHttp(url, { headers: { ...authed, origin }, ca });
+    expect(rightOrigin.status === 400, `its own Origin: ${rightOrigin.status}`);
+    const noToken = await rawHttp(url, { ca });
+    expect(noToken.status === 401, `no token: ${noToken.status}`);
+    const health = await rawHttp(`${origin}/healthz`, { ca });
+    expect(health.status === 200 && health.text === '{"ok":true}', `/healthz: ${health.text}`);
+    pass("a wrong Host and a wrong Origin are refused", "403, 403");
+
+    let plainFailed = false;
+    await rawHttp(`http://${address}:${servePort}/healthz`).catch(() => {
+      plainFailed = true;
+    });
+    expect(plainFailed, "plain HTTP got an answer from the TLS port");
+    let loopbackFailed = false;
+    await rawHttp(`https://127.0.0.1:${servePort}/healthz`, { ca }).catch(() => {
+      loopbackFailed = true;
+    });
+    expect(loopbackFailed, "it also listens on loopback");
+    pass("bound there and only there, TLS only");
+    await stopServe(serve);
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
+async function proxyShapeChecks(): Promise<void> {
+  const serve = await startServe(["--allowed-hosts", "example.test"]);
+  const authed = { authorization: `Bearer ${serve.token}` };
+  // A reverse proxy in its plainest form: a port of its own, and another Host going upstream.
+  const hop = createHttpServer((req, res) => {
+    const upstream = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: new URL(serve.url).port,
+        method: req.method,
+        path: req.url,
+        headers: { ...req.headers, host: "example.test" },
+      },
+      (reply) => {
+        res.writeHead(reply.statusCode ?? 502, reply.headers);
+        reply.pipe(res);
+      },
+    );
+    upstream.on("error", () => res.destroy());
+    req.pipe(upstream);
+  });
+  await new Promise<void>((done) => hop.listen(0, "127.0.0.1", done));
+  try {
+    const raw = async (headers: Record<string, string>): Promise<number> =>
+      (await rawHttp(serve.url, { headers: { ...authed, ...headers } })).status;
+    expect((await raw({ host: "example.test" })) === 400, "Host example.test was refused");
+    expect((await raw({ host: "example.test:8443" })) === 400, "a mapped port was refused");
+    expect((await raw({ host: "other.test" })) === 403, "another name got through");
+    expect((await raw({ origin: "https://example.test" })) === 400, "its Origin was refused");
+    expect((await raw({ origin: "https://other.test" })) === 403, "another Origin got through");
+
+    const hopUrl = `http://127.0.0.1:${(hop.address() as AddressInfo).port}/mcp`;
+    const client = await httpClient(hopUrl, serve.token);
+    const tools = await toolNamesOf(client);
+    expect(tools.length > 0, "no tools through the hop");
+    await client.close();
+    pass("loopback behind a proxy needs only --allowed-hosts", `${tools.length} tools through the hop`);
+    await stopServe(serve);
+  } finally {
+    hop.closeAllConnections();
+    await new Promise((done) => hop.close(done));
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
+/** A SOCKS5 proxy with a password, whose every CONNECT lands on the given local port. */
+async function startSocksProxy(
+  user: string,
+  password: string,
+  targetPort: number,
+): Promise<{ port: number; logins: string[]; connects: string[]; close(): Promise<void> }> {
+  const logins: string[] = [];
+  const connects: string[] = [];
+  const sockets = new Set<Socket>();
+  const server = createNetServer((client) => {
+    sockets.add(client);
+    client.on("close", () => sockets.delete(client));
+    client.on("error", () => {});
+    client.once("data", () => {
+      client.write(Buffer.from([5, 2]));
+      client.once("data", (login: Buffer) => {
+        const userEnd = 2 + login[1]!;
+        const name = login.subarray(2, userEnd).toString();
+        const pass = login.subarray(userEnd + 1, userEnd + 1 + login[userEnd]!).toString();
+        logins.push(`${name}:${pass}`);
+        const allowed = name === user && pass === password;
+        client.write(Buffer.from([1, allowed ? 0 : 1]));
+        if (!allowed) {
+          client.end();
+          return;
+        }
+        client.once("data", (request: Buffer) => {
+          const nameLength = request[4]!;
+          const isName = request[3] === 3;
+          const portAt = isName ? 5 + nameLength : 8;
+          const host = isName ? request.subarray(5, portAt).toString() : request.subarray(4, 8).join(".");
+          connects.push(`${host}:${request.readUInt16BE(portAt)}`);
+          const upstream = netConnect(targetPort, "127.0.0.1", () => {
+            client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+            client.pipe(upstream);
+            upstream.pipe(client);
+          });
+          upstream.on("error", () => client.destroy());
+          client.on("close", () => upstream.destroy());
+        });
+      });
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  return {
+    port: (server.address() as AddressInfo).port,
+    logins,
+    connects,
+    close: () =>
+      new Promise((done) => {
+        server.close(() => done());
+        for (const socket of sockets) socket.destroy();
+      }),
+  };
+}
+
+async function secretBoxChecks(fixture: Fixture): Promise<void> {
+  const password = "s3cret-proxy-passw0rd-e2e";
+  const dbPath = join(DATA_DIR, "profiles.db");
+  const holdsPassword = (): string[] =>
+    [dbPath, `${dbPath}-wal`].filter((f) => existsSync(f) && readFileSync(f).includes(password));
+
+  const proxy = await startSocksProxy("mz-user", password, Number(new URL(fixture.url).port));
+  try {
+    let serve = await startServe();
+    let client = await httpClient(serve.url, serve.token);
+    const id = String(
+      (
+        await call(client, "create_profile", {
+          name: "proxied",
+          ...ENGINE_ARGS,
+          proxy: { type: "socks5", host: "127.0.0.1", port: proxy.port, username: "mz-user", password },
+        })
+      ).id,
+    );
+    expect(holdsPassword().length === 0, `plaintext in ${holdsPassword().join(", ")}`);
+    const onDisk = [dbPath, `${dbPath}-wal`].some(
+      (f) => existsSync(f) && readFileSync(f).includes("mzenc:v1:"),
+    );
+    expect(onDisk, "no sealed value in the database or its WAL");
+    expect(!serve.output().includes(password), "the password reached the logs");
+    pass("a proxy password from create_profile is encrypted in the DB and the WAL");
+
+    const browse = async (): Promise<void> => {
+      await launch(client, id);
+      await call(client, "navigate", { profile_id: id, url: "http://mz-proxy-e2e.invalid/page" });
+      const title = await call(client, "evaluate_js", { profile_id: id, expression: "document.title" });
+      expect((title.result as { value?: unknown }).value === "MZ Fixture", "the page came through wrong");
+      await call(client, "close_profile", { profile_id: id });
+    };
+    await browse();
+    expect(proxy.connects.includes("mz-proxy-e2e.invalid:80"), `connects: ${proxy.connects.join(",")}`);
+    expect(new Set(proxy.logins).size === 1, "the proxy saw another login");
+    expect(proxy.logins[0] === `mz-user:${password}`, "the proxy saw a garbled password");
+    pass("the profile launches through a SOCKS proxy with the decrypted password", `${proxy.logins.length} logins`);
+
+    await closeAndExit(serve, client);
+    expect(holdsPassword().length === 0, `plaintext after shutdown in ${holdsPassword().join(", ")}`);
+
+    proxy.connects.length = 0;
+    serve = await startServe();
+    client = await httpClient(serve.url, serve.token);
+    await browse();
+    expect(proxy.connects.includes("mz-proxy-e2e.invalid:80"), "no proxy use after a restart");
+    pass("and again after a restart, from what is on disk");
+    await closeAndExit(serve, client);
+    await assertNoLeftovers("the secret box run");
+  } finally {
+    await proxy.close();
+  }
+}
+
+async function authFlow(fixture: Fixture): Promise<void> {
+  await permissionChecks(fixture);
+  await remoteBindChecks();
+  await proxyShapeChecks();
+  await secretBoxChecks(fixture);
+}
+
 async function main(): Promise<void> {
   prepareDataDir();
   const fixture = await startFixture();
@@ -2174,6 +2677,7 @@ async function main(): Promise<void> {
     if (FLOWS.includes("tabs")) await tabsFlow();
     if (FLOWS.includes("concurrency")) await concurrencyFlow();
     if (FLOWS.includes("display")) await displayFlow(fixture);
+    if (FLOWS.includes("auth")) await authFlow(fixture);
   } finally {
     await fixture.close();
     if (!values.keep) {

@@ -37,6 +37,22 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   its mode: `launch_profile` with no parameter stays idempotent, naming another mode is
   `PROFILE_ALREADY_RUNNING`, and `update_profile` refuses a real change while it runs.
   `headed` with no display and `xvfb` off Linux are `DISPLAY_UNAVAILABLE`.
+- **`multizen-server`: named tokens, remote access and encrypted proxy passwords.**
+  `token create`, `token list` and `token revoke` manage tokens that carry tool groups
+  (`read`, `act`, `profile-admin`, `raw`, `operator`) or single tools, and a list of
+  profiles. `token create` defaults to `read` and `act`, never `raw`, and shows a token
+  once; only its hash is stored. `tools/list` shows what a token may use, anything else
+  is `FORBIDDEN`, and without `raw` `launch_profile` leaves out `cdpEndpoint` and `pid`.
+  A revoke from another process closes that token's sessions within a second and drops
+  its queued calls and leases. `--host` beyond loopback needs `--allow-remote`, and TLS
+  (`--tls-cert`, `--tls-key`) or `--allow-insecure-remote`; behind a reverse proxy on
+  loopback, `--allowed-hosts` or `--public-url` is enough. Failed logins are limited to
+  10 a minute per address (`--trust-proxy` for a proxy of yours in front). Sessions close
+  after 30 idle minutes and there can be 64 of them, a call in flight never counting as
+  idle. Proxy passwords are encrypted at rest with `MULTIZEN_SECRET_KEY` or
+  `<data-dir>/secret.key`, plaintext ones at start, and `secrets rotate` changes the key.
+  The owner's token is in `<data-dir>/owner-token`. The desktop's `mcp-token` keeps full
+  access, and the desktop stores proxy passwords as before.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.
@@ -44,6 +60,9 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 ### Changed
 
+- MCP over HTTP takes requests of up to 22 MiB on both of its transports, so a large
+  `upload_file` also works over legacy SSE, which stopped at 4 MB. Streamable HTTP had no
+  limit. Larger requests get HTTP 413 with `FILE_TOO_LARGE`.
 - A browser that never answers at launch now fails with the end of what it wrote to
   stderr in the message, so a missing library or a rejected flag is visible.
 - **`new_tab` makes the new tab the active one** on CloakBrowser profiles, in the
@@ -78,6 +97,8 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 ### Fixed
 
+- A Streamable HTTP client that disappeared without ending its session left its queued
+  calls in line, and they fired later on whatever the page showed by then.
 - On Camoufox, a `navigate` right after `launch_profile` could fail with "interrupted by
   another navigation" when the start page committed after it. A launch now waits for the
   start page to commit, for up to 3 s.

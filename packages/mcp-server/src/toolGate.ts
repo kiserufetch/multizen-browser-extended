@@ -1,4 +1,4 @@
-import { MultizenError, type BrowserDriver, type ProfileId } from "@multizen/types";
+import { MultizenError, type BrowserDriver, type LaunchedProfile, type ProfileId } from "@multizen/types";
 import type { Principal } from "./auth/principal.js";
 import type { LeaseHolder } from "./LeaseRegistry.js";
 import { MUTEX_WAIT_MS, type MutexRunOptions } from "./ProfileMutex.js";
@@ -10,8 +10,35 @@ const WAIT_TOOL_DEFAULT_MS = 30_000;
 /** Enough for a turn on a free profile, however little of its budget a wait has left. */
 const POLL_MIN_LOCK_WAIT_MS = 1_000;
 
+const RAW_TOOLS = ["cdp_send", "cdp_send_no_safety"];
+
 function mayUse(principal: Principal, tool: string, policy: ToolPolicy): boolean {
   return principal.tools.groups.includes(policy.group) || principal.tools.names.includes(tool);
+}
+
+function mayUseProfile(principal: Principal, profileId: ProfileId): boolean {
+  return principal.profiles === "*" || principal.profiles.includes(profileId);
+}
+
+/**
+ * What a call may not return to this principal, whatever the tool produced: other
+ * profiles, and the way into the browser. With the CDP endpoint a token could do
+ * anything `raw` can, without holding it.
+ */
+function visibleResult(tool: string, principal: Principal, result: unknown): unknown {
+  if (tool === "list_profiles" && principal.profiles !== "*") {
+    const { profiles } = result as { profiles: Array<{ id: ProfileId }> };
+    return { ...(result as object), profiles: profiles.filter((p) => mayUseProfile(principal, p.id)) };
+  }
+  if (
+    tool === "launch_profile" &&
+    !principal.tools.groups.includes("raw") &&
+    !RAW_TOOLS.some((raw) => principal.tools.names.includes(raw))
+  ) {
+    const { cdpEndpoint: _endpoint, pid: _pid, ...rest } = result as LaunchedProfile;
+    return rest;
+  }
+  return result;
 }
 
 /** tools/list: what this principal may call, with its annotations. No policy, no tool. */
@@ -88,12 +115,21 @@ function pollingDriver(
  * caller learns nothing about a tool it may not use. No policy means refused, for
  * every principal. `run` gets the driver the tool should use.
  */
-export async function runGated<T>(
+export async function runGated(
   tool: string,
   args: Record<string, unknown>,
   ctx: GateContext,
-  run: (driver: BrowserDriver) => Promise<T>,
-): Promise<T> {
+  run: (driver: BrowserDriver) => Promise<unknown>,
+): Promise<unknown> {
+  return visibleResult(tool, ctx.principal, await admitted(tool, args, ctx, run));
+}
+
+async function admitted(
+  tool: string,
+  args: Record<string, unknown>,
+  ctx: GateContext,
+  run: (driver: BrowserDriver) => Promise<unknown>,
+): Promise<unknown> {
   const policy = policyFor(tool);
   if (!policy) {
     throw new MultizenError("FORBIDDEN", `Unknown tool: ${tool}`, {
@@ -103,9 +139,12 @@ export async function runGated<T>(
   if (!mayUse(ctx.principal, tool, policy)) {
     throw new MultizenError("FORBIDDEN", `This token may not call ${tool}`);
   }
+  if (policy.needsAllProfiles && ctx.principal.profiles !== "*") {
+    throw new MultizenError("FORBIDDEN", `${tool} needs a token that isn't limited to some profiles`);
+  }
   const { profile_id: profileId } = args;
   if (policy.scope !== "profile" || typeof profileId !== "string") return run(ctx.driver);
-  if (ctx.principal.profiles !== "*" && !ctx.principal.profiles.includes(profileId)) {
+  if (!mayUseProfile(ctx.principal, profileId)) {
     throw new MultizenError("FORBIDDEN", `This token may not use profile ${profileId}`);
   }
 
