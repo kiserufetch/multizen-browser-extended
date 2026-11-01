@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MultiZen baseline probe</title>
+<style>
+  body { font: 16px sans-serif; margin: 2rem; }
+  #scroll-box { width: 100px; height: 100px; overflow: scroll; position: absolute; left: -500px; }
+</style>
+</head>
+<body>
+<h1>Baseline probe</h1>
+<p>What a page can read about this browser. It reads this by itself, as any site's script would, and the run collects the answer.</p>
+<div id="scroll-box"><div style="height: 300px"></div></div>
+<pre id="mz-report" hidden></pre>
+<script>
+const FONTS = {
+  windows: ['Arial', 'Arial Black', 'Bahnschrift', 'Calibri', 'Cambria', 'Cambria Math', 'Candara', 'Comic Sans MS', 'Consolas', 'Constantia', 'Corbel', 'Courier New', 'Ebrima', 'Franklin Gothic Medium', 'Gabriola', 'Gadugi', 'Georgia', 'HoloLens MDL2 Assets', 'Impact', 'Ink Free', 'Javanese Text', 'Leelawadee UI', 'Lucida Console', 'Lucida Sans Unicode', 'Malgun Gothic', 'Marlett', 'Microsoft Himalaya', 'Microsoft JhengHei', 'Microsoft New Tai Lue', 'Microsoft PhagsPa', 'Microsoft Sans Serif', 'Microsoft Tai Le', 'Microsoft YaHei', 'Microsoft Yi Baiti', 'MingLiU-ExtB', 'Mongolian Baiti', 'MS Gothic', 'MV Boli', 'Myanmar Text', 'Nirmala UI', 'Palatino Linotype', 'Segoe MDL2 Assets', 'Segoe Print', 'Segoe Script', 'Segoe UI', 'Segoe UI Emoji', 'Segoe UI Historic', 'Segoe UI Symbol', 'SimSun', 'Sitka Text', 'Sylfaen', 'Symbol', 'Tahoma', 'Times New Roman', 'Trebuchet MS', 'Verdana', 'Webdings', 'Wingdings', 'Yu Gothic'],
+  linux: ['Liberation Sans', 'Liberation Serif', 'Liberation Mono', 'DejaVu Sans', 'DejaVu Serif', 'DejaVu Sans Mono', 'Noto Sans', 'Noto Serif', 'Noto Sans CJK SC', 'Noto Color Emoji', 'Ubuntu', 'Cantarell', 'Roboto', 'Droid Sans', 'FreeSans'],
+  mac: ['Helvetica', 'Helvetica Neue', 'Menlo', 'Monaco', 'San Francisco', 'SF Pro Text', 'Apple Color Emoji', 'Lucida Grande', 'Geneva', 'Avenir'],
+};
+
+const safe = (read) => {
+  try {
+    return read();
+  } catch (e) {
+    return `error: ${e.name}`;
+  }
+};
+const safeAsync = async (read, timeoutMs = 3000) => {
+  try {
+    return await Promise.race([
+      read(),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs)),
+    ]);
+  } catch (e) {
+    return `error: ${e.name}`;
+  }
+};
+const hashText = (text) => {
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) hash = (hash * 31 + text.charCodeAt(i)) | 0;
+  return hash;
+};
+
+function readFonts() {
+  const context = document.createElement('canvas').getContext('2d');
+  const SAMPLE = 'mmmmmmmmmmlli1WQ@';
+  const widthOf = (font) => {
+    context.font = `72px ${font}`;
+    return context.measureText(SAMPLE).width;
+  };
+  const generics = ['monospace', 'sans-serif', 'serif'];
+  const base = generics.map(widthOf);
+  const widths = {};
+  const present = { windows: [], linux: [], mac: [] };
+  for (const [family, names] of Object.entries(FONTS)) {
+    for (const name of names) {
+      const measured = generics.map((g) => widthOf(`"${name}",${g}`));
+      widths[name] = measured[1];
+      if (measured.some((w, i) => w !== base[i])) present[family].push(name);
+    }
+  }
+  const systemFonts = {};
+  const probe = document.createElement('span');
+  document.body.appendChild(probe);
+  for (const name of ['caption', 'icon', 'menu', 'message-box', 'small-caption', 'status-bar', 'system-ui']) {
+    probe.style.font = name === 'system-ui' ? '16px system-ui' : name;
+    const style = getComputedStyle(probe);
+    systemFonts[name] = `${style.fontFamily} ${style.fontSize}`;
+  }
+  probe.remove();
+  let emoji = null;
+  safe(() => {
+    const c = document.createElement('canvas');
+    c.width = 60;
+    c.height = 40;
+    const x = c.getContext('2d');
+    x.font = '24px sans-serif';
+    x.fillText('\u{1F600}\u{1F468}‍\u{1F4BB}', 2, 28);
+    emoji = { width: x.measureText('\u{1F600}').width, canvasHash: hashText(c.toDataURL()) };
+  });
+  const checked = safe(() => Object.values(FONTS).flat().filter((f) => document.fonts.check(`16px "${f}"`)).length);
+  return { present, widths, baseWidths: Object.fromEntries(generics.map((g, i) => [g, base[i]])), systemFonts, emoji, fontsCheckCount: checked };
+}
+
+function readWebgl() {
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl');
+  if (!gl) return null;
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  const extensions = gl.getSupportedExtensions() || [];
+  const gl2 = document.createElement('canvas').getContext('webgl2');
+  const params = {};
+  for (const name of ['MAX_TEXTURE_SIZE', 'MAX_VIEWPORT_DIMS', 'MAX_VERTEX_ATTRIBS', 'MAX_RENDERBUFFER_SIZE', 'ALIASED_LINE_WIDTH_RANGE', 'MAX_COMBINED_TEXTURE_IMAGE_UNITS']) {
+    const value = gl.getParameter(gl[name]);
+    params[name] = value && value.length !== undefined ? Array.from(value) : value;
+  }
+  return {
+    vendor: gl.getParameter(gl.VENDOR),
+    renderer: gl.getParameter(gl.RENDERER),
+    version: gl.getParameter(gl.VERSION),
+    shading: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+    unmaskedVendor: dbg && gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL),
+    unmaskedRenderer: dbg && gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL),
+    extensionCount: extensions.length,
+    extensionsHash: hashText(extensions.join(',')),
+    webgl2: Boolean(gl2),
+    params,
+    canvasHash: safe(() => {
+      gl.clearColor(0.2, 0.4, 0.6, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      return hashText(canvas.toDataURL());
+    }),
+  };
+}
+
+function readCanvas() {
+  const c = document.createElement('canvas');
+  c.width = 220;
+  c.height = 40;
+  const x = c.getContext('2d');
+  x.font = '16px Arial';
+  x.fillStyle = '#f60';
+  x.fillRect(1, 1, 60, 20);
+  x.fillStyle = '#069';
+  x.fillText('MultiZen headless spike', 4, 22);
+  return hashText(c.toDataURL());
+}
+
+async function readAudio() {
+  const Context = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!Context) return null;
+  const context = new Context(1, 5000, 44100);
+  const oscillator = context.createOscillator();
+  oscillator.type = 'triangle';
+  oscillator.frequency.value = 10000;
+  const compressor = context.createDynamicsCompressor();
+  oscillator.connect(compressor);
+  compressor.connect(context.destination);
+  oscillator.start(0);
+  const rendered = await context.startRendering();
+  const data = rendered.getChannelData(0);
+  let sum = 0;
+  for (let i = 4500; i < 5000; i++) sum += Math.abs(data[i]);
+  const live = safe(() => {
+    const a = new (window.AudioContext || window.webkitAudioContext)();
+    const out = { sampleRate: a.sampleRate, state: a.state, maxChannelCount: a.destination.maxChannelCount, baseLatency: a.baseLatency };
+    a.close();
+    return out;
+  });
+  return { canvasLikeSum: sum, live };
+}
+
+const MEDIA_QUERIES = [
+  '(pointer: fine)', '(pointer: coarse)', '(pointer: none)',
+  '(any-pointer: fine)', '(any-pointer: coarse)', '(any-pointer: none)',
+  '(hover: hover)', '(hover: none)', '(any-hover: hover)', '(any-hover: none)',
+  '(prefers-color-scheme: dark)', '(prefers-reduced-motion: reduce)', '(prefers-contrast: more)',
+  '(forced-colors: active)', '(color-gamut: srgb)', '(color-gamut: p3)', '(dynamic-range: high)',
+  '(display-mode: browser)', '(display-mode: standalone)', '(inverted-colors: inverted)', '(monochrome)',
+];
+
+const PERMISSIONS = ['notifications', 'geolocation', 'camera', 'microphone', 'persistent-storage', 'clipboard-read', 'clipboard-write', 'midi'];
+
+function readSystemColor(name) {
+  const el = document.createElement('div');
+  el.style.setProperty('color', name, 'important');
+  document.body.appendChild(el);
+  const color = getComputedStyle(el).color;
+  el.remove();
+  return color;
+}
+
+function readWindowProps() {
+  const names = Object.getOwnPropertyNames(window).sort();
+  const suspicious = names.filter((n) => /^(cdc_|__webdriver|__selenium|__driver|__fxdriver|_phantom|callPhantom|__nightmare|__pw|__playwright|domAutomation|webdriver)/i.test(n));
+  return { count: names.length, hash: hashText(names.join(',')), suspicious };
+}
+
+function readScrollbar() {
+  const box = document.getElementById('scroll-box');
+  return { width: box.offsetWidth - box.clientWidth, height: box.offsetHeight - box.clientHeight };
+}
+
+async function collect() {
+  const nav = navigator;
+  const high = await safeAsync(() => nav.userAgentData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList', 'architecture', 'bitness', 'model', 'uaFullVersion', 'wow64']));
+  const permissions = {};
+  for (const name of PERMISSIONS) {
+    permissions[name] = await safeAsync(async () => (await nav.permissions.query({ name })).state, 1500);
+  }
+  const voices = await safeAsync(() => new Promise((resolve) => {
+    const read = () => speechSynthesis.getVoices();
+    if (read().length > 0) return resolve(read());
+    speechSynthesis.onvoiceschanged = () => resolve(read());
+    setTimeout(() => resolve(read()), 1500);
+  }), 2000);
+  const devices = await safeAsync(async () => (await nav.mediaDevices.enumerateDevices()).map((d) => d.kind), 1500);
+  const battery = await safeAsync(async () => {
+    const b = await nav.getBattery();
+    return { charging: b.charging, level: b.level, chargingTime: b.chargingTime, dischargingTime: b.dischargingTime };
+  }, 1500);
+  const storage = await safeAsync(async () => (await nav.storage.estimate()).quota, 1500);
+  const gpu = await safeAsync(async () => {
+    if (!nav.gpu) return null;
+    const adapter = await nav.gpu.requestAdapter();
+    if (!adapter) return 'no adapter';
+    const info = adapter.info || {};
+    return { vendor: info.vendor, architecture: info.architecture, description: info.description, fallback: adapter.isFallbackAdapter };
+  });
+  const raf = await new Promise((resolve) => {
+    let frames = 0;
+    const started = performance.now();
+    const step = () => {
+      frames += 1;
+      if (performance.now() - started < 500) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    setTimeout(() => resolve(frames), 700);
+  });
+  const paints = performance.getEntriesByType('paint').map((p) => p.name);
+  const media = {};
+  for (const query of MEDIA_QUERIES) media[query] = matchMedia(query).matches;
+  const report = {
+    userAgent: nav.userAgent,
+    appVersion: nav.appVersion,
+    platform: nav.platform,
+    vendor: nav.vendor,
+    productSub: nav.productSub,
+    oscpu: nav.oscpu ?? null,
+    buildID: nav.buildID ?? null,
+    brands: nav.userAgentData ? nav.userAgentData.brands : null,
+    mobile: nav.userAgentData ? nav.userAgentData.mobile : null,
+    highEntropy: high,
+    webdriver: nav.webdriver,
+    language: nav.language,
+    languages: nav.languages,
+    hardwareConcurrency: nav.hardwareConcurrency,
+    deviceMemory: nav.deviceMemory ?? null,
+    maxTouchPoints: nav.maxTouchPoints,
+    cookieEnabled: nav.cookieEnabled,
+    doNotTrack: nav.doNotTrack,
+    globalPrivacyControl: nav.globalPrivacyControl ?? null,
+    pdfViewerEnabled: nav.pdfViewerEnabled ?? null,
+    plugins: Array.from(nav.plugins || []).map((p) => p.name),
+    mimeTypes: Array.from(nav.mimeTypes || []).map((m) => m.type),
+    screen: {
+      width: screen.width,
+      height: screen.height,
+      availWidth: screen.availWidth,
+      availHeight: screen.availHeight,
+      availLeft: screen.availLeft ?? null,
+      availTop: screen.availTop ?? null,
+      colorDepth: screen.colorDepth,
+      pixelDepth: screen.pixelDepth,
+      orientation: safe(() => screen.orientation.type),
+      isExtended: screen.isExtended ?? null,
+    },
+    window: {
+      outerWidth,
+      outerHeight,
+      innerWidth,
+      innerHeight,
+      screenX,
+      screenY,
+      devicePixelRatio,
+      visualViewport: safe(() => [visualViewport.width, visualViewport.height, visualViewport.scale]),
+      toolbar: safe(() => toolbar.visible),
+      locationbar: safe(() => locationbar.visible),
+      menubar: safe(() => menubar.visible),
+      personalbar: safe(() => personalbar.visible),
+      statusbar: safe(() => statusbar.visible),
+      scrollbars: safe(() => scrollbars.visible),
+      historyLength: history.length,
+    },
+    scrollbar: readScrollbar(),
+    document: {
+      visibility: document.visibilityState,
+      hidden: document.hidden,
+      hasFocus: document.hasFocus(),
+      paints,
+      rafRunning: raf > 0,
+      referrer: document.referrer,
+      characterSet: document.characterSet,
+      compatMode: document.compatMode,
+    },
+    media,
+    chrome: safe(() => (typeof chrome === 'object' ? {
+      keys: Object.keys(chrome),
+      runtime: typeof chrome.runtime,
+      loadTimes: typeof chrome.loadTimes,
+      csi: typeof chrome.csi,
+      app: typeof chrome.app,
+    } : null)),
+    notificationPermission: typeof Notification !== 'undefined' ? Notification.permission : null,
+    permissions,
+    webgl: safe(readWebgl),
+    gpu,
+    canvasHash: safe(readCanvas),
+    audio: await safeAsync(readAudio),
+    voices: Array.isArray(voices) ? voices.map((v) => `${v.name}|${v.lang}|${v.localService}`) : voices,
+    devices,
+    battery,
+    storageQuota: storage,
+    connection: nav.connection ? {
+      effectiveType: nav.connection.effectiveType,
+      rtt: nav.connection.rtt,
+      downlink: nav.connection.downlink,
+      saveData: nav.connection.saveData,
+    } : null,
+    intl: {
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      locale: Intl.DateTimeFormat().resolvedOptions().locale,
+      calendar: Intl.DateTimeFormat().resolvedOptions().calendar,
+      numberingSystem: Intl.DateTimeFormat().resolvedOptions().numberingSystem,
+      timezoneOffset: new Date(2026, 0, 15).getTimezoneOffset(),
+      dateSample: new Date(Date.UTC(2026, 0, 15, 12)).toLocaleString(),
+    },
+    systemColors: {
+      ActiveText: readSystemColor('ActiveText'),
+      Highlight: readSystemColor('Highlight'),
+      ButtonFace: readSystemColor('ButtonFace'),
+      Canvas: readSystemColor('Canvas'),
+    },
+    windowProps: readWindowProps(),
+    jsHeapSizeLimit: safe(() => (performance.memory ? performance.memory.jsHeapSizeLimit : null)),
+    secureContext: isSecureContext,
+    apis: {
+      serial: 'serial' in nav,
+      usb: 'usb' in nav,
+      hid: 'hid' in nav,
+      bluetooth: 'bluetooth' in nav,
+      keyboard: 'keyboard' in nav,
+      wakeLock: 'wakeLock' in nav,
+      share: 'share' in nav,
+      contacts: 'contacts' in nav,
+      windowControlsOverlay: 'windowControlsOverlay' in nav,
+      documentPictureInPicture: 'documentPictureInPicture' in window,
+    },
+    fonts: readFonts(),
+    timings: { rafFramesIn500Ms: raf, timeOrigin: performance.timeOrigin, loadMs: performance.now() },
+  };
+  // A subresource after Accept-CH, to see what the browser then sends a server by itself.
+  await safeAsync(() => fetch('/p/probe-sub').then((r) => r.text()), 2000);
+  return report;
+}
+
+// In the DOM, since a client on Camoufox reads from an isolated world, which has no page globals.
+const finish = (report) => {
+  const out = document.getElementById('mz-report');
+  out.textContent = JSON.stringify(report);
+  out.dataset.done = '1';
+};
+collect().then(finish, (e) => finish({ pageError: String(e) }));
+</script>
+</body>
+</html>

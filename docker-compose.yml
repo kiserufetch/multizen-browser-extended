@@ -1,0 +1,84 @@
+# The MultiZen server, reachable from this machine only. The first start downloads the
+# browser engine into the volume; `docker compose logs -f` shows its progress.
+#
+#   docker compose up -d
+#   docker compose exec multizen node /app/dist/cli.js token create --name agent
+#
+# Connect an MCP client to http://127.0.0.1:7777/mcp with the printed token as a Bearer token. The
+# /data/owner-token that the first start wrote can do everything, raw CDP and the panel included:
+# it is for you, not for an agent. MULTIZEN_HOST_PORT publishes on another host port.
+services:
+  multizen:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: multizen-server:local
+    # Keeps Chromium's profile locks comparable across restarts of the container.
+    hostname: multizen
+    restart: unless-stopped
+    # Above the server's own shutdown watchdog.
+    stop_grace_period: 30s
+    shm_size: 1gb
+    # Threads count. A browser takes a few hundred, and something gone wrong in one shouldn't take the host.
+    pids_limit: 4096
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    # Docker's default seccomp profile blocks the user namespaces Chromium's sandbox needs.
+    # This one is that default plus those calls. It is the sandbox's only requirement here:
+    # no added capability, and the sandbox is never turned off.
+    security_opt:
+      - seccomp=./docker/seccomp-chromium.json
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:${MULTIZEN_HOST_PORT:-7777}:7777"
+    environment:
+      # Inside the container only: the port above is published on the host's loopback.
+      MULTIZEN_HOST: 0.0.0.0
+      MULTIZEN_ALLOW_REMOTE: "1"
+      MULTIZEN_ALLOW_INSECURE_REMOTE: "1"
+      MULTIZEN_ALLOWED_HOSTS: "localhost:${MULTIZEN_HOST_PORT:-7777},127.0.0.1:${MULTIZEN_HOST_PORT:-7777}"
+      MULTIZEN_DATA_DIR: /data
+      # Browsers can't reach private addresses, this network's included. A comma-separated
+      # list of exceptions (an IP, a CIDR, a name, *.suffix, each with an optional :port) goes in
+      # MULTIZEN_EGRESS_ALLOW.
+    volumes:
+      - multizen-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:7777/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+
+  # The detection baseline, only when asked for. Its results land in docs/detection-baselines:
+  #   docker compose run --rm baseline --engine cloakbrowser --mode xvfb --label linux-xvfb \n  #     --data-dir /data --cache-dir /data/baseline-assets
+  baseline:
+    profiles:
+      - baseline
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: baseline
+    image: multizen-baseline:local
+    hostname: multizen
+    shm_size: 1gb
+    security_opt:
+      - seccomp=./docker/seccomp-chromium.json
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - multizen-baseline-data:/data
+      - ./docs/detection-baselines:/repo/docs/detection-baselines
+
+volumes:
+  multizen-data: {}
+  multizen-baseline-data: {}

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MultiZen baseline input logger</title>
+<style>
+  body { font: 16px sans-serif; margin: 2rem; }
+  .row { margin: 1rem 0; }
+  #hov { width: 200px; height: 60px; background: #ddd; }
+  #tall { height: 3000px; }
+</style>
+</head>
+<body>
+<h1>Input logger</h1>
+<div class="row"><button id="btn">Selector button</button> <button id="btn2">Ref button</button></div>
+<div class="row"><input id="txt" aria-label="Selector text"> <input id="txt2" aria-label="Ref text"></div>
+<div class="row">
+  <select id="sel" aria-label="Choice">
+    <option value="1">One</option>
+    <option value="2">Two</option>
+    <option value="3">Three</option>
+  </select>
+</div>
+<div class="row" id="hov">Hover here</div>
+<div id="tall"></div>
+<pre id="mz-log" hidden></pre>
+<script>
+const TYPES = ['pointerover', 'pointerenter', 'pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'pointerout', 'pointerleave', 'mouseover', 'mouseenter', 'mousedown', 'mousemove', 'mouseup', 'mouseout', 'mouseleave', 'click', 'dblclick', 'auxclick', 'contextmenu', 'keydown', 'keypress', 'keyup', 'beforeinput', 'input', 'change', 'wheel', 'scroll', 'focus', 'focusin', 'blur', 'focusout', 'visibilitychange', 'select', 'selectionchange', 'compositionstart', 'compositionend'];
+const out = document.getElementById('mz-log');
+const read = (event, name) => (name in event ? event[name] : undefined);
+const record = (event) => {
+  const entry = {
+    type: event.type,
+    trusted: event.isTrusted,
+    timeStamp: event.timeStamp,
+    target: event.target && (event.target.id || event.target.nodeName || 'document'),
+  };
+  for (const name of ['button', 'buttons', 'detail', 'clientX', 'clientY', 'screenX', 'screenY', 'movementX', 'movementY', 'pressure', 'tangentialPressure', 'tiltX', 'tiltY', 'twist', 'width', 'height', 'pointerType', 'isPrimary', 'pointerId', 'key', 'code', 'keyCode', 'location', 'repeat', 'shiftKey', 'ctrlKey', 'altKey', 'metaKey', 'deltaX', 'deltaY', 'deltaMode', 'inputType', 'data']) {
+    const value = read(event, name);
+    if (value !== undefined) entry[name] = value;
+  }
+  if (typeof event.getCoalescedEvents === 'function') entry.coalesced = event.getCoalescedEvents().length;
+  if (typeof event.getPredictedEvents === 'function') entry.predicted = event.getPredictedEvents().length;
+  // In the DOM, since a client on Camoufox reads from an isolated world, which has no page globals.
+  out.append(`${JSON.stringify(entry)}\n`);
+};
+for (const type of TYPES) {
+  window.addEventListener(type, record, { capture: true, passive: true });
+  document.addEventListener(type, record, { capture: true, passive: true });
+}
+</script>
+</body>
+</html>

@@ -1,7 +1,15 @@
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 
 import { CdpSession, InputNotDeliveredError } from "./CdpSession.js";
+
+// Deadlines here are unref'd, as they are in the code they test. Node 22's runner takes an
+// event loop with nothing else in it to mean a test will never finish, and cancels it.
+let holdLoop: NodeJS.Timeout;
+beforeEach(() => {
+  holdLoop = setInterval(() => {}, 1_000);
+});
+afterEach(() => clearInterval(holdLoop));
 
 /**
  * Unit/integration coverage for the stealth-preserving `cdpSend` primitive.
@@ -384,8 +392,7 @@ function makeInputClient(page: FakePage): FakeClient & { client: unknown } {
   const handlers: Record<string, (p: Record<string, unknown>) => unknown> = {
     "Page.getFrameTree": () => ({ frameTree: { frame: { id: "F1" } } }),
     "Page.createIsolatedWorld": () => ({ executionContextId: 77 }),
-    "DOM.resolveNode": () => ({ object: { objectId: "O1" } }),
-    "Runtime.callFunctionOn": () => ({ result: { value: JSON.stringify({ x: 5, y: 6 }) } }),
+    "DOM.getContentQuads": () => ({ quads: [[0, 0, 10, 0, 10, 12, 0, 12]] }),
     "Runtime.evaluate": (p) => {
       const expr = String(p.expression);
       if (p.contextId === undefined) {
@@ -458,7 +465,20 @@ function makeInputClient(page: FakePage): FakeClient & { client: unknown } {
 function inputSession(page: FakePage): { s: CdpSession; fake: FakeClient } {
   const fake = makeInputClient(page);
   const s = sessionWith(fake);
-  (s as unknown as { snapshotRefs: Map<string, number> }).snapshotRefs = new Map([["e1", 42]]);
+  const internals = s as unknown as {
+    tabs: Map<string, unknown>;
+    targets: TargetRegistry;
+    refs: Map<string, unknown>;
+  };
+  internals.tabs.set("T1", {
+    targetId: "T1",
+    sessionId: "S1",
+    oopifs: new Map(),
+    ready: true,
+    setup: Promise.resolve(true),
+  });
+  internals.targets.upsert({ targetId: "T1", type: "page" });
+  internals.refs.set("e1", { targetId: "T1", sessionId: "S1", frameId: "F1", backendNodeId: 42 });
   return { s, fake };
 }
 

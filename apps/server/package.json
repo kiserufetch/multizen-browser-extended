@@ -1,0 +1,48 @@
+{
+  "name": "@multizen/server",
+  "version": "0.10.0",
+  "private": true,
+  "type": "module",
+  "description": "MultiZen headless server: MCP over HTTP or stdio with the real browser drivers, no Electron",
+  "bin": {
+    "multizen-server": "./bin/multizen-server.cjs"
+  },
+  "exports": {
+    "./runtime": "./src/runtime.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "tsx src/cli.ts serve",
+    "e2e": "tsx scripts/e2e.ts",
+    "test": "node --import tsx --test --test-timeout=120000 src/config.test.ts src/log.test.ts src/nodeHost.test.ts src/shutdown.test.ts src/runtime.test.ts src/bundle.test.ts src/secretKey.test.ts src/integration.test.ts src/concurrency.test.ts src/sandboxPreflight.test.ts src/relayKeepAlive.test.ts src/handoffWebhook.test.ts src/docs.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "better-sqlite3": "^11.7.0",
+    "camoufox-js": "patch:camoufox-js@npm%3A0.12.0#~/.yarn/patches/camoufox-js-npm-0.12.0-2464878a7a.patch",
+    "chrome-remote-interface": "^0.33.3",
+    "extract-zip": "^2.0.1",
+    "https-proxy-agent": "^9.0.0",
+    "playwright-core": "1.60.0",
+    "socks": "^2.8.3",
+    "socks-proxy-agent": "^10.0.0",
+    "uuid": "^11.0.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@multizen/browser-runtime": "workspace:*",
+    "@multizen/cdp-driver": "workspace:*",
+    "@multizen/mcp-server": "workspace:*",
+    "@multizen/profile-manager": "workspace:*",
+    "@multizen/settings-store": "workspace:*",
+    "@multizen/types": "workspace:*",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0"
+  }
+}

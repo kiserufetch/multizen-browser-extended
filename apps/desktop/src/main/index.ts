@@ -1,11 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, shell } from "electron";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import {
   ProfileManager,
-  exportProfile,
-  importProfile,
+  archiveFileName,
+  exportProfileToArchive,
+  importProfileFromArchive,
   generateFingerprint,
   reconcileFingerprint,
   FingerprintReconcileError,
@@ -15,14 +16,37 @@ import {
 } from "@multizen/profile-manager";
 import {
   HttpTransport,
+  bindHandoffToBrowser,
+  createDownloadRoute,
   createMultizenMcpServer,
+  createPanelRoute,
+  createSharedMcpState,
   ActivityLog,
+  AuthFailureLimiter,
+  FULL_PRINCIPAL,
   InMemoryHumanHandoff,
+  PanelSessions,
+  sameSecret,
   type ActivityEvent,
   type PendingHandoff,
 } from "@multizen/mcp-server";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
-import { LinuxSandboxManager, describeSandboxReason } from "./linuxSandbox";
+import {
+  ChromiumBrowserDriver,
+  EngineRegistry,
+  EngineRouter,
+  ExtensionsService,
+  LinuxSandboxManager,
+  describeSandboxReason,
+  liveServerLockHolder,
+  probeProxyGeo,
+  readManifestIcon,
+  resolveLoadDir,
+  sweepOrphans,
+  writeDesktopLock,
+  type ProxyGeoResult,
+} from "@multizen/browser-runtime";
+import { electronHost } from "./electronHost.ts";
 import type {
   EngineUpdateStatus,
   ExtensionConfig,
@@ -30,22 +54,11 @@ import type {
   SandboxStatus,
   UpdateStatus,
 } from "@multizen/types";
-import { isBrowserEngine, resolveEngine } from "@multizen/types";
-import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
-import { EngineRegistry } from "./engineRegistry.ts";
-import { EngineRouter } from "./engineRouter.ts";
+import { resolveEngine } from "@multizen/types";
 import { UpdaterService } from "./UpdaterService.ts";
 import { EngineUpdateService } from "./EngineUpdateService.ts";
 import { UsageReporting } from "./UsageReporting.ts";
 import { loadOrCreateMcpToken } from "./mcpToken.ts";
-import { ExtensionsService } from "./extensions/ExtensionsService.ts";
-import {
-  sweepOrphans,
-  storeEntryDir,
-  resolveLoadDir,
-  readManifestIcon,
-} from "./extensions/extensionStore.ts";
-import { probeProxyGeo, type ProxyGeoResult } from "./proxyGeo.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -101,10 +114,78 @@ let activityLog: ActivityLog;
 /** Shared across every per-session MCP server so a human handoff requested on
  *  one connection can be resumed from the app regardless of session. */
 const humanHandoff = new InMemoryHumanHandoff();
+/** One profile mutex and lease table for all sessions, each of which gets its own server. */
+const sharedMcpState = createSharedMcpState({ handoff: humanHandoff });
 let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
 let mcpAuthToken: string | null = null;
 let cachedSettings: AppSettings | null = null;
+/** Signs the app's own panel window in with a one-time code. Set while HTTP is up. */
+let panelSessions: PanelSessions | null = null;
+let panelWindow: BrowserWindow | null = null;
+/** Tells a server pointed at this directory that its browsers aren't leftovers. */
+let desktopLock: Promise<{ release(): void } | null> = Promise.resolve(null);
+
+/**
+ * The handoff panel, for a profile with no window to work in. Its own sandboxed window,
+ * with no preload and an in-memory session, signed in by a code that works once: the app
+ * has no business putting a page's content, or a token, anywhere near its own renderer.
+ */
+function openPanelWindow(handoffId?: string): boolean {
+  if (!httpTransport || !panelSessions || !cachedSettings) return false;
+  if (panelWindow && !panelWindow.isDestroyed()) {
+    panelWindow.show();
+    panelWindow.focus();
+    return true;
+  }
+  const origin = `http://127.0.0.1:${cachedSettings.mcpHttpPort}`;
+  const code = panelSessions.mintCode(FULL_PRINCIPAL.id);
+  panelWindow = new BrowserWindow({
+    width: 1120,
+    height: 780,
+    title: "MultiZen handoff",
+    backgroundColor: "#101116",
+    autoHideMenuBar: true,
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      partition: "panel",
+    },
+  });
+  panelWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  panelWindow.webContents.on("will-navigate", (e, url) => {
+    if (new URL(url).origin !== origin) e.preventDefault();
+  });
+  panelWindow.on("closed", () => {
+    panelWindow = null;
+  });
+  void panelWindow.loadURL(
+    `${origin}/panel/login?code=${encodeURIComponent(code)}${handoffId ? `#${handoffId}` : ""}`,
+  );
+  return true;
+}
+
+/** A new handoff: the person may be anywhere, so the OS says it and the app comes forward. */
+function announceHandoff(pending: PendingHandoff): void {
+  const name = profileManager.get(pending.profileId)?.name ?? pending.profileId;
+  if (Notification.isSupported()) {
+    const notice = new Notification({ title: `${name} needs you`, body: pending.reason });
+    notice.on("click", () => {
+      mainWindow?.show();
+      mainWindow?.focus();
+    });
+    notice.show();
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+  if ((browserDriver.runningDisplayMode(pending.profileId) ?? "headed") !== "headed") {
+    openPanelWindow(pending.handoffId);
+  }
+}
 
 function createWindow(): void {
   const iconPath = resolveAppIcon();
@@ -169,7 +250,28 @@ app.whenReady().then(async () => {
   }
 
   const userData = app.getPath("userData");
+
+  // A `multizen-server` owns its data dir: its browsers and database must not be
+  // shared with this process. Only a dir pointed at with --user-data-dir can be
+  // one, so a normal launch pays a single failed file read here.
+  const serverHolder =
+    (await liveServerLockHolder(userData)) ?? (await liveServerLockHolder(join(userData, "data")));
+  if (serverHolder) {
+    dialog.showErrorBox(
+      "MultiZen can't use this data directory",
+      `A MultiZen server (pid ${serverHolder.pid}) is using ${userData}.\n\n` +
+        "Stop the server, or start MultiZen with a different data directory.",
+    );
+    app.quit();
+    return;
+  }
+
   const dataRoot = join(userData, "data");
+  // In the background: telling its identity takes a moment on Windows, and nothing here waits.
+  desktopLock = writeDesktopLock(dataRoot).catch((e: unknown) => {
+    process.stderr.write(`[multizen] could not write desktop.lock: ${String(e)}\n`);
+    return null;
+  });
   // Shared extension store (deduped extension files loaded into many profiles).
   const extensionStoreRoot = join(dataRoot, "extension-store");
 
@@ -180,6 +282,18 @@ app.whenReady().then(async () => {
     dbPath: join(dataRoot, "profiles.db"),
     profilesRoot: join(dataRoot, "profiles"),
   });
+
+  // A stopped server's dir, as a live one is caught above. Its proxy passwords are sealed
+  // under a key this app doesn't have, so every read of a profile would throw.
+  if (profileManager.storedSecrets().sealed > 0) {
+    dialog.showErrorBox(
+      "MultiZen can't use this data directory",
+      `${dataRoot} belongs to a MultiZen server: its proxy passwords are encrypted, and the app ` +
+        "has no key for them.\n\nUse it through that server, or start MultiZen with a different data directory.",
+    );
+    app.quit();
+    return;
+  }
 
   // Reclaim shared store entries no profile references any more (e.g. left by a
   // crash mid-delete) plus stale staging dirs. Best-effort; never blocks startup.
@@ -199,7 +313,7 @@ app.whenReady().then(async () => {
   // use and re-emits its download/verify status tagged with the engine.
   // CloakBrowser is the only Chromium engine in this phase; Camoufox arrives
   // with its own bootstrap later.
-  engineRegistry = new EngineRegistry();
+  engineRegistry = new EngineRegistry(electronHost);
   engineRegistry.on("status", (engine, status) => {
     // The renderer's chromium:status channel drives the CloakBrowser first-run
     // bootstrap UI (single-engine), so keep forwarding that stream.
@@ -254,6 +368,7 @@ app.whenReady().then(async () => {
   // endpoint's prodversion (falls back to a sane default before the runtime is
   // ready).
   extensionsService = new ExtensionsService({
+    host: electronHost,
     profileManager,
     extensionStoreRoot,
     engineVersion: () => {
@@ -268,6 +383,7 @@ app.whenReady().then(async () => {
   // flow; the driver calls resolveForLaunch per launch. Prompting + persistence
   // are injected here so the module stays UI-free. All no-ops off Linux.
   const linuxSandbox = new LinuxSandboxManager({
+    host: electronHost,
     getState: () => cachedSettings?.linuxSandboxState ?? "unset",
     setState: async (s) => {
       cachedSettings = await settingsStore.update({ linuxSandboxState: s });
@@ -299,6 +415,7 @@ app.whenReady().then(async () => {
   });
 
   const chromiumDriver = new ChromiumBrowserDriver({
+    host: electronHost,
     profileManager,
     engineRegistry,
     getDefaultEngine: () => cachedSettings?.browserEngine ?? "cloakbrowser",
@@ -362,6 +479,7 @@ app.whenReady().then(async () => {
     profileManager,
     engineRegistry,
     getDefaultEngine: () => cachedSettings?.browserEngine ?? "cloakbrowser",
+    getDefaultDisplayMode: () => cachedSettings?.defaultDisplayMode,
     chromiumDriver,
   });
 
@@ -377,8 +495,22 @@ app.whenReady().then(async () => {
   // Forward human-handoff changes (CAPTCHA/2FA) so the UI can show a prompt and
   // offer a Resume control; the renderer calls handoff:resume to unblock the
   // agent's wait_for_human.
+  let announced = new Set<string>();
   humanHandoff.onChange((pending: PendingHandoff[]) => {
     sendToRenderer("handoff:changed", pending);
+    for (const handoff of pending) {
+      if (!announced.has(handoff.handoffId)) announceHandoff(handoff);
+    }
+    announced = new Set(pending.map((handoff) => handoff.handoffId));
+    if (pending.length === 0 && panelWindow && !panelWindow.isDestroyed()) panelWindow.close();
+  });
+  // A headed window deals with its own dialogs and file pickers, as it always has. One
+  // with no window has only the panel to show them.
+  bindHandoffToBrowser({
+    handoff: humanHandoff,
+    driver: browserDriver,
+    activityLog,
+    panelDriven: (id) => (browserDriver.runningDisplayMode(id) ?? "headed") !== "headed",
   });
 
   // Forward profile running-state changes (manual launch, manual close,
@@ -404,16 +536,35 @@ app.whenReady().then(async () => {
       // secret (not a random local process, not a DNS-rebinding web page) can
       // drive the browser-control tools. Generated + persisted 0600 on first run.
       mcpAuthToken = loadOrCreateMcpToken(userData);
+      const token = mcpAuthToken;
+      const limiter = new AuthFailureLimiter();
+      const sessions = new PanelSessions();
+      panelSessions = sessions;
       httpTransport = new HttpTransport({
         port: cachedSettings.mcpHttpPort,
         authToken: mcpAuthToken,
+        publicRoutes: [
+          createPanelRoute({
+            handoff: humanHandoff,
+            driver: browserDriver,
+            mutex: sharedMcpState.mutex,
+            profiles: profileManager,
+            sessions,
+            authenticateToken: (given) => (sameSecret(given, token) ? FULL_PRINCIPAL : null),
+            principalById: (id) => (id === FULL_PRINCIPAL.id ? FULL_PRINCIPAL : null),
+            limiter,
+            secureCookie: false,
+            activityLog,
+          }),
+        ],
+        authedRoutes: [createDownloadRoute({ driver: browserDriver, profiles: profileManager })],
         // Each session gets its own MCP server; deps + ActivityLog are shared.
         createServer: () =>
           createMultizenMcpServer({
             profileManager,
             browserDriver,
             activityLog,
-            handoff: humanHandoff,
+            shared: sharedMcpState,
             serverVersion: app.getVersion(),
             getDefaultEngine: () => cachedSettings?.browserEngine ?? "cloakbrowser",
           }).server,
@@ -423,16 +574,24 @@ app.whenReady().then(async () => {
       // Port collision is non-fatal — log and continue
       process.stderr.write(`MCP HTTP transport failed to start: ${String(e)}\n`);
       httpTransport = null;
+      panelSessions = null;
     }
   }
 
   // Profile IPC
   ipcMain.handle("profiles:list", () =>
-    profileManager.list().map((p) => ({
-      ...p,
-      isRunning: browserDriver.isRunning(p.id),
-      engine: resolveEngine(p.engine, cachedSettings?.browserEngine ?? "cloakbrowser"),
-    })),
+    profileManager.list().map((p) => {
+      const runningDisplayMode = browserDriver.runningDisplayMode(p.id) ?? undefined;
+      return {
+        ...p,
+        isRunning: browserDriver.isRunning(p.id),
+        engine: resolveEngine(p.engine, cachedSettings?.browserEngine ?? "cloakbrowser"),
+        // What the card should say: the mode it runs in, else the one it would open in.
+        displayMode:
+          runningDisplayMode ?? p.displayMode ?? cachedSettings?.defaultDisplayMode ?? "headed",
+        runningDisplayMode,
+      };
+    }),
   );
   ipcMain.handle("profiles:get", (_e, id: string) => profileManager.get(id));
   ipcMain.handle("profiles:create", (_e, input: Parameters<ProfileManager["create"]>[0]) =>
@@ -454,6 +613,12 @@ app.whenReady().then(async () => {
         const defaultEngine = cachedSettings?.browserEngine ?? "cloakbrowser";
         if (resolveEngine(current?.engine, defaultEngine) !== resolveEngine(patch.engine, defaultEngine)) {
           throw new Error("Stop the profile before changing its engine.");
+        }
+      }
+      // The same autosave rule: the sheet re-sends the unchanged mode with every edit.
+      if (patch.displayMode !== undefined && browserDriver.isRunning(id)) {
+        if ((profileManager.get(id)?.displayMode ?? null) !== (patch.displayMode ?? null)) {
+          throw new Error("Stop the profile before changing its display mode.");
         }
       }
       return profileManager.update(id, patch);
@@ -488,9 +653,15 @@ app.whenReady().then(async () => {
   // Human-handoff (CAPTCHA/2FA): the renderer lists pending handoffs and the
   // operator resumes one once they've completed the step in the browser.
   ipcMain.handle("handoff:pending", () => humanHandoff.pending());
-  ipcMain.handle("handoff:resume", (_e, profileId: string) => {
-    humanHandoff.resume(profileId);
+  ipcMain.handle("handoff:resume", (_e, profileId: string, handoffId?: string) => {
+    // By id when there is one: a banner can be behind a handoff that ended and a new one.
+    if (handoffId) humanHandoff.resumeById(handoffId, "desktop");
+    else humanHandoff.resume(profileId);
   });
+  ipcMain.handle("handoff:abort", (_e, handoffId: string) => {
+    humanHandoff.abortById(handoffId, "desktop");
+  });
+  ipcMain.handle("handoff:openPanel", (_e, handoffId?: string) => openPanelWindow(handoffId));
 
   // Chromium bootstrap IPC
   ipcMain.handle("chromium:status", () => engineRegistry.get("cloakbrowser").getStatus());
@@ -714,20 +885,11 @@ app.whenReady().then(async () => {
       if (!profile) return { ok: false, reason: "not_found" };
       const result = await dialog.showSaveDialog(mainWindow ?? undefined!, {
         title: "Export profile",
-        defaultPath: `${profile.name.replace(/[^a-z0-9-_]+/gi, "_")}.mzar`,
+        defaultPath: archiveFileName(profile),
         filters: [{ name: "MultiZen archive", extensions: ["mzar"] }],
       });
       if (result.canceled || !result.filePath) return { ok: false, reason: "cancelled" };
-      // Bundle the profile's shared-store extensions so importing on another
-      // machine restores the extension code too, not just a dangling reference.
-      const extensions = (profile.extensions ?? [])
-        .filter((e) => e.scope === "shared")
-        .map((e) => ({
-          id: e.id,
-          version: e.version,
-          dir: storeEntryDir(extensionStoreRoot, e.id, e.version),
-        }));
-      await exportProfile(profile, passphrase, result.filePath, { extensions });
+      await exportProfileToArchive(profile, passphrase, result.filePath, extensionStoreRoot);
       return { ok: true, path: result.filePath };
     },
   );
@@ -746,39 +908,25 @@ app.whenReady().then(async () => {
       const archivePath = result.filePaths[0];
       if (!archivePath) return { ok: false, reason: "cancelled" };
       try {
-        // Restore the full user-data-dir to disk. If the archive's id already
-        // exists here, importProfile mints a fresh id + dataDir so it never
-        // overwrites the existing profile. The returned Profile carries every
-        // field (extensions, icon, startUrl, searchProvider, fingerprint,
-        // proxy) and its dataDir points at the restored files.
-        const restored = await importProfile(archivePath, passphrase, join(dataRoot, "profiles"), {
-          idTaken: (id) => Boolean(profileManager.get(id)),
-          // Restore bundled (v2) extensions into the shared store so they work
-          // on this machine without the user re-adding them.
-          extensionStoreRoot,
-        });
-        // If the archive recorded an engine this build can't run (a legacy
-        // "cft" export, or a newer engine), clear it so the profile resolves to
-        // the app default at launch instead of handing the registry an unknown
-        // engine. Tell the user rather than silently changing their setup.
-        const recordedEngine: unknown = restored.engine;
-        if (recordedEngine !== undefined && !isBrowserEngine(recordedEngine)) {
-          restored.engine = undefined;
+        const { id, unavailableEngine } = await importProfileFromArchive(
+          profileManager,
+          archivePath,
+          passphrase,
+          {
+            profilesRoot: join(dataRoot, "profiles"),
+            extensionStoreRoot,
+            defaultEngine: cachedSettings?.browserEngine ?? "cloakbrowser",
+          },
+        );
+        // Tell the user rather than silently changing their setup.
+        if (unavailableEngine !== undefined) {
           void dialog.showMessageBox(mainWindow ?? undefined!, {
             type: "info",
             message: "Engine not available",
-            detail: `This profile was exported with an engine this version of MultiZen doesn't have (${String(recordedEngine)}). It will run on your default engine instead.`,
+            detail: `This profile was exported with an engine this version of MultiZen doesn't have (${unavailableEngine}). It will run on your default engine instead.`,
           });
         }
-        // Pin an unset engine (cleared above, or an archive that never recorded
-        // one) to the current default, like profiles:create, so a later change of
-        // the default can't move it onto another engine's empty data dir.
-        restored.engine ??= cachedSettings?.browserEngine ?? "cloakbrowser";
-        // Insert the row verbatim so the DB entry points at the restored files
-        // (the old create()-based path minted a new id/dataDir and orphaned the
-        // cookies/logins that were just restored).
-        const inserted = profileManager.insertImported(restored);
-        return { ok: true, id: inserted.id };
+        return { ok: true, id };
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
       }
@@ -875,6 +1023,7 @@ app.on("before-quit", (e) => {
       await browserDriver?.closeAll({ gracefulMs: 1500, reap: false });
       await httpTransport?.stop();
       profileManager?.close();
+      (await desktopLock)?.release();
     } catch (err) {
       process.stderr.write(`[multizen] shutdown error: ${String(err)}\n`);
     } finally {

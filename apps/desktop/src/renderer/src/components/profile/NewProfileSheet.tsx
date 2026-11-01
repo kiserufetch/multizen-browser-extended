@@ -5,7 +5,13 @@ import { ProxyTester } from "./ProxyTester";
 import { ExtensionsSection } from "./ExtensionsSection";
 import { EmojiField } from "./EmojiField";
 import { BrowserSection, DEFAULT_START_URL } from "./BrowserSection";
-import type { BrowserEngine, ExtensionConfig, FingerprintConfig, ProxyConfig } from "../../types";
+import type {
+  BrowserEngine,
+  DisplayMode,
+  ExtensionConfig,
+  FingerprintConfig,
+  ProxyConfig,
+} from "../../types";
 import { parseProxyString } from "../../lib/parseProxy";
 import {
   Field,
@@ -63,6 +69,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
   const [defaultEngine, setDefaultEngine] = useState<BrowserEngine>("cloakbrowser");
   const [pickedEngine, setPickedEngine] = useState<BrowserEngine | undefined>(undefined);
   const engine: BrowserEngine = pickedEngine ?? defaultEngine;
+  const [displayMode, setDisplayMode] = useState<DisplayMode | undefined>(undefined);
   const [proxy, setProxy] = useState<DraftProxy>(EMPTY_PROXY);
   const [notes, setNotes] = useState("");
   const [extensions, setExtensions] = useState<ExtensionConfig[]>([]);
@@ -161,6 +168,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
         notes: notes.trim() || undefined,
         startUrl: startUrl.trim() || undefined,
         engine: pickedEngine,
+        displayMode,
         proxy: built,
         fingerprint: fingerprint ?? undefined,
         extensions: !extensionsHidden && extensions.length > 0 ? extensions : undefined,
@@ -242,6 +250,8 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
               onStartUrl={setStartUrl}
               engine={engine}
               onEngine={setPickedEngine}
+              displayMode={displayMode}
+              onDisplayMode={setDisplayMode}
             />
           )}
 

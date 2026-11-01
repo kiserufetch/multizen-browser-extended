@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MultiZen baseline visibility</title>
+<style>body { font: 16px sans-serif; margin: 2rem; }</style>
+</head>
+<body>
+<h1>Visibility</h1>
+<p>Counts what a page sees while its window is covered: its visibility, its focus, and whether it still gets animation frames.</p>
+<button id="b">A button</button>
+<pre id="mz-report" hidden></pre>
+<script>
+let frames = 0;
+const step = () => {
+  frames += 1;
+  requestAnimationFrame(step);
+};
+requestAnimationFrame(step);
+const changes = [];
+document.addEventListener('visibilitychange', () => changes.push(document.visibilityState));
+const out = document.getElementById('mz-report');
+// A timer goes on, slower, on a hidden page, where animation frames stop.
+setInterval(() => {
+  out.textContent = JSON.stringify({
+    frames,
+    changes,
+    paints: performance.getEntriesByType('paint').length,
+  });
+}, 200);
+</script>
+</body>
+</html>

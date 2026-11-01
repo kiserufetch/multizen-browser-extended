@@ -1,0 +1,11 @@
+**/node_modules
+**/dist
+**/out
+**/release
+**/.cache
+.yarn/install-state.gz
+docs
+.omc
+.claude
+.git
+todo.txt

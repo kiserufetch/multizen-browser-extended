@@ -60,14 +60,15 @@ Fork-specific work (see [`CHANGELOG.md`](CHANGELOG.md)) includes:
 
 - Expanded fingerprint device catalogs (extra Mac M2–M4 SKUs, Linux laptops) and higher entropy thresholds
 - Strict-pin launch timezone policy with opt-in `alignTimezoneToProxy` / `strictGeoCoherence`
-- MCP extras: always-on `cdp_send` / `cdp_send_no_safety`, `probe_fingerprint`, `click_ref` / `type_ref`, human handoff (`request_human` / `wait_for_human` / `resume_human`), session-stable multi-client HTTP transport
+- MCP extras: always-on `cdp_send` / `cdp_send_no_safety`, `probe_fingerprint`, `click_ref` / `type_ref`, human handoff (`request_human` / `get_human_status` / `wait_for_human` / `resume_human`), session-stable multi-client HTTP transport
+- [`multizen-server`](apps/server/README.md): the desktop's tools and drivers with no Electron, plus display modes including headless, Docker, tokens and an egress policy
 - Release CI typecheck gate before the multi-OS build matrix
 
 Sync notes: [`docs/upstream-merge-v0.4.2.md`](docs/upstream-merge-v0.4.2.md) (latest), [`docs/upstream-merge-2026-10-06.md`](docs/upstream-merge-2026-10-06.md), [`docs/upstream-merge-v0.3.1.md`](docs/upstream-merge-v0.3.1.md), [`docs/upstream-merge-v0.3.0.md`](docs/upstream-merge-v0.3.0.md). Whenever you merge again from the original repository, update the **Based on upstream release** line above.
 
 ## What it is
 
-MultiZen is a desktop app that runs a library of isolated browser profiles. Each profile has its own cookies, login state, fingerprint, and proxy, and runs on your choice of engine — CloakBrowser (Chromium) or Camoufox (Firefox). A local MCP server on `127.0.0.1:7777` exposes browser-drive tools (navigate, click, type, extract, screenshot, evaluate JS, cookies, tabs, waits) to any MCP client.
+MultiZen is a desktop app that runs a library of isolated browser profiles. Each profile has its own cookies, login state, fingerprint, and proxy, and runs on your choice of engine — CloakBrowser (Chromium) or Camoufox (Firefox). A local MCP server on `127.0.0.1:7777` exposes browser-drive tools (navigate, click, type, extract, screenshot, evaluate JS, cookies, tabs, waits) to any MCP client. The same server also runs with no desktop app, on a Linux box or in Docker: see [Server mode](#server-mode).
 
 The result: your AI agent in Cursor or Claude Desktop can complete real authenticated workflows. When it hits a 2FA prompt or CAPTCHA, you step in through the same browser window. When you are done, the agent picks up where it left off. Cookies and session state survive between launches, so logins and context carry over across AI sessions.
 
@@ -151,6 +152,8 @@ Each profile is a real Chromium window with persistent state on disk. The MCP se
 | **Human handoff** | AI gets stuck on 2FA or CAPTCHA, you take over in the same browser window, the agent continues when you are done. |
 | **Cross-platform persona** | Run a Windows persona on a Mac host (or vice versa). C++ patches keep the fingerprint coherent across V8, Blink, and CSS feature signatures. |
 | **Proxy + persona alignment** | Per-profile HTTP or SOCKS5 proxy with a local SOCKS5 bridge so DNS resolution stays remote. Auto-aligns timezone, locale, and `navigator.geolocation` to the proxy egress IP. |
+| **Display modes** | Each profile opens in a window (`headed`), with none (`headless`, the engine's own), or on a private virtual display (`xvfb`, Linux). |
+| **Server mode** | The same tools with no GUI, in Docker or on a bare server: named tokens with permissions, a browser-side egress policy, and a web panel for human handoff. |
 | **Self-hosted** | Profiles live on your disk in plain SQLite plus Chromium user-data-dir format. No account, no license server; anonymous telemetry is opt-in and off by default. |
 | **Open source** | MIT for the entire app, MCP server, and CDP driver. Patched Chromium engine is also open source. |
 
@@ -209,14 +212,66 @@ http_headers = { Authorization = "Bearer <token>" }
 }
 ```
 
-Restart your client. The agent now has the full tool set — profile management (`list_profiles`, `create_profile`, `update_profile`, `delete_profile`, `launch_profile`, `close_profile`, `list_fingerprint_options`), page driving (`navigate`, `click`, `type`, `click_ref`, `type_ref`, `extract`, `screenshot`, `evaluate_js`), tabs (`list_tabs`, `new_tab`, `activate_tab`, `close_tab`), cookies (`get_cookies`, `set_cookies`), waits (`wait_for_load`, `wait_for_navigation`, `wait_for_selector`), human handoff (`request_human`, `wait_for_human`, `resume_human`), and diagnostics / raw access (`probe_fingerprint`, `cdp_send`, `cdp_send_no_safety`). Profile management is full CRUD: `create_profile` / `update_profile` accept an optional `engine` (`cloakbrowser` or `camoufox`), `proxy` and high-level `fingerprint` (device, locale, timezone, screen), and `list_fingerprint_options` enumerates the valid device families and locale groups.
+Restart your client. The agent now has the full tool set, 45 tools:
+
+- **Profiles:** `list_profiles`, `create_profile`, `update_profile`, `delete_profile`, `launch_profile`, `close_profile`, `list_fingerprint_options`
+- **Reading a page:** `extract`, `screenshot`
+- **Acting on a page:** `navigate`, `click`, `type`, `click_ref`, `type_ref`, `press_key`, `hover`, `select_option`, `scroll`, `evaluate_js`
+- **Tabs:** `list_tabs`, `new_tab`, `activate_tab`, `close_tab`
+- **Cookies:** `get_cookies`, `set_cookies`
+- **Waits:** `wait_for_load`, `wait_for_navigation`, `wait_for_selector`
+- **Files:** `upload_file`, `list_downloads`, `get_download`, `delete_download`
+- **JavaScript dialogs:** `set_dialog_policy`, `list_dialogs`, `handle_dialog`
+- **Human handoff:** `request_human`, `get_human_status`, `wait_for_human`, `resume_human`
+- **Exclusive use:** `acquire_profile`, `renew_profile`, `release_profile`
+- **Diagnostics and raw access:** `probe_fingerprint`, `cdp_send`, `cdp_send_no_safety`
+
+Profile management is full CRUD: `create_profile` / `update_profile` accept an optional `engine` (`cloakbrowser` or `camoufox`), `display_mode` (`headed`, `headless` or `xvfb`), `proxy` and high-level `fingerprint` (device, locale, timezone, screen), and `list_fingerprint_options` enumerates the valid device families and locale groups.
+
+Errors carry a stable `code` (`PROFILE_NOT_RUNNING`, `STALE_REF`, `DIALOG_OPEN`, `INPUT_NOT_DELIVERED`, ...), `retryable` and a `hint`. Page tools act on the profile's one active tab: `list_tabs` shows it, `new_tab` and `activate_tab` change it. Tool calls on one profile run one at a time, across all clients.
 
 Engine notes for MCP clients:
 
 - `create_profile` without `engine` uses the app's default engine (Settings → Default engine for new profiles) and stores it on the profile, so changing the default later doesn't move the profile.
 - `update_profile` refuses an engine change while the profile is running. Call `close_profile` first. Each engine keeps its own browser state, so after a switch the profile has that engine's cookies and logins, which may be none.
-- `list_profiles` reports each profile's engine.
-- On Camoufox, `click_ref`, `type_ref`, `cdp_send` and `cdp_send_no_safety` always return an error, because Camoufox has no CDP. This is intended. `extract` returns no refs there, so use `click` / `type` with CSS selectors. Of the `fingerprint` knobs, Camoufox uses the device's OS, the locale, the screen and the timezone. It generates its own Firefox UA, hardware and WebGL.
+- `list_profiles` reports each profile's engine, its saved display mode and the one it runs in.
+- On Camoufox, `cdp_send` and `cdp_send_no_safety` return `UNSUPPORTED_ON_ENGINE`, because Camoufox has no CDP. This is intended. Refs and every page tool work on both engines: `extract` there gives `ariaSnapshot` text with refs like `p3.e7`. `evaluate_js` runs in an isolated world, so it doesn't see the page's own globals. Of the `fingerprint` knobs, Camoufox uses the device's OS, the locale, the screen and the timezone. It generates its own Firefox UA, hardware and WebGL.
+
+## Server mode
+
+`multizen-server` is the same MCP server and the same browser drivers with no Electron. It needs no display and can run on a machine you only reach over the network.
+
+From source (Node 22+, Corepack):
+
+```sh
+corepack yarn install
+corepack yarn workspace @multizen/server build
+node apps/server/bin/multizen-server.cjs serve --headless
+node apps/server/bin/multizen-server.cjs token create --name agent    # in another shell
+```
+
+Or in Docker, where browsers run under Xvfb by default, as a non-root user with the Chromium sandbox on and no way to turn it off:
+
+```sh
+docker compose up -d
+docker compose exec multizen node /app/dist/cli.js token create --name agent
+```
+
+The first start downloads the engine, into the data directory or the volume: the image holds none, because CloakBrowser's licence forbids redistributing it. Then connect any MCP client to `http://127.0.0.1:7777/mcp` as above, with the token that printed. That token uses profiles but can't create them: `--tools read,act,profile-admin` adds that. `owner-token` in the data directory can do everything, raw CDP included, and is for you, not for an agent.
+
+**On detection: a server is no worse than the desktop on Windows. On Linux it is worse, on both engines, in every mode:** fonts, audio, devices and WebGL give it away. Run Windows personas on a Windows host, and let a Linux server pick its own Linux personas. The measurements are in [`docs/detection-baselines/README.md`](docs/detection-baselines/README.md).
+
+What a server adds to the desktop's tool set:
+
+- **Display modes.** `--headless` allows no windows at all. `--display-mode` sets the default, and each profile or launch can name its own.
+- **Tokens.** `token create` makes named tokens with tool groups (`read`, `act`, `profile-admin`, `raw`, `operator`) and a list of profiles. A revoke stops one within a second.
+- **Remote access.** A bind beyond loopback needs `--allow-remote` and TLS, or a reverse proxy on loopback with `--public-url`.
+- **Egress policy.** Browsers stay off private addresses, this machine's ports and cloud metadata, checked per connection. A token with the `raw` group can defeat it, and doesn't get it unless asked.
+- **Handoff over the network.** A person takes over at `/panel` with a live view and input, and until they resume, the agent's page actions get `HUMAN_IN_CONTROL`. `--handoff-webhook` tells your endpoint.
+
+Everything else, from flags to troubleshooting, is in [`apps/server/README.md`](apps/server/README.md).
+
+Use it for your own agents on your own infrastructure: anything offered to third parties needs an OEM or SaaS licence from CloakHQ.
 
 ## Stack
 
@@ -228,6 +283,7 @@ Engine notes for MCP clients:
 | MCP server | `@modelcontextprotocol/sdk` over Streamable HTTP + SSE |
 | Profile storage | better-sqlite3 with idempotent migrations |
 | Browser driver | chrome-remote-interface over CDP (Chromium); playwright-core (Firefox) |
+| Server | Node 22, esbuild, Docker with a seccomp profile for the Chromium sandbox |
 | Browser engine | CloakBrowser (patched Chromium) or Camoufox (Firefox), per profile |
 | Build | Yarn 4 workspaces, electron-vite, electron-builder |
 | CI | GitHub Actions matrix on macOS, Windows, Linux |
@@ -239,7 +295,8 @@ git clone https://github.com/multizenteam/multizen-browser
 cd multizen-browser
 yarn install
 yarn dev            # launch the desktop app in dev mode
-yarn mcp:dev        # run the MCP server standalone for testing
+yarn mcp:dev        # the MCP server on a mock driver, for protocol tests
+yarn server:dev     # multizen-server with real browsers, from source
 yarn typecheck      # strict TS across all workspaces
 yarn build          # full release build (mac/win/linux per OS)
 ```
@@ -251,12 +308,17 @@ Requires Node 22+ and Yarn 4 (via Corepack).
 ```
 apps/
   desktop/                Electron + React + Tailwind GUI + main process
+  server/                 multizen-server: the same tools with no Electron
 packages/
+  browser-runtime/        Drivers, engine downloads, display modes, the SOCKS5 bridge
   mcp-server/             MCP server exposing the browser-drive tools
   cdp-driver/             Thin wrapper around chrome-remote-interface
   profile-manager/        SQLite profile CRUD + encrypted local storage
   settings-store/         App-level settings persistence
   types/                  Shared TypeScript types
+docker/                   The server's image and its seccomp profile
+scripts/
+  detection-baseline/     What pages and servers can see of a browser here
 .github/
   workflows/release.yml   Matrix build, tag-triggered
 ```

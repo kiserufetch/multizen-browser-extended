@@ -1043,6 +1043,27 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@multizen/browser-runtime@workspace:*, @multizen/browser-runtime@workspace:packages/browser-runtime":
+  version: 0.0.0-use.local
+  resolution: "@multizen/browser-runtime@workspace:packages/browser-runtime"
+  dependencies:
+    "@multizen/cdp-driver": "workspace:*"
+    "@multizen/profile-manager": "workspace:*"
+    "@multizen/settings-store": "workspace:*"
+    "@multizen/types": "workspace:*"
+    "@types/node": "npm:^22.10.0"
+    camoufox-js: "patch:camoufox-js@npm%3A0.12.0#~/.yarn/patches/camoufox-js-npm-0.12.0-2464878a7a.patch"
+    chrome-remote-interface: "npm:^0.33.3"
+    extract-zip: "npm:^2.0.1"
+    https-proxy-agent: "npm:^9.0.0"
+    playwright-core: "npm:1.60.0"
+    socks: "npm:^2.8.3"
+    socks-proxy-agent: "npm:^10.0.0"
+    tsx: "npm:^4.19.2"
+    typescript: "npm:^5.7.0"
+  languageName: unknown
+  linkType: soft
+
 "@multizen/cdp-driver@workspace:*, @multizen/cdp-driver@workspace:packages/cdp-driver":
   version: 0.0.0-use.local
   resolution: "@multizen/cdp-driver@workspace:packages/cdp-driver"
@@ -1051,6 +1072,7 @@ __metadata:
     "@types/chrome-remote-interface": "npm:^0.31.14"
     "@types/ws": "npm:^8.5.13"
     chrome-remote-interface: "npm:^0.33.3"
+    tsx: "npm:^4.19.2"
     typescript: "npm:^5.7.0"
     ws: "npm:^8.18.0"
   languageName: unknown
@@ -1063,6 +1085,7 @@ __metadata:
     "@emoji-mart/data": "npm:^1.2.1"
     "@emoji-mart/react": "npm:^1.1.1"
     "@modelcontextprotocol/sdk": "npm:^1.0.4"
+    "@multizen/browser-runtime": "workspace:*"
     "@multizen/cdp-driver": "workspace:*"
     "@multizen/mcp-server": "workspace:*"
     "@multizen/profile-manager": "workspace:*"
@@ -1097,6 +1120,21 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@multizen/detection-baseline@workspace:scripts/detection-baseline":
+  version: 0.0.0-use.local
+  resolution: "@multizen/detection-baseline@workspace:scripts/detection-baseline"
+  dependencies:
+    "@multizen/browser-runtime": "workspace:*"
+    "@multizen/profile-manager": "workspace:*"
+    "@multizen/server": "workspace:*"
+    "@multizen/types": "workspace:*"
+    "@types/node": "npm:^22.10.0"
+    selfsigned: "npm:^2.4.1"
+    tsx: "npm:^4.19.2"
+    typescript: "npm:^5.7.0"
+  languageName: unknown
+  linkType: soft
+
 "@multizen/mcp-server@workspace:*, @multizen/mcp-server@workspace:packages/mcp-server":
   version: 0.0.0-use.local
   resolution: "@multizen/mcp-server@workspace:packages/mcp-server"
@@ -1127,6 +1165,36 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@multizen/server@workspace:*, @multizen/server@workspace:apps/server":
+  version: 0.0.0-use.local
+  resolution: "@multizen/server@workspace:apps/server"
+  dependencies:
+    "@modelcontextprotocol/sdk": "npm:^1.0.4"
+    "@multizen/browser-runtime": "workspace:*"
+    "@multizen/cdp-driver": "workspace:*"
+    "@multizen/mcp-server": "workspace:*"
+    "@multizen/profile-manager": "workspace:*"
+    "@multizen/settings-store": "workspace:*"
+    "@multizen/types": "workspace:*"
+    "@types/node": "npm:^22.10.0"
+    better-sqlite3: "npm:^11.7.0"
+    camoufox-js: "patch:camoufox-js@npm%3A0.12.0#~/.yarn/patches/camoufox-js-npm-0.12.0-2464878a7a.patch"
+    chrome-remote-interface: "npm:^0.33.3"
+    esbuild: "npm:^0.25.0"
+    extract-zip: "npm:^2.0.1"
+    https-proxy-agent: "npm:^9.0.0"
+    playwright-core: "npm:1.60.0"
+    socks: "npm:^2.8.3"
+    socks-proxy-agent: "npm:^10.0.0"
+    tsx: "npm:^4.19.2"
+    typescript: "npm:^5.7.0"
+    uuid: "npm:^11.0.5"
+    zod: "npm:^3.23.8"
+  bin:
+    multizen-server: ./bin/multizen-server.cjs
+  languageName: unknown
+  linkType: soft
+
 "@multizen/settings-store@workspace:*, @multizen/settings-store@workspace:packages/settings-store":
   version: 0.0.0-use.local
   resolution: "@multizen/settings-store@workspace:packages/settings-store"
@@ -1141,6 +1209,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@multizen/types@workspace:packages/types"
   dependencies:
+    tsx: "npm:^4.19.2"
     typescript: "npm:^5.7.0"
   languageName: unknown
   linkType: soft
@@ -1678,6 +1747,15 @@ __metadata:
   version: 2.1.0
   resolution: "@types/ms@npm:2.1.0"
   checksum: 10c0/5ce692ffe1549e1b827d99ef8ff71187457e0eb44adbae38fdf7b9a74bae8d20642ee963c14516db1d35fa2652e65f47680fdf679dcbde52bbfadd021f497225
+  languageName: node
+  linkType: hard
+
+"@types/node-forge@npm:^1.3.0":
+  version: 1.3.14
+  resolution: "@types/node-forge@npm:1.3.14"
+  dependencies:
+    "@types/node": "npm:*"
+  checksum: 10c0/da6158fd34fa7652aa7f8164508f97a76b558724ab292f13c257e39d54d95d4d77604e8fb14dc454a867f1aeec7af70118294889195ec4400cecbb8a5c77a212
   languageName: node
   linkType: hard
 
@@ -5252,6 +5330,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"node-forge@npm:^1":
+  version: 1.4.2
+  resolution: "node-forge@npm:1.4.2"
+  checksum: 10c0/fb80d5eac8018f413647e17e6278876d0bfff8b32e8e51c4132584ddcef6b1881cc647a278072af3c2611744397e7844fc0f87f940ed818ec423f4d0c48db10a
+  languageName: node
+  linkType: hard
+
 "node-gyp@npm:^9.0.0":
   version: 9.4.1
   resolution: "node-gyp@npm:9.4.1"
@@ -6007,6 +6092,16 @@ __metadata:
   version: 0.27.0
   resolution: "scheduler@npm:0.27.0"
   checksum: 10c0/4f03048cb05a3c8fddc45813052251eca00688f413a3cee236d984a161da28db28ba71bd11e7a3dd02f7af84ab28d39fb311431d3b3772fed557945beb00c452
+  languageName: node
+  linkType: hard
+
+"selfsigned@npm:^2.4.1":
+  version: 2.4.1
+  resolution: "selfsigned@npm:2.4.1"
+  dependencies:
+    "@types/node-forge": "npm:^1.3.0"
+    node-forge: "npm:^1"
+  checksum: 10c0/521829ec36ea042f7e9963bf1da2ed040a815cf774422544b112ec53b7edc0bc50a0f8cc2ae7aa6cc19afa967c641fd96a15de0fc650c68651e41277d2e1df09
   languageName: node
   linkType: hard
 

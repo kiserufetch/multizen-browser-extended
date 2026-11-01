@@ -1,7 +1,8 @@
 import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
-import { mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
+import { isDisplayMode } from "@multizen/types";
 import type {
   Profile,
   ProfileId,
@@ -12,8 +13,10 @@ import type {
   FingerprintConfig,
   ExtensionConfig,
   BrowserEngine,
+  DisplayMode,
 } from "@multizen/types";
 import { defaultFingerprint } from "./fingerprint.js";
+import { isSealed, SecretKeyError, type SecretBox } from "./secretBox.js";
 
 interface ProfileRow {
   id: string;
@@ -34,20 +37,38 @@ interface ProfileRow {
   align_timezone_to_proxy: number | null;
   strict_geo_coherence: number | null;
   engine: string | null;
+  display_mode: string | null;
 }
 
 export interface ProfileManagerOptions {
   dbPath: string;
   profilesRoot: string;
+  /** Encrypts proxy passwords at rest. The desktop passes none and stores them as they are. */
+  secrets?: SecretBox;
+}
+
+/** How the proxy passwords in the database are held. */
+export interface StoredSecrets {
+  sealed: number;
+  plaintext: number;
+}
+
+export interface DataDirReconciliation {
+  /** Rows now pointing at the directory found under the profiles root. */
+  rebased: ProfileId[];
+  /** Rows left untouched: outside the root, with no directory for them under it. */
+  unresolved: Array<{ id: ProfileId; name: string; dataDir: string; expected: string }>;
 }
 
 export class ProfileManager {
   private readonly db: Database.Database;
   private readonly profilesRoot: string;
+  private secrets: SecretBox | undefined;
 
   constructor(opts: ProfileManagerOptions) {
     mkdirSync(opts.profilesRoot, { recursive: true });
     this.profilesRoot = opts.profilesRoot;
+    this.secrets = opts.secrets;
     this.db = new Database(opts.dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
@@ -100,12 +121,16 @@ export class ProfileManager {
       // changing the default would move them onto an empty data dir.
       this.db.exec(`UPDATE profiles SET engine = 'cloakbrowser'`);
     }
+    // NULL means "follow the default", which is what every older row should do.
+    if (!cols.some((c) => c.name === "display_mode")) {
+      this.db.exec(`ALTER TABLE profiles ADD COLUMN display_mode TEXT`);
+    }
   }
 
   list(): ProfileSummary[] {
     const rows = this.db
       .prepare(
-        `SELECT id, name, tags, last_opened_at, proxy, fingerprint, proxy_country, icon, engine
+        `SELECT id, name, tags, last_opened_at, proxy, fingerprint, proxy_country, icon, engine, display_mode
          FROM profiles ORDER BY updated_at DESC`,
       )
       .all() as Pick<
@@ -119,6 +144,7 @@ export class ProfileManager {
       | "proxy_country"
       | "icon"
       | "engine"
+      | "display_mode"
     >[];
     return rows.map((r) => {
       const fingerprint = JSON.parse(r.fingerprint) as FingerprintConfig;
@@ -129,13 +155,14 @@ export class ProfileManager {
         lastOpenedAt: r.last_opened_at ?? undefined,
         isRunning: false,
         icon: r.icon ?? undefined,
-        proxy: r.proxy ? (JSON.parse(r.proxy) as ProxyConfig) : undefined,
+        proxy: r.proxy ? this.readProxy(r.proxy) : undefined,
         timezone: fingerprint.timezone,
         proxyCountry: r.proxy_country ?? undefined,
         device: fingerprint.device,
         // Pinned engine (undefined = inherits the app default). The profiles:list
         // IPC resolves this to the effective engine for the GUI badge.
         engine: (r.engine as BrowserEngine | null) ?? undefined,
+        displayMode: storedDisplayMode(r.display_mode),
       };
     });
   }
@@ -171,6 +198,7 @@ export class ProfileManager {
       startUrl: input.startUrl,
       searchProvider: input.searchProvider,
       engine: input.engine,
+      displayMode: input.displayMode,
       dataDir,
       createdAt: now,
       updatedAt: now,
@@ -181,21 +209,22 @@ export class ProfileManager {
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, display_mode, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
         profile.name,
         profile.notes ?? null,
         JSON.stringify(profile.tags),
-        profile.proxy ? JSON.stringify(profile.proxy) : null,
+        this.writeProxy(profile.proxy),
         JSON.stringify(profile.fingerprint),
         JSON.stringify(profile.extensions ?? []),
         profile.icon ?? null,
         profile.startUrl ?? null,
         profile.searchProvider ?? null,
         profile.engine ?? null,
+        profile.displayMode ?? null,
         profile.dataDir,
         profile.createdAt,
         profile.updatedAt,
@@ -223,21 +252,22 @@ export class ProfileManager {
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, display_mode, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
         profile.name,
         profile.notes ?? null,
         JSON.stringify(profile.tags),
-        profile.proxy ? JSON.stringify(profile.proxy) : null,
+        this.writeProxy(profile.proxy),
         JSON.stringify(profile.fingerprint),
         JSON.stringify(profile.extensions ?? []),
         profile.icon ?? null,
         profile.startUrl ?? null,
         profile.searchProvider ?? null,
         profile.engine ?? null,
+        profile.displayMode ?? null,
         profile.dataDir,
         profile.createdAt,
         profile.updatedAt,
@@ -283,6 +313,9 @@ export class ProfileManager {
           : (patch.strictGeoCoherence ?? existing.strictGeoCoherence),
       // null clears → revert to the app default engine; undefined keeps existing.
       engine: patch.engine === null ? undefined : (patch.engine ?? existing.engine),
+      // null clears → follow the default again; undefined keeps existing.
+      displayMode:
+        patch.displayMode === null ? undefined : (patch.displayMode ?? existing.displayMode),
       updatedAt: now,
       // Stale country if proxy changed — next launch / Test re-probes.
       proxyCountry: proxyChanged ? undefined : existing.proxyCountry,
@@ -292,7 +325,7 @@ export class ProfileManager {
       .prepare(
         `UPDATE profiles SET
            name = ?, notes = ?, tags = ?, proxy = ?, fingerprint = ?, extensions = ?,
-           icon = ?, start_url = ?, search_provider = ?, engine = ?, updated_at = ?, proxy_country = ?,
+           icon = ?, start_url = ?, search_provider = ?, engine = ?, display_mode = ?, updated_at = ?, proxy_country = ?,
            align_timezone_to_proxy = ?, strict_geo_coherence = ?
          WHERE id = ?`,
       )
@@ -300,13 +333,14 @@ export class ProfileManager {
         merged.name,
         merged.notes ?? null,
         JSON.stringify(merged.tags),
-        merged.proxy ? JSON.stringify(merged.proxy) : null,
+        this.writeProxy(merged.proxy),
         JSON.stringify(merged.fingerprint),
         JSON.stringify(merged.extensions ?? []),
         merged.icon ?? null,
         merged.startUrl ?? null,
         merged.searchProvider ?? null,
         merged.engine ?? null,
+        merged.displayMode ?? null,
         merged.updatedAt,
         merged.proxyCountry ?? null,
         merged.alignTimezoneToProxy ? 1 : null,
@@ -350,6 +384,133 @@ export class ProfileManager {
   }
 
   /**
+   * Fix rows whose stored `data_dir` is outside the profiles root, as left by a
+   * copied database or a changed data dir. Launching such a row would open an
+   * empty directory: logged out, with no error. A row is rebased when its
+   * directory exists under the root. If any row can't be, nothing is written and
+   * the caller decides; the desktop never calls this.
+   */
+  reconcileDataDirs(): DataDirReconciliation {
+    const rows = this.db.prepare(`SELECT id, name, data_dir FROM profiles`).all() as Array<
+      Pick<ProfileRow, "id" | "name" | "data_dir">
+    >;
+    const rebase: Array<{ id: ProfileId; dataDir: string }> = [];
+    const unresolved: DataDirReconciliation["unresolved"] = [];
+    for (const row of rows) {
+      // path.relative compares case-insensitively on Windows.
+      const rel = relative(this.profilesRoot, row.data_dir);
+      if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) continue;
+      const expected = join(this.profilesRoot, row.id);
+      if (existsSync(expected)) rebase.push({ id: row.id, dataDir: expected });
+      else unresolved.push({ id: row.id, name: row.name, dataDir: row.data_dir, expected });
+    }
+    if (unresolved.length > 0) return { rebased: [], unresolved };
+
+    const setDataDir = this.db.prepare(`UPDATE profiles SET data_dir = ? WHERE id = ?`);
+    this.db.transaction(() => {
+      for (const { id, dataDir } of rebase) setDataDir.run(dataDir, id);
+    })();
+    return { rebased: rebase.map((r) => r.id), unresolved };
+  }
+
+  /** From here on, passwords are sealed with this box and opened with it. */
+  useSecrets(secrets: SecretBox): void {
+    this.secrets = secrets;
+  }
+
+  private storedProxies(): Array<{ id: ProfileId; proxy: ProxyConfig }> {
+    const rows = this.db
+      .prepare(`SELECT id, proxy FROM profiles WHERE proxy IS NOT NULL`)
+      .all() as Array<{ id: ProfileId; proxy: string }>;
+    return rows.map((row) => ({ id: row.id, proxy: JSON.parse(row.proxy) as ProxyConfig }));
+  }
+
+  /** Counts without opening anything, so it works with no key at hand. */
+  storedSecrets(): StoredSecrets {
+    const counts: StoredSecrets = { sealed: 0, plaintext: 0 };
+    for (const { proxy } of this.storedProxies()) {
+      if (proxy.password) counts[isSealed(proxy.password) ? "sealed" : "plaintext"] += 1;
+    }
+    return counts;
+  }
+
+  /** Whether every sealed password opens with this box. */
+  canOpenStoredSecrets(box: SecretBox): boolean {
+    try {
+      for (const { proxy } of this.storedProxies()) {
+        if (proxy.password && isSealed(proxy.password)) box.open(proxy.password);
+      }
+      return true;
+    } catch (e) {
+      if (e instanceof SecretKeyError) return false;
+      throw e;
+    }
+  }
+
+  /**
+   * Seals what older code left in plaintext. Sealed values are opened on the way, so a
+   * wrong key is found now and by profile, not at some later launch. All or nothing.
+   */
+  sealStoredSecrets(): number {
+    const box = this.secrets;
+    if (!box) throw new SecretKeyError("Sealing needs a secret key");
+    const setProxy = this.db.prepare(`UPDATE profiles SET proxy = ? WHERE id = ?`);
+    return this.db.transaction(() => {
+      let sealed = 0;
+      for (const { id, proxy } of this.storedProxies()) {
+        if (!proxy.password) continue;
+        if (isSealed(proxy.password)) {
+          try {
+            box.open(proxy.password);
+          } catch (e) {
+            throw new SecretKeyError(
+              `The proxy password of profile ${id} can't be opened with this key. ` +
+                "Use the key it was encrypted with.",
+              { cause: e },
+            );
+          }
+          continue;
+        }
+        setProxy.run(JSON.stringify({ ...proxy, password: box.seal(proxy.password) }), id);
+        sealed += 1;
+      }
+      return sealed;
+    })();
+  }
+
+  /**
+   * Re-encrypts every sealed password under `next`, which is the box from here on. All
+   * or nothing, so a failure leaves the database readable with the key it had.
+   */
+  rotateStoredSecrets(next: SecretBox): number {
+    const current = this.secrets;
+    if (!current) throw new SecretKeyError("Rotating needs the current secret key");
+    const setProxy = this.db.prepare(`UPDATE profiles SET proxy = ? WHERE id = ?`);
+    const rotated = this.db.transaction(() => {
+      let count = 0;
+      for (const { id, proxy } of this.storedProxies()) {
+        if (!proxy.password) continue;
+        const plaintext = isSealed(proxy.password) ? current.open(proxy.password) : proxy.password;
+        setProxy.run(JSON.stringify({ ...proxy, password: next.seal(plaintext) }), id);
+        count += 1;
+      }
+      return count;
+    })();
+    this.secrets = next;
+    return rotated;
+  }
+
+  /**
+   * Rewrites the database and empties the WAL. An UPDATE leaves the old value in the WAL
+   * and in free pages of the file, which is where a password sealed later would survive.
+   */
+  purgeOldValues(): void {
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
+    this.db.exec("VACUUM");
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
+  }
+
+  /**
    * Every extension reference across all profiles, used by the shared-store GC
    * to decide whether a store entry is still referenced (derived refcount — no
    * separate counter to drift out of sync).
@@ -367,19 +528,38 @@ export class ProfileManager {
     return out;
   }
 
+  /** A row written before there was a box reads as it is, until it is next written. */
+  private readProxy(stored: string): ProxyConfig {
+    const proxy = JSON.parse(stored) as ProxyConfig;
+    if (!proxy.password || !isSealed(proxy.password)) return proxy;
+    if (!this.secrets) {
+      throw new SecretKeyError(
+        "This database holds encrypted proxy passwords and no secret key was given.",
+      );
+    }
+    return { ...proxy, password: this.secrets.open(proxy.password) };
+  }
+
+  private writeProxy(proxy: ProxyConfig | undefined): string | null {
+    if (!proxy) return null;
+    if (!this.secrets || !proxy.password) return JSON.stringify(proxy);
+    return JSON.stringify({ ...proxy, password: this.secrets.seal(proxy.password) });
+  }
+
   private rowToProfile(row: ProfileRow): Profile {
     return {
       id: row.id,
       name: row.name,
       notes: row.notes ?? undefined,
       tags: JSON.parse(row.tags) as string[],
-      proxy: row.proxy ? (JSON.parse(row.proxy) as ProxyConfig) : undefined,
+      proxy: row.proxy ? this.readProxy(row.proxy) : undefined,
       fingerprint: JSON.parse(row.fingerprint) as FingerprintConfig,
       extensions: normalizeExtensions(row.extensions),
       icon: row.icon ?? undefined,
       startUrl: row.start_url ?? undefined,
       searchProvider: row.search_provider ?? undefined,
       engine: (row.engine as BrowserEngine | null) ?? undefined,
+      displayMode: storedDisplayMode(row.display_mode),
       dataDir: row.data_dir,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -389,6 +569,11 @@ export class ProfileManager {
       strictGeoCoherence: row.strict_geo_coherence === 1 ? true : undefined,
     };
   }
+}
+
+/** A value this build can't run reads as unset, so the launch path only ever sees real modes. */
+function storedDisplayMode(raw: string | null): DisplayMode | undefined {
+  return isDisplayMode(raw) ? raw : undefined;
 }
 
 /**

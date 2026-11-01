@@ -1,12 +1,9 @@
 /**
- * Tracks the browser's page targets (tabs) and which one is "active" — the
- * target page-level actions (navigate / click / type / extract) route to.
- *
- * Today the driver binds to a single page for the whole session, so closing
- * that tab kills it (defect #18) and new tabs / popups go unnoticed (#19). This
- * registry is the browser-wide target model those fixes build on: it is pure
- * (no CDP, no I/O), so the selection and re-selection logic can be unit-tested
- * exhaustively, and the CdpSession feeds it from Target.* events.
+ * Tracks the browser's page targets (tabs) and which one is "active": the
+ * target page-level actions (navigate / click / type / extract) route to. It is
+ * pure (no CDP, no I/O), so the selection and re-selection logic can be
+ * unit-tested exhaustively. CdpSession feeds it from Target.* events, and the
+ * Firefox driver from Playwright's pages.
  *
  * Re-selection policy: when the active page is removed, fall back to the most
  * recently seen remaining page (the one the operator most likely switched to),
@@ -31,6 +28,21 @@ export class TargetRegistry {
     // Re-insert so the most-recently-touched page sorts last (used by reselect).
     this.pages.delete(record.targetId);
     this.pages.set(record.targetId, { ...record });
+    if (this.activeId === null) this.activeId = record.targetId;
+    return true;
+  }
+
+  /**
+   * Track a page nobody chose yet: a popup, a tab the operator opened. It ranks
+   * below every page that has been in use, so closing the active page doesn't land
+   * on it. Otherwise like {@link upsert}.
+   */
+  addIdle(record: TargetRecord): boolean {
+    if (record.type !== "page") return false;
+    const used = [...this.pages].filter(([id]) => id !== record.targetId);
+    this.pages.clear();
+    this.pages.set(record.targetId, { ...record });
+    for (const [id, page] of used) this.pages.set(id, page);
     if (this.activeId === null) this.activeId = record.targetId;
     return true;
   }

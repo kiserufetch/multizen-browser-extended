@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { AppSettings } from "@multizen/settings-store";
 import type { EngineUpdateStatus } from "@multizen/types";
-import type { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
+import type { ChromiumBootstrap } from "@multizen/browser-runtime";
 
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 const POST_LAUNCH_DELAY_MS = 10_000; // let first-run + window settle first

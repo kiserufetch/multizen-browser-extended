@@ -13,6 +13,7 @@ import type {
   EngineUpdateStatus,
   ExtensionConfig,
   BrowserEngine,
+  DisplayMode,
   SandboxStatus,
 } from "@multizen/types";
 
@@ -50,7 +51,7 @@ export interface ProxyGeoResult {
   /** Round-trip time (ms) of the test request through the proxy. */
   latencyMs?: number;
 }
-import type { ActivityEvent } from "@multizen/mcp-server";
+import type { ActivityEvent, PendingHandoff } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
 
 export interface SystemInfo {
@@ -93,6 +94,13 @@ export interface MultizenApi {
   activity: {
     recent: () => Promise<ActivityEvent[]>;
     onEvent: (cb: (e: ActivityEvent) => void) => () => void;
+  };
+  handoff: {
+    pending: () => Promise<PendingHandoff[]>;
+    resume: (profileId: ProfileId, handoffId?: string) => Promise<void>;
+    abort: (handoffId: string) => Promise<void>;
+    openPanel: (handoffId?: string) => Promise<boolean>;
+    onChanged: (cb: (pending: PendingHandoff[]) => void) => () => void;
   };
   system: {
     info: () => Promise<SystemInfo>;
@@ -169,6 +177,7 @@ declare global {
 
 export type {
   ActivityEvent,
+  PendingHandoff,
   AppSettings,
   Profile,
   ProfileSummary,
@@ -182,5 +191,6 @@ export type {
   ExtensionConfig,
   UpdateProfileInput,
   BrowserEngine,
+  DisplayMode,
   SandboxStatus,
 };

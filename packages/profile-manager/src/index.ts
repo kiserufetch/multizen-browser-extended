@@ -1,4 +1,12 @@
-export { ProfileManager } from "./ProfileManager.js";
+export { ProfileManager, type DataDirReconciliation, type StoredSecrets } from "./ProfileManager.js";
+export {
+  createSecretBox,
+  generateSecretKey,
+  isSealed,
+  parseSecretKey,
+  SecretKeyError,
+  type SecretBox,
+} from "./secretBox.js";
 export {
   defaultFingerprint,
   generateFingerprint,
@@ -17,3 +25,11 @@ export {
   type GenerateFingerprintOptions,
 } from "./fingerprint.js";
 export { exportProfile, importProfile } from "./archive.js";
+export { isProxyConfig, isProxyHost } from "./proxyConfig.js";
+export {
+  archiveFileName,
+  exportProfileToArchive,
+  importProfileFromArchive,
+  type ImportFromArchiveOptions,
+  type ImportedArchive,
+} from "./transfer.js";

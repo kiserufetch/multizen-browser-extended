@@ -7,13 +7,15 @@ import {
   DownloadCloud,
   Eye,
   EyeOff,
+  Monitor,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
   Zap,
 } from "lucide-react";
-import { Pill } from "../atoms";
+import { displayModeLabel, Pill } from "../atoms";
+import { displayModeChoices } from "../profile/BrowserSection";
 import { relativeTime } from "../../lib/relativeTime";
 import type {
   AppSettings,
@@ -205,6 +207,42 @@ export function Settings({ onImport }: Props): JSX.Element {
             />
             Auto-start MCP HTTP transport on app launch
           </label>
+        </Row>
+
+        <Row
+          icon={<Monitor size={16} strokeWidth={1.5} />}
+          title="Default display mode"
+          desc="How a profile opens unless it has its own choice. Running profiles keep the mode they started in."
+        >
+          <div className="grid gap-2 sm:grid-cols-2">
+            {displayModeChoices(info?.platform ?? "", settings.defaultDisplayMode).map((option) => {
+              const selected = (settings.defaultDisplayMode ?? "headed") === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => void patch({ defaultDisplayMode: option.value })}
+                  className="text-left p-3 rounded-lg transition-colors"
+                  style={{
+                    boxShadow: selected
+                      ? "inset 0 0 0 1px rgba(168,85,247,0.45)"
+                      : "inset 0 0 0 1px rgba(255,255,255,0.07)",
+                    background: selected ? "rgba(168,85,247,0.08)" : "rgba(255,255,255,0.025)",
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[13px] font-medium text-slate-100">
+                      {displayModeLabel(option.value)}
+                    </span>
+                    {selected && <Pill kind="running">active</Pill>}
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                    {option.description}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </Row>
 
         <Row

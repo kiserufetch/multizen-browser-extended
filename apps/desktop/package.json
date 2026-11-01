@@ -18,13 +18,13 @@
     "build:win:publish": "electron-vite build && node ./scripts/strip-workspace-symlinks.cjs && electron-builder --win --publish always",
     "build:linux:publish": "electron-vite build && node ./scripts/strip-workspace-symlinks.cjs && electron-builder --linux --publish always",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "preview": "electron-vite preview",
-    "test": "node --import ../../packages/mcp-server/node_modules/tsx/dist/loader.mjs --test src/main/processTree.test.ts src/main/cdpReadiness.test.ts src/main/launchTimezone.test.ts src/main/launchGeo.test.ts"
+    "preview": "electron-vite preview"
   },
   "dependencies": {
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",
     "@modelcontextprotocol/sdk": "^1.0.4",
+    "@multizen/browser-runtime": "workspace:*",
     "@multizen/cdp-driver": "workspace:*",
     "@multizen/mcp-server": "workspace:*",
     "@multizen/profile-manager": "workspace:*",

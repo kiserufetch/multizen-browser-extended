@@ -7,67 +7,38 @@ import { z } from "zod";
 import type { ProfileManager } from "@multizen/profile-manager";
 import {
   reconcileFingerprint,
-  FingerprintReconcileError,
   generateFingerprint,
   deviceCatalog,
   localeCatalog,
   reducedUserAgent,
   deviceMemoryApiValue,
+  isProxyHost,
 } from "@multizen/profile-manager";
 import type {
+  BrowserDriver,
   BrowserEngine,
-  LaunchedProfile,
-  ProfileId,
   FingerprintConfig,
   UpdateProfileInput,
   CreateProfileInput,
   ProxyConfig,
 } from "@multizen/types";
-import { BROWSER_ENGINES, resolveEngine } from "@multizen/types";
+import { BROWSER_ENGINES, DISPLAY_MODES, MultizenError, resolveEngine } from "@multizen/types";
 import { ActivityLog } from "./ActivityLog.js";
-import { InMemoryHumanHandoff, type HumanHandoff } from "./handoff.js";
+import { callSignal, principalFrom, type Principal } from "./auth/principal.js";
+import {
+  assertProfileExists,
+  assertProfileRunning,
+  profileNotFound,
+  toToolError,
+  withoutHostPaths,
+  type ToolErrorFields,
+} from "./errorMapping.js";
+import type { HumanHandoff } from "./handoff.js";
+import { createSharedMcpState, type SharedMcpState } from "./sharedState.js";
+import { limitedArgs, runGated, visibleTools, type EgressGate, type ToolLimits } from "./toolGate.js";
+import { EXTENSION_DEFS, EXTENSION_HANDLERS, type ToolContext } from "./tools/index.js";
 
-/**
- * BrowserDriver is the surface that the MCP server delegates real
- * browser work to. The desktop app implements it on top of patched
- * Chromium + CDP. The standalone dev mode implements a mock so the
- * MCP server can be exercised without a browser.
- */
-export interface BrowserDriver {
-  launch(profileId: ProfileId): Promise<LaunchedProfile>;
-  close(profileId: ProfileId): Promise<void>;
-  isRunning(profileId: ProfileId): boolean;
-  navigate(profileId: ProfileId, url: string): Promise<{ url: string }>;
-  click(profileId: ProfileId, selector: string): Promise<{ ok: true }>;
-  type(profileId: ProfileId, selector: string, text: string): Promise<{ ok: true }>;
-  clickRef(profileId: ProfileId, ref: string): Promise<{ ok: true }>;
-  typeRef(profileId: ProfileId, ref: string, text: string): Promise<{ ok: true }>;
-  extract(profileId: ProfileId): Promise<{ result: unknown }>;
-  screenshot(profileId: ProfileId): Promise<{ pngBase64: string }>;
-  /**
-   * Send a raw CDP command. `opts.safe` (default true) auto-disables any
-   * domain the call had to enable so the stealth baseline is preserved; the
-   * convenience CDP tools compose on top of this single primitive.
-   */
-  cdpSend(
-    profileId: ProfileId,
-    method: string,
-    params?: Record<string, unknown>,
-    sessionId?: string,
-    opts?: { safe?: boolean },
-  ): Promise<unknown>;
-  // ── Engine-neutral curated verbs. Chromium implements these via CDP; a
-  //    non-CDP engine (Firefox/Camoufox) implements them its own way. The MCP
-  //    tool layer calls these instead of composing CDP, so the curated tools
-  //    run on every engine. (wait_for_* stay composed on evaluateJs above.)
-  evaluateJs(profileId: ProfileId, expression: string, sessionId?: string): Promise<unknown>;
-  getCookies(profileId: ProfileId, urls?: string[], sessionId?: string): Promise<unknown>;
-  setCookies(profileId: ProfileId, cookies: unknown[], sessionId?: string): Promise<unknown>;
-  listTabs(profileId: ProfileId, sessionId?: string): Promise<unknown>;
-  newTab(profileId: ProfileId, url?: string, sessionId?: string): Promise<unknown>;
-  activateTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown>;
-  closeTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown>;
-}
+export type { BrowserDriver };
 
 export interface MultizenMcpServerOptions {
   profileManager: ProfileManager;
@@ -77,6 +48,9 @@ export interface MultizenMcpServerOptions {
   /** Human-handoff coordinator (CAPTCHA/2FA pause-resume). Defaults to an
    *  in-memory one; the desktop app passes one wired to its UI. */
   handoff?: HumanHandoff;
+  /** What every session of this process shares: the profile mutex and the leases. A
+   *  transport with several sessions must pass one. Defaults to a private one. */
+  shared?: SharedMcpState;
   /** App version reported to clients in the MCP `initialize` result. The
    *  desktop main passes `app.getVersion()`; falls back to a constant. */
   serverVersion?: string;
@@ -84,6 +58,27 @@ export interface MultizenMcpServerOptions {
    *  on each call so a Settings change applies without a restart. create_profile
    *  pins it when no engine is given. Defaults to CloakBrowser. */
   getDefaultEngine?: () => BrowserEngine;
+  /** Who is calling when the transport says nothing (stdio, the desktop's token,
+   *  tests). A principal the transport attaches to a request wins. Defaults to full. */
+  principal?: Principal;
+  /** A directory upload_file may read from, besides the profile's uploads dir. */
+  uploadsRoot?: string;
+  /** Largest base64 upload and inline download. Defaults to 16 MiB. */
+  maxInlineFileBytes?: number;
+  /** Refuses addresses at the tool level. The drivers enforce it at the network level. */
+  egress?: EgressGate;
+  /**
+   * While a handoff is pending, the profile is the person's: agents get HUMAN_IN_CONTROL,
+   * as toolPolicy.ts lays out per tool. For a server, whose panel can end a handoff. Off, the
+   * desktop's and plain stdio's way, a handoff only tells a person, and blocks no agent.
+   */
+  handoffGate?: boolean;
+  /** Where a download too large to send inline can be fetched from, without a trailing slash. */
+  downloadsBaseUrl?: string;
+  /** Off, as on a desktop: nothing is limited. */
+  limits?: ToolLimits;
+  /** What one profile's upload inbox may hold. Off, as on a desktop: no limit. */
+  maxInboxBytes?: number;
 }
 
 export interface MultizenMcpServer {
@@ -121,10 +116,6 @@ const ClickRefSchema = ProfileIdSchema.extend({ ref: z.string().min(1) });
 const TypeRefSchema = ProfileIdSchema.extend({
   ref: z.string().min(1),
   text: z.string(),
-});
-const RequestHumanSchema = ProfileIdSchema.extend({ reason: z.string().min(1) });
-const WaitForHumanSchema = ProfileIdSchema.extend({
-  timeout_ms: z.number().int().positive().optional(),
 });
 const ExtractSchema = ProfileIdSchema;
 
@@ -206,7 +197,7 @@ const DEVICE_FAMILIES = [
 
 const ProxySchema = z.object({
   type: z.enum(["http", "socks5"]),
-  host: z.string().min(1),
+  host: z.string().min(1).max(253).refine(isProxyHost, { message: "Not an address or a host name" }),
   port: z.number().int().min(1).max(65535),
   username: z.string().optional(),
   password: z.string().optional(),
@@ -238,6 +229,8 @@ const FingerprintInputSchema = z
   .strict();
 
 const EngineSchema = z.enum(BROWSER_ENGINES);
+const DisplayModeSchema = z.enum(DISPLAY_MODES);
+const LaunchProfileSchema = ProfileIdSchema.extend({ display_mode: DisplayModeSchema.optional() });
 
 const CreateProfileSchema = z.object({
   name: z.string().min(1),
@@ -245,6 +238,8 @@ const CreateProfileSchema = z.object({
   tags: z.array(z.string()).optional(),
   /** Omitted → the app's default engine, pinned at creation. */
   engine: EngineSchema.optional(),
+  /** Omitted → follows the default, unlike the engine: no data dir hangs on this. */
+  display_mode: DisplayModeSchema.optional(),
   proxy: ProxySchema.optional(),
   fingerprint: FingerprintInputSchema.optional(),
   /** Top-level seed wins over fingerprint.seed when both are set. */
@@ -264,6 +259,8 @@ const UpdateProfileSchema = ProfileIdSchema.extend({
   // No `null` (unpin): an unpinned profile follows the app default and would
   // move onto another engine's data dir when the default changes.
   engine: EngineSchema.optional(),
+  // `null` follows the default again; omitted leaves it untouched.
+  display_mode: DisplayModeSchema.nullable().optional(),
   // `null` clears the proxy; omitted leaves it untouched.
   proxy: ProxySchema.nullable().optional(),
   fingerprint: FingerprintInputSchema.optional(),
@@ -274,8 +271,8 @@ const UpdateProfileSchema = ProfileIdSchema.extend({
 /**
  * Server-level guidance surfaced to any connecting agent via the MCP
  * `initialize` result. Complements the per-tool descriptions with the workflow
- * and the non-obvious constraints (persistent profiles, visible windows,
- * headful only) that an agent can't infer from tool signatures alone.
+ * and the non-obvious constraints (persistent profiles, display modes) that an
+ * agent can't infer from tool signatures alone.
  */
 const MULTIZEN_MCP_INSTRUCTIONS = [
   "MultiZen drives real, persistent browser profiles — each has its own cookies, login state, fingerprint, and proxy, kept on disk between sessions. Each profile runs on one engine: CloakBrowser (Chromium, the usual default) or Camoufox (Firefox); list_profiles shows which.",
@@ -283,21 +280,24 @@ const MULTIZEN_MCP_INSTRUCTIONS = [
   "Workflow:",
   "1. Call list_profiles to see available profiles and which are already running.",
   "2. Call launch_profile before any page action — navigate/click/type/extract/screenshot fail on a profile that is not running. launch_profile is idempotent.",
-  "3. Use extract to read the page (URL, title, trimmed accessibility tree) and derive precise CSS selectors from it BEFORE calling click or type.",
+  "3. Use extract to read the page (URL, title, trimmed accessibility tree, including iframes) and act on what it shows with click_ref / type_ref, or derive precise CSS selectors from it BEFORE calling click or type.",
   "4. Leave the profile running for follow-up actions; close_profile only when done. State persists either way.",
   "5. In any situation, if you can complete the authorized task independently using the tools and access available to you, continue. Do not stop and ask a human to perform work you can complete yourself. Ask for help only when a concrete missing prerequisite actually prevents progress.",
   "",
   "Constraints:",
-  "- Profiles always open as visible desktop windows. There is no headless mode; do not expect one.",
-  "- Camoufox has no CDP: click_ref, type_ref, cdp_send and cdp_send_no_safety refuse on it by design (extract returns no refs there). Use click / type with CSS selectors.",
-  "- On a CAPTCHA, 2FA prompt, or other human-verification wall, do not attempt to solve or bypass it yourself — pause and let the user handle it, then continue. The session carries over.",
+  "- Page actions go to the profile's one active tab: list_tabs shows it, new_tab and activate_tab change it. Sessions on the same profile share it, unless you hold a lease.",
+  "- Each profile opens in a display mode: headed (a visible window), headless (no window), or xvfb (Linux: a window on a private virtual display nobody sees). list_profiles shows the saved mode and, while running, the running one. launch_profile takes an optional display_mode; a running profile keeps its mode, so asking for another gives PROFILE_ALREADY_RUNNING until you close_profile. Without a visible window, read the page with screenshot and extract. A server started with --headless runs everything headless and refuses any other display_mode with INVALID_INPUT.",
+  "- Camoufox has no CDP: cdp_send and cdp_send_no_safety refuse on it with UNSUPPORTED_ON_ENGINE. Refs and every page tool work on both engines. On Camoufox extract gives the tree as ariaSnapshot text, with refs like 'p3.e7'.",
+  "- A server may keep its browsers off private, loopback and cloud metadata addresses. navigate and new_tab to one, a navigation redirected to one, and a proxy at one give EGRESS_BLOCKED, which a retry won't change. A page's own requests to them just fail.",
+  "- On a CAPTCHA, 2FA prompt, or other human-verification wall, do not attempt to solve or bypass it yourself — call request_human, wait until get_human_status or wait_for_human says resumed, then continue. The session carries over. A server may refuse your page actions with HUMAN_IN_CONTROL until then, and for a 2fa or login handoff your extract, screenshot and get_cookies too.",
   "- Do not create or launch profiles in bulk to farm accounts; this tool supports autonomous execution of authorized workflows.",
 ].join("\n");
 
 export function createMultizenMcpServer(opts: MultizenMcpServerOptions): MultizenMcpServer {
   const { profileManager, browserDriver } = opts;
   const activityLog = opts.activityLog ?? new ActivityLog();
-  const handoff = opts.handoff ?? new InMemoryHumanHandoff();
+  const shared = opts.shared ?? createSharedMcpState({ handoff: opts.handoff });
+  const handoff = opts.handoff ?? shared.handoff;
   const getDefaultEngine = opts.getDefaultEngine ?? (() => resolveEngine(undefined, undefined));
 
   const server = new Server(
@@ -312,23 +312,59 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
     },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOL_DEFINITIONS,
+  server.setRequestHandler(ListToolsRequestSchema, async (_req, extra) => ({
+    tools: visibleTools(
+      [...TOOL_DEFINITIONS, ...EXTENSION_DEFS],
+      principalFrom(extra, opts.principal),
+    ),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  // The SDK aborts extra.signal for every call in flight when the transport closes, which
+  // already empties the queue of this session. This is the session's end as such.
+  let lastSessionId: string | undefined;
+  server.onclose = () => {
+    if (lastSessionId !== undefined) shared.mutex.dropSession(lastSessionId);
+  };
+
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const name = req.params.name;
-    const args = req.params.arguments ?? {};
-    const event = activityLog.startCall(name, args);
+    const args = limitedArgs(req.params.arguments ?? {}, opts.limits);
+    const principal = principalFrom(extra, opts.principal);
+    const event = activityLog.startCall(name, args, principal.name);
     const startedAt = Date.now();
 
     try {
-      const result = await dispatch(name, args, {
-        profileManager,
-        browserDriver,
-        handoff,
-        getDefaultEngine,
-      });
+      const sessionId = extra.sessionId ?? "local";
+      lastSessionId = sessionId;
+      const result = await runGated(
+        name,
+        args,
+        {
+          principal,
+          sessionId,
+          signal: callSignal(extra),
+          shared,
+          driver: browserDriver,
+          egress: opts.egress,
+          profiles: profileManager,
+          handoffGate: opts.handoffGate ?? false,
+          ...(opts.limits ? { limits: opts.limits } : {}),
+        },
+        (driver) =>
+          dispatch(name, args, {
+            profileManager,
+            browserDriver: driver,
+            handoff,
+            leases: shared.leases,
+            caller: { principal, sessionId },
+            getDefaultEngine,
+            uploadsRoot: opts.uploadsRoot,
+            maxInlineFileBytes: opts.maxInlineFileBytes,
+            handoffGate: opts.handoffGate ?? false,
+            downloadsBaseUrl: opts.downloadsBaseUrl,
+            maxInboxBytes: opts.maxInboxBytes,
+          }),
+      );
       const image = asImageResult(result);
       if (image) {
         activityLog.finish(event, "ok", `[${image.mimeType}, ${imageBytes(image.data)} bytes]`, startedAt);
@@ -337,27 +373,16 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
       activityLog.finish(event, "ok", summarize(result), startedAt);
       return ok(result);
     } catch (e) {
-      const message = e instanceof z.ZodError ? e.message : e instanceof Error ? e.message : String(e);
-      // InputNotDeliveredError comes from @multizen/cdp-driver, which this
-      // package does not depend on, so match it by name.
-      const code =
-        e instanceof z.ZodError || e instanceof FingerprintReconcileError
-          ? "INVALID_INPUT"
-          : e instanceof Error && e.name === "InputNotDeliveredError"
-            ? "INPUT_NOT_DELIVERED"
-            : "INTERNAL_ERROR";
-      activityLog.finish(event, "error", message, startedAt);
-      return err(code, message);
+      const fields = toToolError(e, name);
+      activityLog.finish(event, "error", fields.message, startedAt, fields.code);
+      return err(principal.full ? fields : withoutHostPaths(fields));
     }
   });
 
   return { server, activityLog };
 }
 
-interface DispatchDeps {
-  profileManager: ProfileManager;
-  browserDriver: BrowserDriver;
-  handoff: HumanHandoff;
+interface DispatchDeps extends ToolContext {
   getDefaultEngine: () => BrowserEngine;
 }
 
@@ -366,7 +391,7 @@ async function dispatch(
   args: Record<string, unknown>,
   deps: DispatchDeps,
 ): Promise<unknown> {
-  const { profileManager, browserDriver, handoff, getDefaultEngine } = deps;
+  const { profileManager, browserDriver, getDefaultEngine } = deps;
   switch (name) {
     case "list_profiles": {
       const defaultEngine = getDefaultEngine();
@@ -374,6 +399,7 @@ async function dispatch(
         ...p,
         proxy: redactProxy(p.proxy),
         isRunning: browserDriver.isRunning(p.id),
+        runningDisplayMode: browserDriver.runningDisplayMode?.(p.id) ?? null,
         // Effective engine, so the agent knows whether the CDP-only tools apply.
         engine: resolveEngine(p.engine, defaultEngine),
       }));
@@ -389,6 +415,7 @@ async function dispatch(
         // row would follow the app default and a later default change would move
         // the profile onto another engine's empty data dir.
         engine: input.engine ?? getDefaultEngine(),
+        displayMode: input.display_mode,
         proxy: input.proxy,
         alignTimezoneToProxy: input.alignTimezoneToProxy,
         strictGeoCoherence: input.strictGeoCoherence,
@@ -410,6 +437,7 @@ async function dispatch(
         id: created.id,
         name: created.name,
         engine: created.engine,
+        displayMode: created.displayMode ?? null,
         proxy: redactProxy(created.proxy),
         fingerprint: fingerprintSummary(created.fingerprint),
       };
@@ -417,7 +445,7 @@ async function dispatch(
     case "update_profile": {
       const input = UpdateProfileSchema.parse(args);
       const existing = profileManager.get(input.profile_id);
-      if (!existing) throw new Error(`Profile ${input.profile_id} not found`);
+      if (!existing) throw profileNotFound(input.profile_id);
 
       // Same rule as the profiles:update IPC: a running browser is tied to its
       // engine's binary + data dir, so refuse a real engine change (re-sending
@@ -428,14 +456,28 @@ async function dispatch(
         browserDriver.isRunning(input.profile_id) &&
         input.engine !== resolveEngine(existing.engine, defaultEngine)
       ) {
-        throw new Error(
+        throw new MultizenError(
+          "PROFILE_ALREADY_RUNNING",
           "Stop the profile before changing its engine: call close_profile, then update_profile again.",
+        );
+      }
+      // The same rule: only a real change is refused, so a client that re-sends the whole
+      // profile with an unrelated edit still saves.
+      if (
+        input.display_mode !== undefined &&
+        browserDriver.isRunning(input.profile_id) &&
+        (input.display_mode ?? null) !== (existing.displayMode ?? null)
+      ) {
+        throw new MultizenError(
+          "PROFILE_ALREADY_RUNNING",
+          "Stop the profile before changing its display mode: call close_profile, then update_profile again.",
         );
       }
 
       const patch: UpdateProfileInput = {};
       if (input.name !== undefined) patch.name = input.name;
       if (input.engine !== undefined) patch.engine = input.engine;
+      if (input.display_mode !== undefined) patch.displayMode = input.display_mode;
       if (input.notes !== undefined) patch.notes = input.notes;
       if (input.tags !== undefined) patch.tags = input.tags;
       // `proxy: null` clears it, `proxy: {…}` sets it, omitted leaves as-is.
@@ -460,6 +502,7 @@ async function dispatch(
         id: updated.id,
         name: updated.name,
         engine: resolveEngine(updated.engine, defaultEngine),
+        displayMode: updated.displayMode ?? null,
         tags: updated.tags,
         proxy: redactProxy(updated.proxy),
         fingerprint: fingerprintSummary(updated.fingerprint),
@@ -485,11 +528,14 @@ async function dispatch(
       };
     }
     case "launch_profile": {
-      const { profile_id } = ProfileIdSchema.parse(args);
+      const { profile_id, display_mode } = LaunchProfileSchema.parse(args);
       assertProfileExists(profileManager, profile_id);
       // ChromiumBrowserDriver.launch() handles markOpened internally so
       // every entry-point (UI, MCP, palette) gets the same timestamp.
-      const launched = await browserDriver.launch(profile_id);
+      const launched = await browserDriver.launch(
+        profile_id,
+        display_mode ? { displayMode: display_mode } : undefined,
+      );
       return launched;
     }
     case "close_profile": {
@@ -521,31 +567,6 @@ async function dispatch(
       const { profile_id, ref, text } = TypeRefSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
       return await browserDriver.typeRef(profile_id, ref, text);
-    }
-    case "request_human": {
-      const { profile_id, reason } = RequestHumanSchema.parse(args);
-      assertProfileRunning(browserDriver, profile_id);
-      handoff.request(profile_id, reason);
-      // Surface the window to the operator (best-effort; don't fail the call).
-      await browserDriver
-        .cdpSend(profile_id, "Page.bringToFront", {}, undefined, { safe: true })
-        .catch(() => {});
-      return {
-        status: "waiting_for_human",
-        reason,
-        note: "A human must complete this step (e.g. CAPTCHA/2FA) in the browser window. Call wait_for_human to block until they resume.",
-      };
-    }
-    case "wait_for_human": {
-      const { profile_id, timeout_ms } = WaitForHumanSchema.parse(args);
-      assertProfileRunning(browserDriver, profile_id);
-      const { resumed } = await handoff.waitFor(profile_id, timeout_ms ?? 300_000);
-      return { resumed, timedOut: !resumed };
-    }
-    case "resume_human": {
-      const { profile_id } = ProfileIdSchema.parse(args);
-      handoff.resume(profile_id);
-      return { ok: true };
     }
     case "extract": {
       const { profile_id } = ExtractSchema.parse(args);
@@ -776,8 +797,11 @@ async function dispatch(
         ],
       };
     }
-    default:
-      throw new Error(`Unknown tool: ${name}`);
+    default: {
+      const handler = EXTENSION_HANDLERS.get(name);
+      if (!handler) throw new Error(`Unknown tool: ${name}`);
+      return handler(args, deps);
+    }
   }
 }
 
@@ -855,28 +879,35 @@ const FINGERPRINT_JSON_SCHEMA = {
   },
 } as const;
 
+const DISPLAY_MODE_JSON_SCHEMA = {
+  type: "string",
+  enum: [...DISPLAY_MODES],
+  description:
+    "How the browser shows itself. headed = a visible window. headless = no window. xvfb = Linux only, a window on a private virtual display nobody sees.",
+} as const;
+
 const ENGINE_JSON_SCHEMA = {
   type: "string",
   enum: [...BROWSER_ENGINES],
   description:
-    "Browser engine. cloakbrowser = patched Chromium (all tools). camoufox = Firefox-based, a non-Chrome TLS/JS fingerprint; it has no CDP, so click_ref, type_ref, cdp_send and cdp_send_no_safety refuse on it (use click / type), and of the fingerprint only device OS, locale, screen and timezone apply.",
+    "Browser engine. cloakbrowser = patched Chromium. camoufox = Firefox-based, a non-Chrome TLS/JS fingerprint. Refs and the page tools work on both; camoufox has no CDP, so only cdp_send and cdp_send_no_safety refuse on it (UNSUPPORTED_ON_ENGINE), and of the fingerprint only device OS, locale, screen and timezone apply.",
 } as const;
 
 /** Shared tail of the input tool descriptions (click, type, click_ref, type_ref). */
 const INPUT_DELIVERY_NOTE =
-  " On CloakBrowser, fails with INPUT_NOT_DELIVERED when the page did not receive the input (for example a hidden page that has not painted yet); the error message says what to do next.";
+  " On CloakBrowser, fails with INPUT_NOT_DELIVERED when the page did not receive the input (for example a hidden page that has not painted yet); the error message says what to do next. Camoufox has no such check: Playwright waits for the element to take the input, and a TIMEOUT says it never did.";
 
-const TOOL_DEFINITIONS = [
+export const TOOL_DEFINITIONS = [
   {
     name: "list_profiles",
     description:
-      "List all browser profiles available on this machine. Returns id, name, tags, engine, last opened, and running state.",
+      "List all browser profiles available on this machine. Returns id, name, tags, engine, last opened, running state, the saved display mode (displayMode, absent when it follows the default) and the mode a running browser is in (runningDisplayMode).",
     inputSchema: { type: "object", properties: {} },
   },
   {
     name: "create_profile",
     description:
-      "Create a new browser profile. Only `name` is required; a coherent default fingerprint is generated. Optionally pass an `engine` (default: the app's default engine, fixed at creation), a `proxy` and/or high-level `fingerprint` knobs. Optional top-level `seed` / `entropy` (or `fingerprint.seed`) makes device/WebGL + CloakBrowser noise deterministic — same seed + knobs → same device/WebGL; different seed → different device/noise with high probability. Top-level seed wins over fingerprint.seed. Unknown localeId or invalid timezone/screen/hwc/mem → INVALID_INPUT (profile not created). Call list_fingerprint_options for valid device families and locale ids.",
+      "Create a new browser profile. Only `name` is required; a coherent default fingerprint is generated. Optionally pass an `engine` (default: the app's default engine, fixed at creation), a `display_mode` (default: follows the app's default), a `proxy` and/or high-level `fingerprint` knobs. Optional top-level `seed` / `entropy` (or `fingerprint.seed`) makes device/WebGL + CloakBrowser noise deterministic — same seed + knobs → same device/WebGL; different seed → different device/noise with high probability. Top-level seed wins over fingerprint.seed. Unknown localeId or invalid timezone/screen/hwc/mem → INVALID_INPUT (profile not created). Call list_fingerprint_options for valid device families and locale ids.",
     inputSchema: {
       type: "object",
       required: ["name"],
@@ -885,6 +916,7 @@ const TOOL_DEFINITIONS = [
         notes: { type: "string" },
         tags: { type: "array", items: { type: "string" } },
         engine: ENGINE_JSON_SCHEMA,
+        display_mode: DISPLAY_MODE_JSON_SCHEMA,
         proxy: PROXY_JSON_SCHEMA,
         fingerprint: FINGERPRINT_JSON_SCHEMA,
         seed: {
@@ -914,11 +946,11 @@ const TOOL_DEFINITIONS = [
   {
     name: "launch_profile",
     description:
-      "Launch a profile on its engine. Returns the CDP endpoint (empty on Camoufox, which has no CDP). Idempotent: returns existing endpoint if already running.",
+      "Launch a profile on its engine. Returns the CDP endpoint (empty on Camoufox, which has no CDP) and the display mode it runs in. Idempotent: returns existing endpoint if already running. Pass display_mode to override the saved mode for this run; on a profile already running in another mode that is PROFILE_ALREADY_RUNNING (close_profile first). On a server started with --headless, a display_mode other than headless is INVALID_INPUT. headed without a display, or xvfb where it isn't available, is DISPLAY_UNAVAILABLE.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
-      properties: { profile_id: { type: "string" } },
+      properties: { profile_id: { type: "string" }, display_mode: DISPLAY_MODE_JSON_SCHEMA },
     },
   },
   {
@@ -975,28 +1007,28 @@ const TOOL_DEFINITIONS = [
   {
     name: "click_ref",
     description:
-      "Click an element by its snapshot `ref` (e.g. 'e7') from the most recent extract. Prefer this over click: no CSS selector needed, and it scrolls the element into view. Refs are invalidated when the page changes — re-run extract and use the new refs. CloakBrowser only: on Camoufox extract returns no refs, so use click." +
+      "Click an element by its `ref` (e.g. 'e7') from extract. Prefer this over click: no CSS selector needed, and it scrolls the element into view. A ref works on any tab and in any frame, cross-origin iframes included; on a background tab it makes that tab active first. It stays valid while its element lives, and extract gives that element the same ref again. Once the element or its document is gone it fails with STALE_REF, never reaching another element: run extract and use the new refs." +
       INPUT_DELIVERY_NOTE,
     inputSchema: {
       type: "object",
       required: ["profile_id", "ref"],
       properties: {
         profile_id: { type: "string" },
-        ref: { type: "string", description: "Element ref from extract, e.g. 'e7'" },
+        ref: { type: "string", description: "Element ref from extract, e.g. 'e7', or 'p3.e7' on Camoufox" },
       },
     },
   },
   {
     name: "type_ref",
     description:
-      "Focus an element by its snapshot `ref` (via a real click) and type text into it. Prefer this over type. Refs come from extract and are invalidated when the page changes. CloakBrowser only: on Camoufox extract returns no refs, so use type." +
+      "Focus an element by its `ref` (via a real click) and type text into it. Prefer this over type. Refs come from extract and work the way click_ref describes: any tab, any frame, STALE_REF once the element is gone." +
       INPUT_DELIVERY_NOTE,
     inputSchema: {
       type: "object",
       required: ["profile_id", "ref", "text"],
       properties: {
         profile_id: { type: "string" },
-        ref: { type: "string", description: "Element ref from extract, e.g. 'e7'" },
+        ref: { type: "string", description: "Element ref from extract, e.g. 'e7', or 'p3.e7' on Camoufox" },
         text: { type: "string" },
       },
     },
@@ -1004,7 +1036,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "request_human",
     description:
-      "Hand control to a human for a step the agent must NOT do itself — a CAPTCHA, a 2FA/OTP prompt, or any manual verification. Brings the browser window forward and marks the profile as awaiting a human in the app. Call wait_for_human next to block until the person is done. Never attempt to solve CAPTCHA or 2FA yourself.",
+      "Hand control to a human for a step the agent must NOT do itself — a CAPTCHA, a 2FA/OTP prompt, or any manual verification. Returns at once with a handoff_id and when it expires (15 min by default). Brings the browser window forward, on a profile that has a visible one, and marks the profile as awaiting a human in the app. A profile with no window (headless, xvfb) is worked on in the handoff panel: at /panel on a server, or in the desktop app. Plain stdio has no panel. Calling it again while one is pending returns the same handoff, keeping its kind and expiry. Say what it is with kind: for 2fa and login a server also refuses your extract, screenshot and get_cookies, since the page shows what the person types; for the others those keep working. Your page actions get HUMAN_IN_CONTROL on a server until it ends. Follow with wait_for_human or get_human_status. Never attempt to solve CAPTCHA or 2FA yourself.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "reason"],
@@ -1014,13 +1046,18 @@ const TOOL_DEFINITIONS = [
           type: "string",
           description: "What the human needs to do, e.g. 'solve CAPTCHA' or 'enter 2FA code'",
         },
+        kind: {
+          type: "string",
+          enum: ["captcha", "2fa", "login", "confirm", "other"],
+          description: "What sort of step this is (default other).",
+        },
       },
     },
   },
   {
     name: "wait_for_human",
     description:
-      "Block until a human resumes the profile (after request_human) or the timeout elapses. Returns { resumed, timedOut }. If there is no pending handoff, returns immediately as resumed.",
+      "Wait until a handoff from request_human ends, or the timeout elapses. Returns { resumed, timedOut, status, handoff_id }; status is pending when the wait ran out, so call again, and resumed, aborted or expired when it ended. Only resumed means the person did the step. Waits at most 55 s per call. Pass handoff_id to wait for one in particular; an id this server doesn't know, as after a restart, gets HANDOFF_NOT_FOUND.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1028,15 +1065,16 @@ const TOOL_DEFINITIONS = [
         profile_id: { type: "string" },
         timeout_ms: {
           type: "number",
-          description: "Max wait in ms (default 300000 = 5 min).",
+          description: "Max wait in ms (default 50000, at most 55000).",
         },
+        handoff_id: { type: "string", description: "Id from request_human" },
       },
     },
   },
   {
     name: "resume_human",
     description:
-      "Clear a pending human handoff for the profile (unblocks wait_for_human). Normally the operator triggers this from the app UI; exposed as a tool for automated/testing flows.",
+      "Clear a pending human handoff for the profile (unblocks wait_for_human as resumed). Needs a token with the operator group. Normally the operator triggers this from the app UI or the panel; exposed as a tool for automated/testing flows.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1046,7 +1084,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "extract",
     description:
-      "Snapshot the current page: returns the URL, title, and a trimmed accessibility tree. Interactive/meaningful nodes carry a short `ref` (e.g. 'e7') — pass it to click_ref / type_ref to act on that element without a CSS selector. The calling LLM parses the tree into whatever it needs. MultiZen does not call any external API.",
+      "Snapshot the active tab: returns the URL, title, and a trimmed accessibility tree. An iframe's content hangs under its Iframe node, cross-origin ones included; framesSkipped, when present, counts frames left out for being too many or not answering. Interactive/meaningful nodes carry a short `ref` (e.g. 'e7') — pass it to click_ref / type_ref to act on that element without a CSS selector. On Camoufox the same comes as `ariaSnapshot`, YAML text with iframes nested in it and refs like 'p3.e7', next to the page's `text`. The calling LLM parses the tree into whatever it needs. MultiZen does not call any external API.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1068,7 +1106,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "update_profile",
     description:
-      "Update an existing profile's name, notes, tags, engine, proxy, and/or fingerprint. Every field is optional — only the ones you pass change. Set `proxy` to null to remove the proxy. Fingerprint changes are reconciled for coherence. If the profile is running, changes apply on the next launch (response includes appliesOnNextLaunch) — except an engine change, which is refused while it runs (close_profile first). Each engine keeps its own browser state, so after switching, the profile starts from that engine's cookies and logins, which may be empty.",
+      "Update an existing profile's name, notes, tags, engine, display_mode, proxy, and/or fingerprint. Every field is optional — only the ones you pass change. Set `proxy` to null to remove the proxy, and `display_mode` to null to follow the default again. Fingerprint changes are reconciled for coherence. If the profile is running, changes apply on the next launch (response includes appliesOnNextLaunch) — except an engine or display mode change, which is refused while it runs (close_profile first). Each engine keeps its own browser state, so after switching, the profile starts from that engine's cookies and logins, which may be empty.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1078,6 +1116,11 @@ const TOOL_DEFINITIONS = [
         notes: { type: "string" },
         tags: { type: "array", items: { type: "string" } },
         engine: ENGINE_JSON_SCHEMA,
+        display_mode: {
+          description:
+            "The mode to save, or null to follow the default again. Omit to leave unchanged.",
+          anyOf: [DISPLAY_MODE_JSON_SCHEMA, { type: "null" }],
+        },
         proxy: {
           description: "Proxy object to set, or null to clear. Omit to leave unchanged.",
           anyOf: [PROXY_JSON_SCHEMA, { type: "null" }],
@@ -1155,7 +1198,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "evaluate_js",
     description:
-      "Evaluate a JavaScript expression in the page and return the result by value. Runs via Runtime.evaluate without enabling the Runtime domain (stealth-safe).",
+      "Evaluate a JavaScript expression in the page and return the result by value. Runs via Runtime.evaluate without enabling the Runtime domain (stealth-safe). On Camoufox it runs in an isolated world: it sees the DOM but not the page's own globals.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "expression"],
@@ -1224,7 +1267,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "list_tabs",
-    description: "List open targets (tabs/pages) via Target.getTargets.",
+    description:
+      "List open targets via Target.getTargets: tabs (type page), and frames in their own process (type iframe; CloakBrowser only). activeTargetId is the tab page actions go to.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1233,7 +1277,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "new_tab",
-    description: "Open a new tab via Target.createTarget. Defaults to about:blank if no url is given.",
+    description:
+      "Open a new tab via Target.createTarget and make it the active tab, in the foreground. Defaults to about:blank if no url is given. Returns once the tab can be used, so navigate can follow at once; a url passed here may still be loading then.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1246,7 +1291,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "activate_tab",
-    description: "Bring a tab to the foreground via Target.activateTarget.",
+    description:
+      "Make a tab the active one, in the foreground: navigate, click, type, extract, screenshot and the other page actions then go to it. A popup the page opens does not become active by itself. An unknown target_id gets TAB_NOT_FOUND.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "target_id"],
@@ -1259,7 +1305,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "close_tab",
-    description: "Close a tab via Target.closeTarget.",
+    description:
+      "Close a tab via Target.closeTarget. Closing the active tab makes the most recently used remaining tab active. Closing the last tab ends the browser, as closing its window would.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "target_id"],
@@ -1365,27 +1412,16 @@ function imageBytes(b64: string): number {
   return Math.max(0, Math.floor((len * 3) / 4) - padding);
 }
 
-function err(code: string, message: string) {
+function err(error: ToolErrorFields) {
   return {
     isError: true,
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify({ error: { code, message } }),
+        text: JSON.stringify({ error }),
       },
     ],
   };
-}
-
-function assertProfileExists(pm: ProfileManager, id: string): void {
-  const p = pm.get(id);
-  if (!p) throw new Error(`Profile ${id} not found`);
-}
-
-function assertProfileRunning(driver: BrowserDriver, id: string): void {
-  if (!driver.isRunning(id)) {
-    throw new Error(`Profile ${id} is not running. Call launch_profile first.`);
-  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1431,7 +1467,8 @@ async function pollUntil(check: () => Promise<boolean>, budgetMs: number): Promi
     }
     if (Date.now() >= deadline) {
       if (lastTransient) {
-        throw new Error(
+        throw new MultizenError(
+          "TIMEOUT",
           `Timed out after ${budgetMs}ms waiting for the page to settle; ` +
             `last transient navigation error: ${lastTransient.message}`,
         );

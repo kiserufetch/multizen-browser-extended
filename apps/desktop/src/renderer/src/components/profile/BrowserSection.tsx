@@ -1,8 +1,9 @@
-import type { JSX } from "react";
-import type { BrowserEngine } from "../../types";
+import { useEffect, useState, type JSX } from "react";
+import { displayModeLabel } from "../atoms";
+import type { BrowserEngine, DisplayMode } from "../../types";
 
 /**
- * Browser engine + start-page controls, shared by the create and edit sheets.
+ * Browser engine, display mode + start-page controls, shared by the create and edit sheets.
  * Self-contained (own labels/inputs) so both sheets can drop it into their own
  * "Browser" group.
  *
@@ -38,6 +39,26 @@ export const ENGINE_ROSTER: ReadonlyArray<{
   },
 ];
 
+const DISPLAY_MODE_ROSTER: ReadonlyArray<{ value: DisplayMode; description: string }> = [
+  { value: "headed", description: "A normal browser window on this computer." },
+  { value: "headless", description: "No window. Runs in the background, for agents over MCP." },
+  { value: "xvfb", description: "A real window on a private virtual display you can't see." },
+];
+
+/**
+ * The modes worth offering here. Xvfb only exists on Linux; a profile that already has
+ * it (say, imported from a Linux machine) still shows it, or its saved mode would be
+ * invisible while a launch fails over it.
+ */
+export function displayModeChoices(
+  platform: string,
+  current?: DisplayMode,
+): ReadonlyArray<{ value: DisplayMode; description: string }> {
+  return DISPLAY_MODE_ROSTER.filter(
+    (mode) => mode.value !== "xvfb" || platform === "linux" || current === "xvfb",
+  );
+}
+
 export function BrowserSection({
   startUrl,
   onStartUrl,
@@ -45,6 +66,10 @@ export function BrowserSection({
   onEngine,
   engineDisabled = false,
   engineDisabledReason,
+  displayMode,
+  onDisplayMode,
+  displayModeDisabled = false,
+  displayModeDisabledReason,
 }: {
   startUrl: string;
   onStartUrl: (v: string) => void;
@@ -54,7 +79,36 @@ export function BrowserSection({
   engineDisabled?: boolean;
   /** Shown under the picker to explain why it's locked. */
   engineDisabledReason?: string;
+  /** Undefined follows the app default (Settings). */
+  displayMode: DisplayMode | undefined;
+  onDisplayMode: (v: DisplayMode | undefined) => void;
+  /** When true the mode cannot be changed (a running browser keeps its mode). */
+  displayModeDisabled?: boolean;
+  displayModeDisabledReason?: string;
 }): JSX.Element {
+  const [appDefaultMode, setAppDefaultMode] = useState<DisplayMode>("headed");
+  const [platform, setPlatform] = useState("");
+  useEffect(() => {
+    if (!window.multizen) return;
+    void window.multizen.settings.get().then((s) => setAppDefaultMode(s.defaultDisplayMode ?? "headed"));
+    void window.multizen.system.info().then((info) => setPlatform(info.platform));
+  }, []);
+  const displayCards: ReadonlyArray<{
+    value: DisplayMode | undefined;
+    label: string;
+    description: string;
+  }> = [
+    {
+      value: undefined,
+      label: `Default (${displayModeLabel(appDefaultMode).toLowerCase()})`,
+      description: "Follows the setting in Settings.",
+    },
+    ...displayModeChoices(platform, displayMode).map((mode) => ({
+      ...mode,
+      label: displayModeLabel(mode.value),
+    })),
+  ];
+
   return (
     <div className="space-y-2.5">
       <SectionField label="Engine">
@@ -91,6 +145,37 @@ export function BrowserSection({
             Camoufox is Firefox-based, so Chrome extensions aren't supported — the
             Extensions section is hidden for this engine.
           </p>
+        ) : null}
+      </SectionField>
+
+      <SectionField label="Display">
+        <div className="grid gap-2 sm:grid-cols-2">
+          {displayCards.map((card) => {
+            const selected = displayMode === card.value;
+            return (
+              <button
+                key={card.value ?? "default"}
+                type="button"
+                disabled={displayModeDisabled}
+                onClick={() => onDisplayMode(card.value)}
+                className="text-left p-2.5 rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                style={{
+                  boxShadow: selected
+                    ? "inset 0 0 0 1px rgba(168,85,247,0.45)"
+                    : "inset 0 0 0 1px rgba(255,255,255,0.08)",
+                  background: selected ? "rgba(168,85,247,0.08)" : "rgba(255,255,255,0.025)",
+                }}
+              >
+                <div className="text-[12px] font-medium text-slate-200">{card.label}</div>
+                <div className="text-[10px] text-slate-500 leading-snug mt-0.5">
+                  {card.description}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        {displayModeDisabled && displayModeDisabledReason ? (
+          <p className="text-[10px] text-slate-600 leading-relaxed">{displayModeDisabledReason}</p>
         ) : null}
       </SectionField>
 

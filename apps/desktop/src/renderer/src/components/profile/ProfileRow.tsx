@@ -11,6 +11,9 @@ import {
   platformLabel,
   EngineIcon,
   engineLabel,
+  DisplayModeIcon,
+  displayModeLabel,
+  displayModeRunningNote,
 } from "../atoms";
 import { Button } from "../atoms/Button";
 import { relativeTime } from "../../lib/relativeTime";
@@ -130,6 +133,19 @@ export function ProfileRow({
                 <span className="text-slate-500 flex-shrink-0">{engineLabel(profile.engine)}</span>
               </>
             )}
+            {profile.displayMode && profile.displayMode !== "headed" && (
+              <>
+                <span className="text-slate-700 flex-shrink-0">·</span>
+                <DisplayModeIcon
+                  mode={profile.displayMode}
+                  size={11}
+                  className="text-slate-500 flex-shrink-0"
+                />
+                <span className="text-slate-500 flex-shrink-0">
+                  {displayModeLabel(profile.displayMode)}
+                </span>
+              </>
+            )}
             <span className="text-slate-700 flex-shrink-0">·</span>
             <span className="truncate">{profile.id.slice(0, 12)}</span>
           </div>
@@ -232,8 +248,20 @@ function PillForState({ profile }: { profile: TileData }): JSX.Element {
       </span>
     );
   }
-  if (profile.state === "running")
-    return <Pill kind="running" dot>running</Pill>;
+  if (profile.state === "running") {
+    const mode = profile.runningDisplayMode;
+    // The status column is narrow: an icon here, the words on hover and in the name's meta line.
+    return mode && mode !== "headed" ? (
+      <span title={displayModeRunningNote(mode)} className="inline-flex min-w-0">
+        <Pill kind="running" dot>
+          running
+          <DisplayModeIcon mode={mode} size={10} className="flex-shrink-0" />
+        </Pill>
+      </span>
+    ) : (
+      <Pill kind="running" dot>running</Pill>
+    );
+  }
   if (profile.state === "error")
     // Dense row: surface the message as a hover tooltip (the grid card has room
     // for a full error line; here the status column does not).

@@ -1,0 +1,26 @@
+{
+  "name": "@multizen/detection-baseline",
+  "version": "0.10.0",
+  "private": true,
+  "type": "module",
+  "description": "What pages and servers can see of a MultiZen browser: probes, input, TLS and HTTP/2, CreepJS, rebrowser-bot-detector",
+  "scripts": {
+    "baseline": "tsx run.ts",
+    "compare": "tsx compare.ts",
+    "matrix": "tsx matrix.ts",
+    "test": "node --import tsx --test lib/ja4.test.ts lib/h2Sniffer.test.ts lib/stun.test.ts lib/compare.test.ts lib/assets.test.ts lib/netlog.test.ts lib/inputSummary.test.ts lib/tlsSite.test.ts lib/baseline.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@multizen/browser-runtime": "workspace:*",
+    "@multizen/profile-manager": "workspace:*",
+    "@multizen/server": "workspace:*",
+    "@multizen/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "selfsigned": "^2.4.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,174 @@
+[
+ {
+  "type": "dummyFn",
+  "rating": 0,
+  "note": "Call <code>window.dummyFn()</code> to test if you can access main world objects.",
+  "msSinceLoad": 1
+ },
+ {
+  "type": "sourceUrlLeak",
+  "rating": 0,
+  "note": "Call <code>document.getElementById('detections-json')</code> to test sourceUrl leak.",
+  "msSinceLoad": 2
+ },
+ {
+  "type": "mainWorldExecution",
+  "rating": 0,
+  "note": "Call <code>document.getElementsByClassName('div')</code> to trigger this test. If you did and the test wasn't triggered, then you're running it in an isolated world, which is safe and not detectable.",
+  "msSinceLoad": 2
+ },
+ {
+  "type": "runtimeEnableLeak",
+  "rating": -1,
+  "note": "No leak detected.",
+  "msSinceLoad": 3
+ },
+ {
+  "type": "exposeFunctionLeak",
+  "note": "No <code>window.exposedFn</code>. Use <code>page.exposeFunction</code> to trigger this test.",
+  "rating": 0,
+  "msSinceLoad": 3
+ },
+ {
+  "type": "navigatorWebdriver",
+  "rating": -1,
+  "note": "No webdriver presented.",
+  "msSinceLoad": 3
+ },
+ {
+  "type": "viewport",
+  "rating": 0.5,
+  "debug": {
+   "width": 1280,
+   "height": 720
+  },
+  "note": "Viewport has default Playwright values. Use <code>viewport: null</code> in options.",
+  "msSinceLoad": 4
+ },
+ {
+  "type": "useragent",
+  "rating": 0,
+  "note": "Cannot detect Chrome version as navigator.userAgentData is undefined.",
+  "msSinceLoad": 5
+ },
+ {
+  "type": "pwInitScripts",
+  "rating": -1,
+  "note": "No <code>window.__pwInitScripts</code> detected.",
+  "msSinceLoad": 6
+ },
+ {
+  "type": "platformMismatch",
+  "rating": -1,
+  "note": "User agent, <code>navigator.platform</code> and client hints agree.",
+  "debug": {
+   "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0",
+   "navigator.platform": "Linux x86_64",
+   "userAgentData.platform": null,
+   "activeTextLight": "rgb(238, 0, 0)"
+  },
+  "msSinceLoad": 8
+ },
+ {
+  "type": "mobileEmulation",
+  "rating": -1,
+  "note": "Desktop user agent, no mobile emulation detected.",
+  "msSinceLoad": 11
+ },
+ {
+  "type": "documentInterception",
+  "rating": 0,
+  "note": "Runs in Chromium-based browsers only.",
+  "msSinceLoad": 11
+ },
+ {
+  "type": "bypassCsp",
+  "rating": -1,
+  "note": "Content Security Policy (CSP) is enabled, it's expected behavior.",
+  "msSinceLoad": 219
+ },
+ {
+  "type": "popupBlocking",
+  "rating": 0.5,
+  "note": "\n        <div>A page script opened a popup without a click. Either popups are allowed for this site in the browser settings, or Chrome runs with <code>--disable-popup-blocking</code> (a Puppeteer and Playwright default).</div>\n        <div>Use <a href=\"https://github.com/rebrowser/rebrowser-patches\" target=\"_blank\">rebrowser-patches</a> to fix it.</div>\n      ",
+  "msSinceLoad": 226
+ },
+ {
+  "type": "ipcFloodingProtection",
+  "rating": 1,
+  "note": "\n        <div>All 300 rapid <code>history.replaceState()</code> calls went through. Chrome ignores them after 200 within 10 seconds, unless it runs with <code>--disable-ipc-flooding-protection</code> (a Puppeteer and Playwright default).</div>\n        <div>Use <a href=\"https://github.com/rebrowser/rebrowser-patches\" target=\"_blank\">rebrowser-patches</a> to fix it.</div>\n      ",
+  "debug": {
+   "applied": 300
+  },
+  "msSinceLoad": 403
+ },
+ {
+  "type": "storagePartitioning",
+  "rating": 0,
+  "note": "Runs in Chromium-based browsers only (Safari shares this storage by design).",
+  "msSinceLoad": 404
+ },
+ {
+  "type": "cdpBindingGlobals",
+  "rating": -1,
+  "note": "No unnamed native functions on <code>window</code>.",
+  "msSinceLoad": 405
+ },
+ {
+  "type": "headless",
+  "rating": -1,
+  "note": "No signs of headless Chrome.",
+  "debug": {
+   "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0",
+   "brands": [],
+   "windowChrome": "undefined",
+   "notificationPermission": "default",
+   "notificationsQueryState": "prompt",
+   "anyPointer": [
+    "fine"
+   ],
+   "screen": "2560x1440",
+   "plugins": 5,
+   "pdfViewerEnabled": true,
+   "webglRenderer": "NVIDIA GeForce GTX 980, or similar"
+  },
+  "msSinceLoad": 528
+ },
+ {
+  "type": "nativeTampering",
+  "rating": -1,
+  "note": "Native functions look untouched.",
+  "debug": {
+   "tampered": {},
+   "automationFrames": {},
+   "iframeSharesRealm": false
+  },
+  "msSinceLoad": 551
+ },
+ {
+  "type": "workerConsistency",
+  "rating": -1,
+  "note": "<code>navigator</code> in a Web Worker matches the page.",
+  "debug": {
+   "main": {
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "platform": "Linux x86_64",
+    "languages": [
+     "en-IE",
+     "en"
+    ],
+    "hardwareConcurrency": 2
+   },
+   "worker": {
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "platform": "Linux x86_64",
+    "languages": [
+     "en-IE",
+     "en"
+    ],
+    "hardwareConcurrency": 2
+   }
+  },
+  "msSinceLoad": 568
+ }
+]

@@ -7,17 +7,232 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Closes the per-profile engine gaps listed as known limitations in 0.10.0.
+MultiZen without the desktop app: `multizen-server` runs the same MCP tools and browser drivers
+in Docker or on a bare server, with headless and Xvfb display modes, permissions per token, an
+egress policy and a web panel for human handoff. The MCP API grows typed errors, more input tools,
+downloads, dialogs, leases, and refs on every tab, frame and engine. This also closes the
+per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
+[`apps/server/README.md`](apps/server/README.md). Where it falls short, and what changed on the
+desktop: [`docs/server-mode.md`](docs/server-mode.md). What was checked and what wasn't:
+[`docs/server-acceptance.md`](docs/server-acceptance.md).
 
 ### Added
 
+- **`multizen-server`: MultiZen's MCP server with real browsers and no Electron.** `serve` is MCP
+  over Streamable HTTP and SSE, `stdio` the same for one client, and `stdio --connect` relays to a
+  running `serve` for clients that can only spawn a process. Logs are JSON lines, and `stdio`'s stdout
+  stays valid JSON-RPC while a driver logs. SIGTERM, Ctrl+C and stdin EOF close the browsers, X
+  servers and bridges, then exit 0, within a time limit. `--max-browsers` limits browsers over both
+  engines (by default what the machine's memory allows), with launches waiting in line for up to 30 s.
+  A second `serve` or `stdio` on a data directory is refused by its lock, as is a desktop app's
+  directory. `profile export` and `profile import` move profiles as `.mzar` archives, between
+  servers and to and from the desktop. A server pins its engine's version, and has no updater and no
+  usage reporting. The browser code moved from `apps/desktop` to `packages/browser-runtime`, behind a
+  small host interface, and the desktop passes its Electron implementation.
+- **Typed errors on every MCP tool.** A failure now has a stable `code` (`PROFILE_NOT_RUNNING`,
+  `STALE_REF`, `DIALOG_OPEN`, `TIMEOUT`, ...), `retryable`, a `hint`, and `details.retry_after_ms`
+  where a wait is known, in the same response shape as before. Every tool carries all four MCP
+  annotation hints.
+- **MCP `press_key`, `hover`, `select_option`, `scroll`, `upload_file`,
+  `list_downloads`, `get_download`, `delete_download`, `set_dialog_policy`, `list_dialogs` and
+  `handle_dialog`** on both engines. On the desktop, a CloakBrowser profile's
+  downloads start going to its `downloads` directory at the first `list_downloads`
+  or `get_download`, not before. A Camoufox profile's are copied there from launch,
+  because they would otherwise be deleted when the browser closes.
+- **`click_ref` and `type_ref` on Camoufox.** Its `extract` now also returns
+  `ariaSnapshot`, text with iframes nested in it and refs like `p3.e7`.
+- **MCP `acquire_profile`, `renew_profile` and `release_profile`**: an optional
+  exclusive lease on a profile. Other sessions can read it but get `PROFILE_LEASED`
+  on anything that changes it. A lease lasts 5 minutes by default and at most an hour,
+  survives a dropped connection (reattach with its `lease_id`), and a token with the
+  `operator` group can force-release it. With no lease nothing changes. A server's
+  `--lease-on-session-close release` drops a session's leases with it; the default, `keep`,
+  lets them run on.
+- **Display modes: `headed`, `xvfb` and `headless`.** A profile can save one, Settings
+  has a default, and MCP `create_profile`, `update_profile` and `launch_profile` take
+  `display_mode`. `list_profiles` shows the saved mode and the running one, and a profile
+  card or row shows a badge when it opens with no window. Headless is the engine's own:
+  `--headless=new` on CloakBrowser, `headless: true` on Camoufox. `xvfb` (Linux only) runs
+  a real window on a private X server per profile. The desktop default stays `headed`, and
+  its launch flags don't change. On a server, `--display-mode` sets the default (`auto`:
+  Linux without `DISPLAY` takes `xvfb` if installed, otherwise `headless`; elsewhere
+  `headed`), and `--headless` allows no windows at all: a profile saved as `headed` runs
+  headless, and asking for `headed` by name is `INVALID_INPUT`. A running profile keeps
+  its mode: `launch_profile` with no parameter stays idempotent, naming another mode is
+  `PROFILE_ALREADY_RUNNING`, and `update_profile` refuses a real change while it runs.
+  `headed` with no display and `xvfb` off Linux are `DISPLAY_UNAVAILABLE`.
+- **Human handoff over the network.** `request_human` now returns a `handoff_id`, takes a
+  `kind` (`captcha`, `2fa`, `login`, `confirm`, `other`) and expires by itself after 15
+  minutes. `get_human_status` asks without blocking, and `wait_for_human` waits at most 55 s
+  and says `pending`, `resumed`, `aborted` or `expired`: only `resumed` means the step was
+  done. On a server a person takes over at `/panel`, signing in with an `operator` token: a
+  live view of the page, its mouse, wheel and keyboard, a text box for pasted and composed
+  text, its tabs, its JavaScript dialogs and file pickers, then Resume or Abort. Permission
+  prompts belong to the browser and can't be answered there. Until it ends an agent's page
+  actions get `HUMAN_IN_CONTROL`, and for `2fa` and `login` also its `extract`, `screenshot`
+  and `get_cookies`. `--handoff-webhook` tells an endpoint of the owner's about each new one,
+  signed with `--handoff-webhook-secret`. Closing or crashing the browser aborts it.
+  Frames stay in memory and neither they nor anything typed reach a log. On the desktop
+  nothing blocks agents: a banner offers Resume and Abort, the OS notifies, and a profile
+  with no window opens the panel in a window of its own.
+- **Large downloads.** `get_download` on a file over its inline limit now names a path to
+  fetch it from with the same bearer token. A server's profile may keep 2 GB of downloads
+  (`--download-quota-bytes`); past that a download is stopped and deleted, and `delete_download`
+  gives back what one took. It keeps 1000 entries, refusing new downloads at the cap.
+- **`multizen-server`: named tokens, remote access and encrypted proxy passwords.**
+  `token create`, `token list` and `token revoke` manage tokens that carry tool groups
+  (`read`, `act`, `profile-admin`, `raw`, `operator`) or single tools, and a list of
+  profiles. `token create` defaults to `read` and `act`, never `raw`, and shows a token
+  once; only its hash is stored. `tools/list` shows what a token may use, anything else
+  is `FORBIDDEN`, and without `raw` `launch_profile` leaves out `cdpEndpoint` and `pid`.
+  A revoke from another process closes that token's sessions within a second and drops
+  its queued calls and leases. `--host` beyond loopback needs `--allow-remote`, and TLS
+  (`--tls-cert`, `--tls-key`) or `--allow-insecure-remote`; behind a reverse proxy on
+  loopback, `--allowed-hosts` or `--public-url` is enough. Failed logins are limited to
+  10 a minute per address (`--trust-proxy` for a proxy of yours in front). Sessions close
+  after 30 idle minutes and there can be 64 of them, 16 per token (`--max-sessions-per-token`),
+  a call in flight never counting as idle. Proxy passwords are encrypted at rest with `MULTIZEN_SECRET_KEY` or
+  `<data-dir>/secret.key`, plaintext ones at start, and `secrets rotate` changes the key.
+  The owner's token is in `<data-dir>/owner-token`, for its owner: agents connect with one from
+  `token create`. The desktop's `mcp-token` keeps full access, and the desktop stores proxy
+  passwords as before.
+- **`multizen-server` in Docker.** `docker compose up -d` builds and runs it, published on
+  the host's loopback only, as a non-root user with every capability dropped. The image has
+  no browser engine: the first start downloads it into the volume, and a launch meanwhile
+  gets a retryable `ENGINE_NOT_READY`. `docker/seccomp-chromium.json` is Docker's default
+  profile plus the calls Chromium's sandbox needs. A server never falls back to
+  `--no-sandbox`, in a container or on bare-metal Linux: if the sandbox can't start, the
+  launch fails with `SANDBOX_UNAVAILABLE` and what to do about it. Starting as root, or on a
+  data directory it can't write to or run from, is refused at once. Under Xvfb and in headless
+  the first page has focus, and under Xvfb its window has the persona's exact size.
+- **`multizen-server`: an egress policy.** `--egress-policy block-private`, a server's default,
+  keeps its browsers off private, loopback, link-local, CGNAT, multicast and cloud metadata
+  addresses, in any spelling: IPv4-mapped IPv6, NAT64, `2852039166`, `0x7f.1`. Every profile runs
+  through the local bridge, which checks each connection a browser opens, so this covers
+  redirects, `fetch`, images, iframes and WebSockets, and loopback no longer goes around it. A
+  direct profile's names resolve in the bridge and only the addresses checked are dialed, which
+  closes DNS rebinding. A proxied profile still resolves nothing locally: its literal addresses
+  and loopback and metadata names are judged, and its proxy's own address at `create_profile`,
+  `update_profile` and launch. `navigate` and `new_tab` to such an address, a navigation
+  redirected to one and a proxy at one give `EGRESS_BLOCKED`. WebRTC and WebTransport are off the
+  network on both engines. `--egress-allow` makes exceptions (an IP, a CIDR, a name, `*.suffix`,
+  each with an optional `:port`), and `--egress-policy allow-all` turns the policy off. The desktop
+  has no policy and keeps its launch flags. **A token with the `raw` group can defeat this**:
+  `cdp_send` and `cdp_send_no_safety` are not gated, and on CloakBrowser a browser context from
+  `Target.createBrowserContext` with `proxyServer: "direct://"` was measured reaching a private
+  address. `token create` doesn't give `raw` unless asked.
+- **`multizen-server` cleans up after a crash.** It keeps a journal of its browsers and X servers
+  in `<data-dir>/run/state.json`. A `serve` or `stdio` that finds what a killed server left kills
+  those processes before opening its port, removes their locks, and keeps what was on disk. A
+  process is only killed on proof from its own command line: a recorded PID now running something
+  else is logged and left alone. On Linux a killed server's CloakBrowser browsers do stay behind.
+  On Windows they die with it, and Camoufox goes when its pipe closes, on both. The desktop has
+  no journal and no reaper.
+- **`multizen-server`: what a hostile page, token or file can't do to it.** Past 128 MiB of request
+  bodies in flight, counted as they arrive, or a token's quarter of that, a request gets 503
+  `RATE_LIMITED` with `Retry-After`. A body has 30 s to arrive, and revoking a token drops what it was
+  still sending. Anyone reaching the port can only hold sockets with no token, and those go oldest
+  first, past the larger of 256 and 4 × `--max-sessions` per address (`--trust-proxy` lifts that) and four
+  times that in all, with 10 s to send their headers, so they can't keep out someone with a token,
+  even from the same address. `timeout_ms` stops at 120 s and URLs at 8192 characters. One
+  profile's base64 uploads may take 1 GiB (`--upload-inbox-quota-bytes`), cleared at close and at the
+  next start. A browser's name lookups have 10 s, after up to 10 s waiting their turn, and its connections 30 s, with `UV_THREADPOOL_SIZE` at 64
+  from `bin/multizen-server.cjs` and the image (on Windows, set it before starting Node). The bridge logs
+  20 lines per 30 s at most. A server installs only CloakBrowser builds pinned with their SHA-256, and
+  fails closed where none is, as on linux-arm64. Its files are private to its user (umask 077, data
+  directory 0700), `server.lock` holds a hash of the command line, not the line, and tokens are refused
+  once `tokens.json` stays unreadable for 5 s. On import, an archive's `downloads/` and `uploads/` are
+  ignored. A `.mzar` is still code: its extensions load. Compose sets `pids_limit` 4096, and rotates
+  its log. `MULTIZEN_LOG_LEVEL` sets what is logged: the default, `info`, hides browsers' stderr.
+- **`stdio --connect` keeps its session.** It pings the server every `--keepalive-ms` (30000), so
+  an idle relay outlasts `--session-idle-ttl-ms`. When the session is gone anyway, because the server
+  restarted or the token was revoked, it says so on stderr and exits 1, instead of answering 404s.
+- **`scripts/detection-baseline`: what pages and servers can see of a browser here.** `run.ts`
+  launches a profile through the server's own runtime and records a probe page, the request
+  headers, a font list, every input tool as a page's event log sees it, JA4 and HTTP/2 from a local
+  sniffer, WebRTC against a local STUN responder, and self-hosted CreepJS and
+  rebrowser-bot-detector at pinned commits, each section `unavailable` with a reason rather than
+  failing the run. `compare.ts` turns two runs into a Markdown table, and fails on `HeadlessChrome`,
+  `webdriver: true` or `pointer: none` on a desktop persona. `matrix.ts` runs all of it, on Windows
+  and in the image of `docker build --target baseline`. Results and what they mean:
+  `docs/detection-baselines/README.md`.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.
   `list_profiles` now reports each profile's engine.
 
+### Changed
+
+- `navigate`'s errors name the origin only, on the desktop too, since messages get logged and a URL can
+  carry a token. `details.url` keeps the full URL.
+- MCP refuses a proxy host that couldn't connect as written, such as `169.254.169.254:80/#`. A
+  server's policy also wants a Unicode name in punycode.
+- `multizen-mcp` runs its mock driver only with `--mock`. Without it, it says how to run the real
+  server, and exits.
+- `launch_profile` reports a Camoufox browser's real `pid`, found from its command line, instead
+  of 0. It stays 0 if the search fails, which doesn't fail the launch.
+- MCP over HTTP takes requests of up to 22 MiB on both of its transports, so a large
+  `upload_file` also works over legacy SSE, which stopped at 4 MB. Streamable HTTP had no
+  limit. Larger requests get HTTP 413 with `FILE_TOO_LARGE`.
+- A browser that never answers at launch now fails with the end of what it wrote to
+  stderr in the message, so a missing library or a rejected flag is visible.
+- **`new_tab` makes the new tab the active one** on CloakBrowser profiles, in the
+  foreground, as it already was on Camoufox. Page tools (`navigate`, `click`,
+  `extract`, ...) now follow the active tab, which `activate_tab` also changes.
+  Before, they stayed on the first tab whatever was open. `list_tabs` reports
+  `activeTargetId`, and closing the first tab no longer ends the session.
+- **Page tools on Camoufox follow the active tab too.** They used to go to the tab
+  opened last, so a popup took them over. `new_tab` with a URL now returns without
+  waiting for it to load, as on CloakBrowser.
+- **`click_ref` and `type_ref` work on any tab and in any iframe**, cross-origin
+  included, and `extract` shows what is inside iframes. A ref stays the same while
+  its element lives. Once the element or its document is gone it fails with
+  `STALE_REF`. It used to be reassigned on every `extract`, so an old ref could
+  click a different element.
+- `navigate` fails with `NAVIGATION_FAILED` when the load fails. It used to report
+  success on a connection error page. On Camoufox it was a generic error.
+- **Tool calls on one profile now run one at a time**, in arrival order, across all
+  MCP sessions, so two agents can't interleave their clicks and keys on a page. A call
+  waits up to 30 s, with up to 16 in line, then gets a retryable `TIMEOUT`. `list_tabs`,
+  `list_dialogs`, `handle_dialog`, `request_human`, `wait_for_human` and the like don't
+  queue, `wait_*` holds the profile per poll only, and a client that cancels or
+  disconnects loses its place in line.
+- `close_profile` goes past that queue: whoever waited gets `PROFILE_NOT_RUNNING` at
+  once, and so does a call stuck on the page.
+- A single page tool call stops at 60 s with a retryable `TIMEOUT`, plus a little per
+  key when typing, on both engines.
+- Refs start at a different number each time a browser starts, so a ref kept across a
+  relaunch fails with `ELEMENT_NOT_FOUND` instead of naming another element.
+- On Camoufox, `extract` stops at 5000 lines of `ariaSnapshot` and 1 MB of text and
+  sets `truncated: true`.
+
+### Removed
+
+- `packages/mcp-server/scripts/test-cdp.ts`. It wasn't in CI and already failed most of its
+  checks. The tests of `cdp-driver`, `mcp-server` and `apps/server/scripts/e2e.ts` cover the same.
+
 ### Fixed
 
+- On Windows the engine's zip goes to Windows' own `tar`, by path. Started from Git Bash, `PATH` found Git's GNU
+  tar, which takes `C:\...` for a remote host, so a first start downloaded 562 MB over and over.
+- **A launch can no longer attach to the wrong browser.** Ports used to be handed out by counting
+  from 9222 and anything that answered was taken for ours, so with another browser on that port a
+  new profile drove someone else's cookies. A port now has to be free, and the browser on it has to
+  report the PID that was started. On the desktop only a positive mismatch fails a launch.
+- **Camoufox: `type_ref` and `press_key` on an element in a cross-origin iframe no longer
+  lose their keys** when focus was in the page around it: the click only gave the frame focus.
+- A Streamable HTTP client that disappeared without ending its session left its queued
+  calls in line, and they fired later on whatever the page showed by then.
+- On Camoufox, the call after a failed `navigate` could fail by itself: Firefox commits its
+  error page just after reporting the failure, which aborted the next `navigate` with
+  "interrupted by another navigation" or destroyed the context of the next `evaluate_js`. A failed
+  `navigate` or start page now comes back once that page has committed, within a second.
+- On Camoufox, a `navigate` right after `launch_profile` could fail with "interrupted by
+  another navigation" when the start page committed after it. A launch now waits for the
+  start page to commit, for up to 3 s.
+- A profile launched twice at once starts one browser, and closing a profile while it
+  launches closes what the launch brings up. Quitting during a launch no longer leaves
+  that browser running.
 - The New Profile sheet preselects the default engine from Settings instead of
   always CloakBrowser. Unless you pick another engine, the profile gets the
   current default.
@@ -36,14 +251,24 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 ### Known limitations
 
-- Camoufox has no CDP. This is intended: `click_ref`, `type_ref`, `cdp_send` and
-  `cdp_send_no_safety` always return an error there, and `request_human` cannot
-  bring the window forward. Use `click` / `type` with CSS selectors.
+- **On detection, a server is no worse than the desktop on Windows, and is worse on Linux, on both
+  engines, in every mode:** fonts, emoji, audio, devices, WebGL, and on one persona a CreepJS "like
+  headless" of 50 %. Numbers and which persona to use:
+  [`docs/detection-baselines/README.md`](docs/detection-baselines/README.md).
+- CloakBrowser gathers no WebRTC candidates at all, in any mode. That leaks no address, and is itself a
+  sign, since Chrome gives at least an mDNS one. Camoufox makes up most of its fingerprint afresh at
+  each launch, so one profile looks like a new device at each sign-in. Both are open, and neither is
+  new here.
+- A server has no CloakBrowser on linux-arm64: that release has no such asset to pin.
+- Camoufox has no CDP. This is intended: `cdp_send` and `cdp_send_no_safety` return
+  `UNSUPPORTED_ON_ENGINE` there. `request_human` restores a minimized window there, and Windows
+  may not let it take the foreground.
+- On Windows, a Camoufox window that is fully covered takes no input: page tools time
+  out until it is raised. The same condition on CloakBrowser gives
+  `INPUT_NOT_DELIVERED`.
 - Profiles created through MCP or imported on 0.10.0 still have no stored engine
   and follow the default. Picking an engine for such a profile in its edit sheet
   stores it.
-- Camoufox has still not been run live. The new MCP engine paths are covered by
-  unit tests only.
 
 ## [0.10.0] - 2026-10-31
 
