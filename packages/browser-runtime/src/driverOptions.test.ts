@@ -637,6 +637,7 @@ const HEADED_FLAGS = [
   "--fingerprint-gpu-renderer",
   "--fingerprint-brand-version",
   "--fingerprint-platform-version",
+  "--webrtc-ip-handling-policy",
   "--disable-features",
 ];
 
@@ -730,7 +731,11 @@ test("no policy and allow-all: the desktop's argv, flag for flag, direct and pro
         plain,
       );
       assert.equal(plain.some((a) => a.startsWith("--proxy")), false);
-      assert.equal(plain.some((a) => a.startsWith("--webrtc")), false);
+      // Direct: the srflx candidate (the address HTTP shows anyway), no host candidate.
+      assert.deepEqual(
+        plain.filter((a) => a.startsWith("--webrtc")),
+        ["--webrtc-ip-handling-policy=default_public_interface_only"],
+      );
       await stopAllBridges();
 
       pm.update(id, { proxy: { type: "socks5", host: "127.0.0.1", port: 1 } });
@@ -758,9 +763,17 @@ test("enforced, direct: exactly the three flags, and none of the proxied hardeni
       const added = bridged.filter((a) => !plain.includes(a));
       assert.equal(added.length, 3, added.join(" "));
       assert.match(added[0]!, /^--proxy-server=socks5:\/\/127\.0\.0\.1:\d+$/);
+      // The bridge can't see UDP, so the direct policy gives way to the proxied one.
       assert.equal(added[1], "--webrtc-ip-handling-policy=disable_non_proxied_udp");
       assert.equal(added[2], "--proxy-bypass-list=<-loopback>");
-      assert.deepEqual(bridged.filter((a) => !added.includes(a)), plain, "nothing else moved or changed");
+      const directPolicy = "--webrtc-ip-handling-policy=default_public_interface_only";
+      assert.ok(plain.includes(directPolicy));
+      assert.equal(bridged.includes(directPolicy), false);
+      assert.deepEqual(
+        bridged.filter((a) => !added.includes(a)),
+        plain.filter((a) => a !== directPolicy),
+        "nothing else moved or changed",
+      );
       assert.ok(bridged.includes("--disable-features=Translate"), "no proxy-only features");
       for (const flag of PROXIED_HARDENING.slice(1)) assert.ok(!bridged.includes(flag), flag);
     } finally {

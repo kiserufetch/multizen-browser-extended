@@ -584,12 +584,16 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       args.push(`--proxy-server=${localProxyUrl}`);
       // WebRTC leaks the *real* public IP via STUN even when HTTP traffic
       // is proxied — STUN uses UDP and bypasses HTTP proxies by default.
-      // `disable_non_proxied_udp` keeps WebRTC working but only over UDP
-      // that goes through the configured proxy; host candidates stay mDNS
-      // (`.local`) and no srflx candidate exposes the real public IP.
-      // Without this, browserscan / browserleaks / ipleak.net show the
-      // user's real IP next to the proxy IP. Only set when a proxy is
-      // configured — direct profiles intentionally expose their real IP.
+      // `disable_non_proxied_udp` allows UDP only through a proxy that
+      // carries it, and Chromium never sends UDP through a SOCKS proxy, so
+      // the page gathers no candidate at all (measured: none, and no STUN
+      // request). An empty gather is itself unusual, but every other policy
+      // sends STUN from the real interface, and --fingerprint-webrtc-ip (see
+      // above) does too. Better candidates need the engine: STUN through the
+      // proxy, or a srflx candidate made up from the proxy's address without
+      // sending STUN. Without this, browserscan / browserleaks / ipleak.net
+      // show the user's real IP next to the proxy IP. Direct profiles get
+      // their own policy below.
       //
       // Use the Chrome-level switch `--webrtc-ip-handling-policy` (defined
       // in chrome/common/chrome_switches.cc), NOT the content-layer
@@ -647,6 +651,16 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       });
       args.push(`--proxy-server=${localProxyUrl}`);
       args.push("--webrtc-ip-handling-policy=disable_non_proxied_udp");
+    } else {
+      // A direct profile shows its real public address over HTTP anyway, so a
+      // srflx candidate with that same address is coherent, not a leak. It must
+      // be asked for: CloakBrowser's own default gathers nothing at all (as
+      // disable_non_proxied_udp does), which stock Chrome never does. `default`
+      // is not an option either: CloakBrowser turns off the mDNS names Chrome
+      // gives host candidates, so it would hand pages the raw LAN address.
+      // default_public_interface_only gathers the srflx candidate and no host
+      // one — what Chrome does with uBlock Origin's WebRTC-leak setting on.
+      args.push("--webrtc-ip-handling-policy=default_public_interface_only");
     }
     // Chromium sends loopback straight past any proxy unless told not to, which would
     // leave a page this machine's own ports: this server's, the CDP port, the bridges'.
