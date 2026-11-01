@@ -750,12 +750,14 @@ async function flowBodies(): Promise<void> {
     });
 
     await attempt("N1 revoked mid-body", async () => {
-      const gone = tokenCreate("n1-gone", "read");
+      // A name per try: this row can repeat after a lost connect, with the first token still on file.
+      const goneName = `n1-gone-${randomBytes(4).toString("hex")}`;
+      const gone = tokenCreate(goneName, "read");
       const post = heldPost(port, gone, 10 * MIB, Buffer.alloc(MIB, 32));
       await within(post.written, 5_000);
       mustHaveConnected([post]);
       const started = performance.now();
-      const res = spawnSync(process.execPath, [CLI, "token", "revoke", "n1-gone", "--data-dir", DATA_DIR], {
+      const res = spawnSync(process.execPath, [CLI, "token", "revoke", goneName, "--data-dir", DATA_DIR], {
         encoding: "utf8",
         windowsHide: true,
       });

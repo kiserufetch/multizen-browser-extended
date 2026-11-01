@@ -739,6 +739,9 @@ async function stdioFlow(fixture: Fixture): Promise<void> {
   // The SDK's close() gives a child two seconds and then kills it. To read the
   // real exit code the EOF is sent by hand, on the transport's own child.
   const child = (transport as unknown as { _process: ChildProcess })._process;
+  // A failure below would otherwise leave this script waiting on it for good.
+  startedServers.add(child);
+  child.once("close", () => startedServers.delete(child));
   const exited = new Promise<number | null>((done) => child.on("close", (code) => done(code)));
 
   const created = await call(client, "create_profile", { name: "e2e-stdio", ...ENGINE_ARGS });

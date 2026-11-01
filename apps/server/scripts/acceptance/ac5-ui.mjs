@@ -23,7 +23,9 @@ const call = (tool, args = {}, who = "agent") => j("/call", { method: "POST", bo
 
 const launched = await call("launch_profile");
 check("launch", !launched.isError && !launched.failed, JSON.stringify(launched.body ?? launched).slice(0, 160));
-await call("navigate", { url: `http://127.0.0.1:${info.fixture.split(":").pop()}/page` });
+const loaded = await call("navigate", { url: `http://127.0.0.1:${info.fixture.split(":").pop()}/page` });
+// Everything below reads this page, and would otherwise fail without saying why.
+if (loaded.isError || loaded.failed) throw new Error(`navigate: ${JSON.stringify(loaded).slice(0, 300)}`);
 await j("/clear");
 await sleep(600);
 const positions = (await call("evaluate_js", { expression: `JSON.stringify(Object.fromEntries(["btn", "text"].map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return [id, [r.left + r.width / 2, r.top + r.height / 2]]; })).valueOf()) + "|" + innerWidth + "|" + innerHeight` })).body.result?.value;

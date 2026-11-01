@@ -1,7 +1,7 @@
 // The gate's tests on a machine whose loopback fails by itself (see "Local connections time out by themselves" in
 // apps/server/README.md): every workspace's test list, file by file, in test:unit's order. A test that fails is rerun by
 // name, and everything it failed on is printed. Anything but a connect timeout, or a test that keeps failing, shows as what
-// it is. A pass here is weaker than a whole `corepack yarn test:unit`, and a Linux container (gate-linux.sh) is the one that
+// it is. A pass here is weaker than a whole `corepack yarn test:unit`, and a Linux container (gate-linux.mjs) is the one that
 // counts. Exit 0 when nothing is left failing.
 //
 //   node apps/server/scripts/acceptance/gate-by-file.mjs

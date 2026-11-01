@@ -1027,25 +1027,32 @@ test("TLS through the bundle: https works, and the /readyz behind it knows the e
   try {
     assert.match(serve.stdout(), /"url":"https:\/\/127\.0\.0\.1:/);
     const token = readFileSync(serve.tokenFile, "utf8");
-    const reply = await new Promise<{ status: number; text: string }>((resolve, reject) => {
-      const req = httpsRequest(
-        {
-          host: "127.0.0.1",
-          port: new URL(serve.url).port,
-          path: "/readyz",
-          ca: readFileSync(cert),
-          headers: { authorization: `Bearer ${token}` },
-        },
-        (res) => {
-          let text = "";
-          res.setEncoding("utf8");
-          res.on("data", (chunk: string) => (text += chunk));
-          res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
-        },
-      );
-      req.on("error", reject);
-      req.end();
-    });
+    const readyz = (): Promise<{ status: number; text: string }> =>
+      new Promise((resolve, reject) => {
+        const req = httpsRequest(
+          {
+            host: "127.0.0.1",
+            port: new URL(serve.url).port,
+            path: "/readyz",
+            ca: readFileSync(cert),
+            headers: { authorization: `Bearer ${token}` },
+          },
+          (res) => {
+            let text = "";
+            res.setEncoding("utf8");
+            res.on("data", (chunk: string) => (text += chunk));
+            res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    // The server listens before it has looked at the engine in its cache, and says so with a 503 until then.
+    let reply = await readyz();
+    for (let tries = 0; reply.status === 503 && tries < 100; tries++) {
+      await new Promise((done) => setTimeout(done, 100));
+      reply = await readyz();
+    }
     assert.equal(reply.status, 200, reply.text);
     const ready = JSON.parse(reply.text) as Record<string, unknown>;
     assert.equal(ready.ready, true);
