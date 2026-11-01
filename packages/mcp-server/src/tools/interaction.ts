@@ -236,10 +236,12 @@ async function uploadFile(args: Record<string, unknown>, ctx: ToolContext): Prom
         paths.push(file.path!);
         continue;
       }
-      await mkdir(inbox, { recursive: true });
-      const path = join(inbox, `${randomUUID()}-${safeUploadName(file.fileName)}`);
+      // A directory per file, so the page's File.name is the name it was sent under.
+      const dir = join(inbox, randomUUID());
+      await mkdir(dir, { recursive: true });
+      written.push(dir);
+      const path = join(dir, safeUploadName(file.fileName));
       await writeFile(path, file.bytes, { mode: 0o600, flag: "wx" });
-      written.push(path);
       paths.push(path);
     }
     await ctx.browserDriver.performAction(id, {
@@ -248,7 +250,7 @@ async function uploadFile(args: Record<string, unknown>, ctx: ToolContext): Prom
       paths,
     });
   } catch (e) {
-    await Promise.all(written.map((path) => rm(path, { force: true })));
+    await Promise.all(written.map((dir) => rm(dir, { recursive: true, force: true })));
     throw e;
   }
   return {

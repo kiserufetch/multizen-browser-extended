@@ -75,6 +75,7 @@ Not measured: whether the feature is off in the same way for Camoufox, which has
 `packages/cdp-driver/src/CdpSession.ts`:
 
 - Before dispatching, the input methods arm a probe in an isolated world (`Page.createIsolatedWorld` on the main frame, world `mz_input_probe`). It listens on `window` in the capture phase and counts trusted presses, releases and keydowns. Page script cannot see the isolated world's globals or listeners, and the page's main world is never touched. No launch flag was added.
+- A ref action inside an iframe arms the probe in that frame's isolated world, on that frame's session: the main frame's window sees nothing of what goes to a child frame, same-process or cross-origin (server mode work). `press_key` with no target arms one in every frame, since the key goes wherever focus is. `hover` and `scroll` are not checked: mouse moves arrive even on a page dropping presses, and wheel events are not counted.
 - A click must produce both a press and a release. Typing must produce one keydown per character (Shift is not counted).
 - If the probe's context is gone, the input replaced the document (a link or a submitting Enter), so it counts as delivered.
 - If the input did not arrive, the method throws `InputNotDeliveredError`. When the page is hidden, the message names that and says to bring the window to the front with `cdp_send Page.bringToFront` and retry.

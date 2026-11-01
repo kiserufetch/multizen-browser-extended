@@ -35,6 +35,21 @@ export class TargetRegistry {
     return true;
   }
 
+  /**
+   * Track a page nobody chose yet: a popup, a tab the operator opened. It ranks
+   * below every page that has been in use, so closing the active page doesn't land
+   * on it. Otherwise like {@link upsert}.
+   */
+  addIdle(record: TargetRecord): boolean {
+    if (record.type !== "page") return false;
+    const used = [...this.pages].filter(([id]) => id !== record.targetId);
+    this.pages.clear();
+    this.pages.set(record.targetId, { ...record });
+    for (const [id, page] of used) this.pages.set(id, page);
+    if (this.activeId === null) this.activeId = record.targetId;
+    return true;
+  }
+
   /** Remove a target. If it was active, re-select a replacement. */
   remove(targetId: string): void {
     const wasActive = this.activeId === targetId;

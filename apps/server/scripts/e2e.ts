@@ -5,7 +5,8 @@
  *
  *   corepack yarn workspace @multizen/server build
  *   corepack yarn workspace @multizen/server exec tsx scripts/e2e.ts \
- *     --data-dir %TEMP%\mzts2 --engine-version-dir <dir with chrome.exe> [--keep]
+ *     --data-dir %TEMP%\mzts2 --engine-version-dir <dir with chrome.exe> \
+ *     [--engine cloakbrowser] [--flows http,sigint,stdio,tabs] [--keep]
  *
  * --engine-version-dir links an installed engine into the temp data dir through a
  * junction on the version directory only, so nothing the server does to its own
@@ -19,7 +20,9 @@
  * refuse the lock. A stdio --connect client reaches the same server. Ctrl+Break and
  * Ctrl+C with a browser running each exit 0 and leave no process behind. A plain
  * stdio client launches a browser with stdout staying valid JSON-RPC, and stdin
- * EOF exits 0 and leaves no process behind.
+ * EOF exits 0 and leaves no process behind. The tabs flow runs real input against
+ * local pages in a main frame, a same-process iframe, a cross-origin iframe and one
+ * nested in that, and asserts each page's own handler reported back to the fixture.
  *
  * Windows only: the signal delivery, the junction and the process scan all are.
  */
@@ -38,6 +41,8 @@ const { values } = parseArgs({
   options: {
     "data-dir": { type: "string" },
     "engine-version-dir": { type: "string" },
+    engine: { type: "string" },
+    flows: { type: "string" },
     keep: { type: "boolean" },
   },
 });
@@ -49,6 +54,8 @@ const APP_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = join(APP_ROOT, "dist", "cli.js");
 if (!existsSync(CLI)) throw new Error(`${CLI} is missing: build the server first`);
 
+const FLOWS = (values.flows ?? "http,sigint,stdio,tabs").split(",");
+const ENGINE_ARGS = values.engine ? { engine: values.engine } : {};
 const ENGINE_INSTALL_BUDGET_MS = 15 * 60_000;
 const CTRL_C_EXIT_BUDGET_MS = 30_000;
 const results: Array<{ check: string; observed: string }> = [];
@@ -370,7 +377,7 @@ async function httpFlow(fixture: Fixture): Promise<string> {
   const serve = await startServe();
   try {
     const client = await httpClient(serve.url, serve.token);
-    const created = await call(client, "create_profile", { name: "e2e" });
+    const created = await call(client, "create_profile", { name: "e2e", ...ENGINE_ARGS });
     const id = String(created.id);
     pass("create_profile", id);
 
@@ -546,7 +553,7 @@ async function stdioFlow(fixture: Fixture): Promise<void> {
   const child = (transport as unknown as { _process: ChildProcess })._process;
   const exited = new Promise<number | null>((done) => child.on("close", (code) => done(code)));
 
-  const created = await call(client, "create_profile", { name: "e2e-stdio" });
+  const created = await call(client, "create_profile", { name: "e2e-stdio", ...ENGINE_ARGS });
   const id = String(created.id);
   await launch(client, id);
   await call(client, "navigate", { profile_id: id, url: fixture.url });
@@ -569,13 +576,709 @@ async function stdioFlow(fixture: Fixture): Promise<void> {
   await client.close();
 }
 
+// ── Tabs, frames and page actions ────────────────────────────────────────────
+
+/** Every page reports to the fixture from its own handlers: nothing here reads the page. */
+const SITE_REPORTING = (frame: string): string => `<script>
+  const FRAME = ${JSON.stringify(frame)};
+  function hit(what, value) {
+    fetch("/hit?frame=" + FRAME + "&what=" + encodeURIComponent(what) +
+      "&value=" + encodeURIComponent(value === undefined ? "" : String(value)), { mode: "no-cors" });
+  }
+  let scrollTimer;
+  addEventListener("scroll", () => {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => hit("scrolled", Math.round(scrollY)), 100);
+  }, { passive: true });
+  addEventListener("keydown", (e) => {
+    hit("key", (e.ctrlKey ? "Ctrl+" : "") + (e.shiftKey ? "Shift+" : "") + e.key);
+  }, true);
+  addEventListener("load", () => hit("loaded"));
+</script>`;
+
+const controls = (name: string): string => `
+  <button onclick="hit('click')">${name} button</button>
+  <input aria-label="${name} input" oninput="hit('type', this.value)">
+  <select aria-label="${name} select" onchange="hit('select', this.value)" oninput="hit('select-input', this.value)">
+    <option value="a">Alpha</option><option value="b">Bravo</option>
+  </select>
+  <button onmouseover="hit('hover')">${name} hover</button>
+  <input type="file" aria-label="${name} file" onchange="hit('upload', this.files[0].name + ':' + this.files[0].size)">
+  <input type="file" id="hidden-file" style="display:none" onchange="hit('chooser', this.files[0].name)">
+  <button onclick="document.getElementById('hidden-file').click()">${name} chooser</button>`;
+
+function page(title: string, frame: string, body: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>${SITE_REPORTING(frame)}</head><body>${body}</body></html>`;
+}
+
+interface Hit {
+  frame: string;
+  what: string;
+  value: string;
+}
+
+interface Site {
+  /** Same origin as the main page, and on a host of its own. */
+  parent: string;
+  child: string;
+  nested: string;
+  hits: Hit[];
+  waitHit(frame: string, what: string, value?: string): Promise<Hit>;
+  close(): Promise<void>;
+}
+
+/** Three hosts, so three sites: 127.0.0.1 embeds localhost, which embeds 127.0.0.2. */
+async function startSite(): Promise<Site> {
+  const hits: Hit[] = [];
+  let port = 0;
+  const handler = (req: IncomingMessage, res: ServerResponse): void => {
+    const url = new URL(req.url ?? "/", "http://x");
+    if (url.pathname === "/hit") {
+      hits.push({
+        frame: url.searchParams.get("frame") ?? "",
+        what: url.searchParams.get("what") ?? "",
+        value: url.searchParams.get("value") ?? "",
+      });
+      res.writeHead(204).end();
+      return;
+    }
+    if (url.pathname === "/file") {
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-disposition": 'attachment; filename="../report.txt"',
+      });
+      res.end("downloaded-bytes");
+      return;
+    }
+    const html: Record<string, string> = {
+      "/main": page(
+        "S5 main",
+        "main",
+        `<h1>Main</h1>${controls("Main")}
+        <a href="/file">Download report</a>
+        <button onclick="hit('confirm', confirm('Sure?'))">Confirm button</button>
+        <button onclick="hit('prompt', prompt('Name?', 'nobody'))">Prompt button</button>
+        <button onclick="alert('hello'); hit('alert-closed')">Alert button</button>
+        <button onclick="window.open('/popup?n=1'); hit('opened')">Popup button</button>
+        <button onclick="window.open('/popup?n=2', '_blank', 'noopener'); hit('opened')">Noopener popup</button>
+        <button onclick="document.getElementById('gone').remove()">Remove below</button>
+        <button id="gone">Removed button</button>
+        <iframe title="Same frame" src="/same" style="width:420px;height:160px"></iframe>
+        <iframe title="Child frame" src="http://localhost:${port}/child" style="width:520px;height:300px;border:7px solid red;padding:3px"></iframe>
+        <div style="height:2000px"></div>
+        <button onclick="hit('bottom')">Bottom button</button>`,
+      ),
+      "/same": page(
+        "S5 same",
+        "same",
+        `${controls("Same")}<div style="height:600px"></div><button onclick="hit('bottom')">Same bottom</button>`,
+      ),
+      "/child": page(
+        "S5 child",
+        "child",
+        `${controls("Child")}
+        <button onclick="hit('confirm', confirm('From the frame?'))">Child confirm</button>
+        <iframe title="Nested frame" src="http://127.0.0.2:${port}/nested" style="width:440px;height:120px"></iframe>
+        <div style="height:800px"></div>
+        <button onclick="hit('bottom')">Child bottom</button>`,
+      ),
+      "/nested": page("S5 nested", "nested", controls("Nested")),
+      "/tab2": page(
+        "S5 tab two",
+        "tab2",
+        `<button onclick="hit('click')">Tab two button</button>
+        <input aria-label="Tab two input" oninput="hit('type', this.value)">`,
+      ),
+      "/popup": page("S5 popup", "popup", `<p>Popup</p>`),
+      "/other": page("S5 other", "other", `<button onclick="hit('click')">Main button</button>`),
+    };
+    const body = html[url.pathname];
+    if (body === undefined) {
+      res.writeHead(404).end();
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(body);
+  };
+  const first = createHttpServer(handler);
+  await new Promise<void>((done) => first.listen(0, "127.0.0.1", done));
+  port = (first.address() as AddressInfo).port;
+  const second = createHttpServer(handler);
+  await new Promise<void>((done) => second.listen(port, "127.0.0.2", done));
+  return {
+    parent: `http://127.0.0.1:${port}`,
+    child: `http://localhost:${port}`,
+    nested: `http://127.0.0.2:${port}`,
+    hits,
+    async waitHit(frame, what, value) {
+      let found: Hit | undefined;
+      const matches = (h: Hit): boolean =>
+        h.frame === frame && h.what === what && (value === undefined || h.value === value);
+      await waitFor(
+        () => (found = hits.find(matches)) !== undefined,
+        `${frame}'s handler for ${what}${value === undefined ? "" : ` = ${value}`}. Hits: ${JSON.stringify(hits.slice(-8))}`,
+        8_000,
+      );
+      hits.splice(hits.indexOf(found!), 1);
+      return found!;
+    },
+    close: () =>
+      Promise.all(
+        [first, second].map(
+          (server) =>
+            new Promise<void>((done) => {
+              server.closeAllConnections();
+              server.close(() => done());
+            }),
+        ),
+      ).then(() => {}),
+  };
+}
+
+function findByName(nodes: AxNode[], name: string): AxNode | null {
+  for (const node of nodes) {
+    if (node.name === name) return node;
+    const inChild = findByName(node.children ?? [], name);
+    if (inChild) return inChild;
+  }
+  return null;
+}
+
+function refOf(tree: AxNode[], name: string): string {
+  const ref = findByName(tree, name)?.ref;
+  expect(ref, `extract gave no ref for "${name}"`);
+  return ref;
+}
+
+interface TabList {
+  targetInfos: Array<{ targetId: string; type: string; url: string }>;
+  activeTargetId: string;
+}
+
+async function waitForDialog(client: Client, id: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const { dialogs } = (await call(client, "list_dialogs", { profile_id: id })) as unknown as {
+      dialogs: unknown[];
+    };
+    if (dialogs.length > 0) return;
+    await new Promise((done) => setTimeout(done, 50));
+  }
+  throw new Error("FAILED: the dialog never opened");
+}
+
+async function tabsFlow(): Promise<void> {
+  const site = await startSite();
+  const serve = await startServe();
+  try {
+    const client = await httpClient(serve.url, serve.token);
+    const id = String((await call(client, "create_profile", { name: "e2e-tabs", ...ENGINE_ARGS })).id);
+    const profile = { profile_id: id };
+    await launch(client, id);
+
+    const extract = async (): Promise<AxNode[]> =>
+      ((await call(client, "extract", profile)).result as { accessibilityTree: AxNode[] })
+        .accessibilityTree;
+    const tabs = async (): Promise<TabList> =>
+      (await call(client, "list_tabs", profile)) as unknown as TabList;
+    const evaluate = async (expression: string): Promise<unknown> =>
+      ((await call(client, "evaluate_js", { ...profile, expression })).result as { value?: unknown })
+        ?.value;
+    const act = (name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> =>
+      call(client, name, { ...profile, ...args });
+    const code = async (name: string, args: Record<string, unknown>): Promise<string> =>
+      String((await callError(client, name, { ...profile, ...args })).code);
+    /** The tree once every frame's content is there: frames load after their parent. */
+    const extractUntil = async (name: string): Promise<AxNode[]> => {
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const tree = await extract();
+        if (findByName(tree, name)) return tree;
+        expect(Date.now() < deadline, `"${name}" never appeared: ${JSON.stringify(tree).slice(0, 1500)}`);
+        await new Promise((done) => setTimeout(done, 200));
+      }
+    };
+
+    const nav = await act("navigate", { url: `${site.parent}/main` });
+    pass("navigate to the framed page", String(nav.url));
+    let tree = await extractUntil("Nested button");
+    await site.waitHit("nested", "loaded");
+
+    // ── targets and refs ──
+    const targets = await tabs();
+    const iframes = targets.targetInfos.filter((t) => t.type === "iframe");
+    expect(
+      iframes.some((t) => t.url.startsWith(site.child)) && iframes.some((t) => t.url.startsWith(site.nested)),
+      `no OOPIF targets: ${JSON.stringify(targets.targetInfos)}`,
+    );
+    expect(!iframes.some((t) => t.url.endsWith("/same")), "the same-origin frame should not be a target");
+    pass("type:iframe targets exist", iframes.map((t) => t.url).join(", "));
+    const firstTab = targets.activeTargetId;
+    expect(
+      targets.targetInfos.some((t) => t.targetId === firstTab && t.type === "page"),
+      "activeTargetId is not a page",
+    );
+    pass("list_tabs reports activeTargetId", firstTab);
+
+    const frames = ["Main", "Same", "Child", "Nested"];
+    const refs = Object.fromEntries(frames.map((f) => [f, refOf(tree, `${f} button`)]));
+    pass("extract gives refs in all four frames", JSON.stringify(refs));
+    const childFrame = findByName(tree, "Child frame");
+    expect(
+      childFrame?.role === "Iframe" &&
+        findByName(childFrame.children ?? [], "Child button") &&
+        findByName(findByName(childFrame.children ?? [], "Nested frame")?.children ?? [], "Nested button"),
+      `frames are not stitched under their owners: ${JSON.stringify(childFrame).slice(0, 800)}`,
+    );
+    const buttons = (nodes: AxNode[], name: string): number =>
+      nodes.reduce(
+        (n, node) => n + (node.role === "button" && node.name === name ? 1 : 0) + buttons(node.children ?? [], name),
+        0,
+      );
+    for (const name of frames) expect(buttons(tree, `${name} button`) === 1, `${name} button appears twice`);
+    pass("each frame's tree hangs under its owner, once", "Iframe > Iframe > Nested button");
+
+    const firstLocale = await evaluate("Intl.DateTimeFormat().resolvedOptions().locale");
+    const realDpr = await evaluate("window.devicePixelRatio");
+    pass("devicePixelRatio of this run", String(realDpr));
+
+    // ── click and type in each frame ──
+    for (const name of frames) {
+      const frame = name.toLowerCase();
+      await act("click_ref", { ref: refOf(tree, `${name} button`) });
+      await site.waitHit(frame, "click");
+      await act("type_ref", { ref: refOf(tree, `${name} input`), text: `Hi ${name}!` });
+      await site.waitHit(frame, "type", `Hi ${name}!`);
+      site.hits.length = 0;
+      pass(`click_ref and type_ref in the ${frame} frame`, "its own handlers fired");
+    }
+
+    // ── scrolled page and scrolled frames ──
+    await act("click_ref", { ref: refOf(tree, "Bottom button") });
+    await site.waitHit("main", "bottom");
+    const pageScrollY = await evaluate("window.scrollY");
+    expect(Number(pageScrollY) > 0, `the page did not scroll: ${String(pageScrollY)}`);
+    pass("click_ref below the fold scrolls the page", `scrollY ${String(pageScrollY)}`);
+
+    // Back up, part way, so the frames are in view with the page still scrolled.
+    await act("scroll", { delta_y: -Number(pageScrollY) + 120 });
+    await new Promise((done) => setTimeout(done, 400));
+    const scrolledBy = Number(await evaluate("window.scrollY"));
+    expect(scrolledBy > 0, `wheel scrolled to ${scrolledBy}`);
+    for (const name of ["Same", "Child", "Nested"]) {
+      await act("click_ref", { ref: refOf(tree, `${name} button`) });
+      await site.waitHit(name.toLowerCase(), "click");
+    }
+    pass("click_ref into frames with the page scrolled", `page scrollY ${scrolledBy} at the start`);
+
+    await act("click_ref", { ref: refOf(tree, "Child bottom") });
+    await site.waitHit("child", "bottom");
+    await act("click_ref", { ref: refOf(tree, "Same bottom") });
+    await site.waitHit("same", "bottom");
+    await site.waitHit("child", "scrolled");
+    await act("click_ref", { ref: refOf(tree, "Child button") });
+    await site.waitHit("child", "click");
+    await act("click_ref", { ref: refOf(tree, "Nested button") });
+    await site.waitHit("nested", "click");
+    pass("click_ref in scrolled frames, there and back", "same-process and OOPIF");
+
+    // ── device scale factor: no fingerprint path sets one, so CDP emulation stands in ──
+    await act("cdp_send", {
+      method: "Emulation.setDeviceMetricsOverride",
+      params: { width: 0, height: 0, deviceScaleFactor: 1.75, mobile: false },
+    });
+    const scaled = await evaluate("window.devicePixelRatio");
+    expect(scaled === 1.75, `devicePixelRatio ${String(scaled)}`);
+    for (const name of frames) {
+      await act("click_ref", { ref: refOf(tree, `${name} button`) });
+      await site.waitHit(name.toLowerCase(), "click");
+    }
+    await act("cdp_send", { method: "Emulation.clearDeviceMetricsOverride", params: {} });
+    pass("click_ref in all four frames at an emulated scale factor", `devicePixelRatio ${String(scaled)}`);
+    site.hits.length = 0;
+
+    // ── keys ──
+    await act("click_ref", { ref: refOf(tree, "Main input") });
+    site.hits.length = 0;
+    await act("press_key", { key: "Control+A" });
+    await site.waitHit("main", "key", "Ctrl+a");
+    await act("press_key", { key: "Enter" });
+    await site.waitHit("main", "key", "Enter");
+    await act("press_key", { key: "Shift+B" });
+    await site.waitHit("main", "key", "Shift+B");
+    pass("press_key with no target", "Control+A, Enter and Shift+B reached the page");
+    const selection = await evaluate(
+      "(() => { const i = document.querySelector('input[aria-label=\"Main input\"]'); return i.value; })()",
+    );
+    expect(selection === "B", `Control+A then Shift+B should replace the text, got ${String(selection)}`);
+    pass("the chord did what a keyboard does", `the input holds "${String(selection)}"`);
+
+    await act("press_key", { key: "Tab", ref: refOf(tree, "Child input") });
+    await site.waitHit("child", "key", "Tab");
+    await act("click_ref", { ref: refOf(tree, "Nested input") });
+    site.hits.length = 0;
+    await act("press_key", { key: "Enter" });
+    await site.waitHit("nested", "key", "Enter");
+    pass("press_key lands in frames", "with a ref in the OOPIF; with focus in the nested OOPIF");
+
+    // ── hover, select, scroll ──
+    for (const name of ["Main", "Same", "Child", "Nested"]) {
+      await act("hover", { ref: refOf(tree, `${name} hover`) });
+      await site.waitHit(name.toLowerCase(), "hover");
+    }
+    pass("hover in all four frames", "mouseover handlers fired");
+
+    await act("select_option", { ref: refOf(tree, "Main select"), label: "Bravo" });
+    await site.waitHit("main", "select", "b");
+    await site.waitHit("main", "select-input", "b");
+    await act("select_option", { selector: "select", value: "a" });
+    await site.waitHit("main", "select", "a");
+    await act("select_option", { ref: refOf(tree, "Child select"), index: 1 });
+    await site.waitHit("child", "select", "b");
+    const noOption = await code("select_option", { ref: refOf(tree, "Main select"), value: "zzz" });
+    expect(noOption === "ELEMENT_NOT_FOUND", `select_option with no such value: ${noOption}`);
+    const notSelect = await code("select_option", { ref: refOf(tree, "Main button"), index: 0 });
+    expect(notSelect === "INVALID_INPUT", `select_option on a button: ${notSelect}`);
+    pass("select_option", "main and OOPIF; handlers fired; missing option and non-select refused");
+
+    site.hits.length = 0;
+    await act("scroll", { ref: refOf(tree, "Main button"), delta_y: 150 });
+    const wheelPage = await site.waitHit("main", "scrolled");
+    await act("scroll", { ref: refOf(tree, "Child button"), delta_y: 90 });
+    const wheelFrame = await site.waitHit("child", "scrolled");
+    await act("scroll", { ref: refOf(tree, "Bottom button") });
+    await site.waitHit("main", "scrolled");
+    pass("scroll by wheel and into view", `page to ${wheelPage.value}, OOPIF to ${wheelFrame.value}`);
+
+    // ── upload ──
+    const hello = Buffer.from("hello").toString("base64");
+    const upload = (target: Record<string, unknown>, file_name: string): Promise<Record<string, unknown>> =>
+      act("upload_file", { ...target, files: [{ file_name, data_base64: hello }] });
+    await upload({ ref: refOf(tree, "Main file") }, "real-name.txt");
+    await site.waitHit("main", "upload", "real-name.txt:5");
+    await upload({ ref: refOf(tree, "Child file") }, "in oopif.txt");
+    await site.waitHit("child", "upload", "in oopif.txt:5");
+    pass("upload_file sets the real name", "the page saw real-name.txt:5, and in oopif.txt:5 in the OOPIF");
+    await upload({ ref: refOf(tree, "Main chooser") }, "chosen.txt");
+    await site.waitHit("main", "chooser", "chosen.txt");
+    await upload({ ref: refOf(tree, "Same chooser") }, "chosen-too.txt");
+    await site.waitHit("same", "chooser", "chosen-too.txt");
+    pass("upload_file through a file chooser", "main and same-process frames' change handlers saw it");
+    const oopifChooser = await code("upload_file", {
+      ref: refOf(tree, "Child chooser"),
+      files: [{ file_name: "x.txt", data_base64: hello }],
+    });
+    expect(oopifChooser === "INVALID_INPUT", `a chooser in an OOPIF: ${oopifChooser}`);
+    pass("upload_file through a chooser in an OOPIF is refused, nothing clicked", oopifChooser);
+    const notAllowed = await code("upload_file", {
+      ref: refOf(tree, "Main file"),
+      files: [{ file_name: "C:\\Windows\\win.ini" }],
+    });
+    expect(notAllowed === "FILE_NOT_ALLOWED", `a host path: ${notAllowed}`);
+
+    // ── download ──
+    await act("click_ref", { ref: refOf(tree, "Download report") });
+    let download: { id: string; fileName: string; state: string; url: string } | undefined;
+    await (async () => {
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        const { downloads } = (await act("list_downloads", {})) as unknown as {
+          downloads: Array<{ id: string; fileName: string; state: string; url: string }>;
+        };
+        download = downloads[0];
+        if (download?.state === "completed") return;
+        await new Promise((done) => setTimeout(done, 200));
+      }
+    })();
+    expect(download?.state === "completed", `download state: ${JSON.stringify(download)}`);
+    expect(/^[^\\/]*report\.txt$/.test(download?.fileName ?? ""), `a hostile name came through: ${download?.fileName}`);
+    expect(download?.url === `${site.parent}/file`, `download url ${download?.url}`);
+    const got = (await act("get_download", { download_id: download!.id })) as { data_base64?: string };
+    const bytes = Buffer.from(got.data_base64 ?? "", "base64").toString();
+    expect(bytes === "downloaded-bytes", `get_download gave "${bytes}"`);
+    expect(!JSON.stringify(got).includes(DATA_DIR.replace(/\\/g, "\\\\")), "a host path reached the agent");
+    pass("download through list_downloads and get_download", `${download?.fileName}, "${bytes}"`);
+
+    // ── dialogs: the default policy ──
+    site.hits.length = 0;
+    await act("click_ref", { ref: refOf(tree, "Alert button") });
+    await site.waitHit("main", "alert-closed");
+    await act("click_ref", { ref: refOf(tree, "Confirm button") });
+    await site.waitHit("main", "confirm", "false");
+    pass("auto policy", "alert answered, confirm dismissed, as before");
+
+    // ── dialogs: manual ──
+    await act("set_dialog_policy", { mode: "manual" });
+    const clickedAt = Date.now();
+    await act("click_ref", { ref: refOf(tree, "Confirm button") });
+    const { dialogs } = (await act("list_dialogs", {})) as unknown as {
+      dialogs: Array<{ id: string; type: string; message: string }>;
+    };
+    expect(dialogs[0]?.type === "confirm" && dialogs[0].message === "Sure?", JSON.stringify(dialogs));
+    pass("a click that opens a dialog returns", `${Date.now() - clickedAt} ms, list_dialogs: ${JSON.stringify(dialogs[0])}`);
+
+    const blockedAt = Date.now();
+    for (const [tool, args] of [
+      ["screenshot", {}],
+      ["extract", {}],
+      ["click_ref", { ref: refOf(tree, "Main button") }],
+      ["type_ref", { ref: refOf(tree, "Main input"), text: "x" }],
+      ["click", { selector: "button" }],
+      ["press_key", { key: "Enter" }],
+      ["hover", { ref: refOf(tree, "Main button") }],
+      ["evaluate_js", { expression: "1" }],
+      ["navigate", { url: `${site.parent}/other` }],
+    ] as const) {
+      const shot = await rawCall(client, tool, { ...profile, ...args });
+      const body = JSON.parse(shot.content[0]?.text ?? "{}") as { error?: { code?: string } };
+      expect(shot.isError && body.error?.code === "DIALOG_OPEN", `${tool}: ${shot.content[0]?.text}`);
+    }
+    const blockedMs = Date.now() - blockedAt;
+    expect(blockedMs < 5_000, `DIALOG_OPEN took ${blockedMs} ms`);
+    pass("DIALOG_OPEN with a dialog open, screenshot and extract included", `9 calls in ${blockedMs} ms`);
+
+    await act("handle_dialog", { action: "accept" });
+    await site.waitHit("main", "confirm", "true");
+    await act("click_ref", { ref: refOf(tree, "Prompt button") });
+    await act("handle_dialog", { action: "accept", prompt_text: "Ann" });
+    await site.waitHit("main", "prompt", "Ann");
+    pass("handle_dialog", "confirm accepted, prompt answered; the page's handlers saw both");
+
+    // A dialog left open is answered when the policy goes back to auto.
+    await act("click_ref", { ref: refOf(tree, "Confirm button") });
+    await act("set_dialog_policy", { mode: "auto" });
+    await site.waitHit("main", "confirm", "false");
+    const shot = await rawCall(client, "screenshot", profile);
+    expect(!shot.isError, `screenshot after the dialogs: ${shot.content[0]?.text}`);
+    pass("back to auto", "the open dialog answered, screenshot works again");
+
+    await act("click_ref", { ref: refOf(tree, "Child confirm") });
+    await site.waitHit("child", "confirm", "false");
+    await act("set_dialog_policy", { mode: "manual" });
+    await act("click_ref", { ref: refOf(tree, "Child confirm") });
+    const framed = (await act("list_dialogs", {})) as unknown as { dialogs: Array<{ message: string }> };
+    expect(framed.dialogs[0]?.message === "From the frame?", JSON.stringify(framed));
+    const inFrame = await code("screenshot", {});
+    expect(inFrame === "DIALOG_OPEN", `screenshot with an OOPIF's dialog open: ${inFrame}`);
+    await act("handle_dialog", { action: "accept" });
+    await site.waitHit("child", "confirm", "true");
+    await act("set_dialog_policy", { mode: "auto" });
+    pass("a dialog in an OOPIF", "auto dismisses it; manual lists it, DIALOG_OPEN, handle_dialog accepts");
+
+    // ── refs: alive, removed, navigated ──
+    tree = await extract();
+    const again = await extract();
+    for (const name of ["Main button", "Child button", "Nested button"]) {
+      expect(refOf(again, name) === refOf(tree, name), `${name} changed ref between extracts`);
+      expect(refs[name.split(" ")[0]!] === refOf(tree, name), `${name} changed ref since the first extract`);
+    }
+    await act("click_ref", { ref: refs.Child });
+    await site.waitHit("child", "click");
+    pass("an old ref after re-extract", `${refs.Child} is the same element, and still clicks it`);
+
+    const removed = refOf(tree, "Removed button");
+    await act("click_ref", { ref: refOf(tree, "Remove below") });
+    const removedCode = await code("click_ref", { ref: removed });
+    expect(removedCode === "STALE_REF", `a removed element's ref: ${removedCode}`);
+    pass("a removed element's ref", removedCode);
+
+    const unknownRef = await code("click_ref", { ref: "e99999999" });
+    expect(unknownRef === "ELEMENT_NOT_FOUND", `a ref never issued: ${unknownRef}`);
+
+    // ── a second tab ──
+    site.hits.length = 0;
+    const tab2 = String((await act("new_tab", {})).targetId);
+    await act("navigate", { url: `${site.parent}/tab2` });
+    let list = await tabs();
+    expect(list.activeTargetId === tab2, "new_tab did not make its tab active");
+    pass("new_tab followed at once by navigate", `active is ${tab2}, ${list.targetInfos.find((t) => t.targetId === tab2)?.url}`);
+    const tab2Tree = await extract();
+    const tab2Button = refOf(tab2Tree, "Tab two button");
+    await act("click_ref", { ref: tab2Button });
+    await site.waitHit("tab2", "click");
+    await act("type_ref", { ref: refOf(tab2Tree, "Tab two input"), text: "second" });
+    await site.waitHit("tab2", "type", "second");
+    pass("click_ref and type_ref on the second tab", tab2Button);
+    const secondLocale = await evaluate("Intl.DateTimeFormat().resolvedOptions().locale");
+    expect(secondLocale === firstLocale, `locale on the second tab: ${String(secondLocale)}`);
+    pass("the second tab has the persona's locale too", String(secondLocale));
+
+    await act("activate_tab", { target_id: firstTab });
+    list = await tabs();
+    expect(list.activeTargetId === firstTab, "activate_tab did not switch");
+    const mainTitle = await evaluate("document.title");
+    expect(mainTitle === "S5 main", `evaluate went to "${String(mainTitle)}"`);
+    const mainTree = await extract();
+    expect(findByName(mainTree, "Main button"), "extract did not follow activate_tab");
+    pass("activate_tab", "evaluate_js and extract act on the first tab");
+
+    await act("click_ref", { ref: tab2Button });
+    await site.waitHit("tab2", "click");
+    list = await tabs();
+    expect(list.activeTargetId === tab2, "a ref on a background tab did not activate it");
+    const state = await pageState(client, id);
+    pass("a ref on a background tab activates it", `active ${tab2}, page state ${state}`);
+
+    const code404 = await code("activate_tab", { target_id: "NO-SUCH-TARGET" });
+    expect(code404 === "TAB_NOT_FOUND", `activate_tab: ${code404}`);
+
+    await act("close_tab", { target_id: tab2 });
+    list = await tabs();
+    expect(list.activeTargetId === firstTab, `after closing the active tab: ${list.activeTargetId}`);
+    expect(!list.targetInfos.some((t) => t.targetId === tab2), "the closed tab is still listed");
+    await act("click_ref", { ref: refs.Main });
+    await site.waitHit("main", "click");
+    const staleTab = await code("click_ref", { ref: tab2Button });
+    expect(staleTab === "STALE_REF", `a closed tab's ref: ${staleTab}`);
+    pass("closing the active tab", `active back to ${firstTab}, clicks land, its refs are STALE_REF`);
+
+    // ── new tabs of every kind load, none stalled by the debugger pause ──
+    site.hits.length = 0;
+    const popups = async (): Promise<void> => {
+      await site.waitHit("popup", "loaded");
+    };
+    await act("click_ref", { ref: refs.Main });
+    const beforePopup = (await tabs()).activeTargetId;
+    const popupRef = refOf(tree, "Popup button");
+    await act("click_ref", { ref: popupRef });
+    await site.waitHit("main", "opened");
+    await popups();
+    await act("activate_tab", { target_id: beforePopup });
+    await act("click_ref", { ref: refOf(tree, "Noopener popup") });
+    await popups();
+    list = await tabs();
+    const popupTabs = list.targetInfos.filter((t) => t.url.includes("/popup"));
+    expect(popupTabs.length === 2, `popups: ${JSON.stringify(list.targetInfos)}`);
+    expect(list.activeTargetId === beforePopup, "a popup took the active tab");
+    pass("window.open, with an opener and noopener: both load", `active stayed ${beforePopup}`);
+    for (const popup of popupTabs) await act("close_tab", { target_id: popup.targetId });
+
+    const viaCdp = (await act("cdp_send", {
+      method: "Target.createTarget",
+      params: { url: `${site.parent}/popup?n=3` },
+    })) as { targetId: string };
+    await popups();
+    list = await tabs();
+    expect(list.activeTargetId === beforePopup, "Target.createTarget through cdp_send took the active tab");
+    pass("a tab from Target.createTarget through cdp_send loads", viaCdp.targetId);
+    await act("activate_tab", { target_id: viaCdp.targetId });
+    await act("close_tab", { target_id: viaCdp.targetId });
+
+    // new_tab takes http(s) only, so these come through cdp_send, as an expert's would.
+    const openRaw = async (url: string): Promise<string> => {
+      const opened = (await act("cdp_send", { method: "Target.createTarget", params: { url } })) as {
+        targetId: string;
+      };
+      await act("activate_tab", { target_id: opened.targetId });
+      return opened.targetId;
+    };
+    for (const url of ["chrome://version/", "chrome://extensions/", "chrome://newtab/"]) {
+      const opened = await openRaw(url);
+      let readyState: unknown;
+      let title: unknown;
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        readyState = await evaluate("document.readyState");
+        title = await evaluate("document.title");
+        if (readyState === "complete") break;
+        await new Promise((done) => setTimeout(done, 100));
+      }
+      expect(readyState === "complete", `${url} stalled at ${String(readyState)}`);
+      pass(`${url} loads`, `readyState complete, title "${String(title)}"`);
+      await act("close_tab", { target_id: opened });
+    }
+
+    const extensionUrl = "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html";
+    const opened = await openRaw(extensionUrl);
+    await new Promise((done) => setTimeout(done, 1_000));
+    const extensionState = `url ${String(await evaluate("location.href"))}, readyState ${String(await evaluate("document.readyState"))}`;
+    pass("the PDF viewer's extension page", extensionState);
+    await act("close_tab", { target_id: opened });
+
+    // ── the first tab closes, the session stays ──
+    const tab3 = String((await act("new_tab", {})).targetId);
+    await act("activate_tab", { target_id: firstTab });
+    await act("close_tab", { target_id: firstTab });
+    list = await tabs();
+    expect(list.activeTargetId === tab3, `after closing the root tab: ${list.activeTargetId}`);
+    await act("navigate", { url: `${site.parent}/other` });
+    const after = await extract();
+    await act("click_ref", { ref: refOf(after, "Main button") });
+    await site.waitHit("other", "click");
+    const profiles = (await call(client, "list_profiles")).profiles as Array<{ id: string; isRunning: boolean }>;
+    expect(profiles.find((p) => p.id === id)?.isRunning, "the profile stopped with its first tab");
+    pass("closing the root tab while another exists", `the session lives on in ${tab3}`);
+
+    // ── navigation ──
+    site.hits.length = 0;
+    const before = refOf(after, "Main button");
+    await act("navigate", { url: `${site.parent}/other` });
+    const sameUrl = await code("click_ref", { ref: before });
+    expect(sameUrl === "STALE_REF", `an old ref after a reload of the same URL: ${sameUrl}`);
+    const crossOrigin = refOf(await extract(), "Main button");
+    expect(crossOrigin !== before, "a new document reused a ref");
+    await act("navigate", { url: `${site.child}/other` });
+    const crossProcess = await code("click_ref", { ref: crossOrigin });
+    expect(crossProcess === "STALE_REF", `an old ref after a cross-process navigate: ${crossProcess}`);
+    expect(
+      !site.hits.some((h) => h.what === "click"),
+      "an old ref clicked something on the new page",
+    );
+    pass("an old ref after navigate", `STALE_REF, same URL and cross-process; ${before} and ${crossOrigin} never reused`);
+
+    const toFile = await rawCall(client, "navigate", { ...profile, url: `${site.parent}/file` });
+    pass("navigate to an attachment", toFile.content[0]?.text ?? "");
+
+    const failed = await callError(client, "navigate", { ...profile, url: "http://127.0.0.1:1/" });
+    expect(failed.code === "NAVIGATION_FAILED", `navigate to a closed port: ${JSON.stringify(failed)}`);
+    pass("navigate to a failing URL", String(failed.message));
+
+    const sameDocumentAt = Date.now();
+    await act("navigate", { url: `${site.child}/other#there` });
+    expect(Date.now() - sameDocumentAt < 3_000, "a same-document navigate waited for a load event");
+    pass("a same-document navigate returns at once", `${Date.now() - sameDocumentAt} ms`);
+
+    // ── after the browser ──
+    await act("set_dialog_policy", { mode: "manual" });
+    await call(client, "cdp_send", {
+      ...profile,
+      method: "Runtime.evaluate",
+      params: { expression: "setTimeout(() => alert('left open'), 10); 1" },
+    });
+    await waitForDialog(client, id);
+    const closingAt = Date.now();
+    await act("close_profile", {});
+    pass("close_profile with a dialog left open", `${Date.now() - closingAt} ms`);
+    const stopped = (await act("list_downloads", {})) as unknown as {
+      downloads: Array<{ id: string; fileName: string }>;
+    };
+    expect(stopped.downloads[0]?.id === download!.id, "a stopped profile lost its downloads");
+    const fromStopped = (await act("get_download", { download_id: download!.id })) as {
+      data_base64?: string;
+    };
+    expect(fromStopped.data_base64 === got.data_base64, "get_download on a stopped profile");
+    pass("list_downloads and get_download on a stopped profile", stopped.downloads[0]!.fileName);
+
+    await client.close();
+    sendConsoleCtrl(serve.child.pid!, "CTRL_BREAK");
+    const exit = await serve.exited;
+    expect(exit === 0, `exit code ${exit}:\n${serve.output()}`);
+    await assertNoLeftovers("tabs flow");
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+    await site.close();
+  }
+}
+
 async function main(): Promise<void> {
   prepareDataDir();
   const fixture = await startFixture();
   try {
-    const profileId = await httpFlow(fixture);
-    await sigintFlow(profileId);
-    await stdioFlow(fixture);
+    if (FLOWS.includes("http")) {
+      const profileId = await httpFlow(fixture);
+      if (FLOWS.includes("sigint")) await sigintFlow(profileId);
+    }
+    if (FLOWS.includes("stdio")) await stdioFlow(fixture);
+    if (FLOWS.includes("tabs")) await tabsFlow();
   } finally {
     await fixture.close();
     if (!values.keep) cleanDataDir();

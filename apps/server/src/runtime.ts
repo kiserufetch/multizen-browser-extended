@@ -182,6 +182,7 @@ export async function buildRuntime(
     readinessBudgetMs: READINESS_BUDGET_MS,
     allocatePort: () => randomFreePort(),
     extraDisabledFeatures: serverDisabledFeatures(process.platform),
+    armDownloadsAtLaunch: true,
     onBrowserStderr: (pid, text) =>
       log.debug("browser stderr", { pid, text: text.slice(0, BROWSER_STDERR_MAX_CHARS) }),
   });

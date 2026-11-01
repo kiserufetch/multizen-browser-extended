@@ -160,8 +160,6 @@ test("the new page tools need a running profile", async () => {
     ["select_option", { ref: "e1", value: "a" }],
     ["scroll", { delta_y: 1 }],
     ["upload_file", { ref: "e1", files: [{ file_name: "a", data_base64: "" }] }],
-    ["list_downloads", {}],
-    ["get_download", { download_id: "d" }],
     ["set_dialog_policy", { mode: "manual" }],
     ["list_dialogs", {}],
     ["handle_dialog", { action: "accept" }],
@@ -190,9 +188,10 @@ test("base64 lands in the profile's inbox under a uuid, and the driver gets that
   if (action.type !== "upload_file") return;
   assert.deepEqual(action.target, { ref: "e1" });
   const inbox = join(dataDir, "uploads", ".inbox");
-  const [name] = readdirSync(inbox);
-  assert.match(name!, /^[0-9a-f-]{36}-report\.pdf$/);
-  assert.deepEqual(action.paths, [join(inbox, name!)]);
+  const [dir] = readdirSync(inbox);
+  assert.match(dir!, /^[0-9a-f-]{36}$/);
+  // The page sees the path's last segment as File.name, so that must be the real name.
+  assert.deepEqual(action.paths, [join(inbox, dir!, "report.pdf")]);
   assert.equal(readFileSync(action.paths[0]!, "utf8"), "hello");
   await client.close();
 });
@@ -441,6 +440,26 @@ function download(overrides: Partial<DownloadFile>): DownloadFile {
     ...overrides,
   };
 }
+
+test("list_downloads and get_download work on a stopped profile, but not an unknown one", async () => {
+  const { client, driver, dataDir } = await connect({ running: false });
+  const path = join(dataDir, "a.zip");
+  writeFileSync(path, "hello");
+  driver.downloads.set("p", [download({ path })]);
+  const list = await call(client, "list_downloads", { profile_id: "p" });
+  assert.equal(list.isError, false, JSON.stringify(list.parsed));
+  assert.equal(list.parsed.downloads[0].id, "d1");
+  const got = await call(client, "get_download", { profile_id: "p", download_id: "d1" });
+  assert.equal(got.parsed.data_base64, b64("hello"));
+  await assertCode(client, "list_downloads", { profile_id: "nope" }, "PROFILE_NOT_FOUND");
+  await assertCode(
+    client,
+    "get_download",
+    { profile_id: "nope", download_id: "d1" },
+    "PROFILE_NOT_FOUND",
+  );
+  await client.close();
+});
 
 test("list_downloads and get_download never show a host path", async () => {
   const { client, driver, dataDir } = await connect();

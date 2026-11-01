@@ -258,11 +258,12 @@ const MULTIZEN_MCP_INSTRUCTIONS = [
   "Workflow:",
   "1. Call list_profiles to see available profiles and which are already running.",
   "2. Call launch_profile before any page action — navigate/click/type/extract/screenshot fail on a profile that is not running. launch_profile is idempotent.",
-  "3. Use extract to read the page (URL, title, trimmed accessibility tree) and derive precise CSS selectors from it BEFORE calling click or type.",
+  "3. Use extract to read the page (URL, title, trimmed accessibility tree, including iframes) and act on what it shows with click_ref / type_ref, or derive precise CSS selectors from it BEFORE calling click or type.",
   "4. Leave the profile running for follow-up actions; close_profile only when done. State persists either way.",
   "5. In any situation, if you can complete the authorized task independently using the tools and access available to you, continue. Do not stop and ask a human to perform work you can complete yourself. Ask for help only when a concrete missing prerequisite actually prevents progress.",
   "",
   "Constraints:",
+  "- Page actions go to the profile's one active tab: list_tabs shows it, new_tab and activate_tab change it. Sessions on the same profile share it, unless you hold a lease.",
   "- Profiles always open as visible desktop windows. There is no headless mode; do not expect one.",
   "- Camoufox has no CDP: click_ref, type_ref, cdp_send and cdp_send_no_safety refuse on it by design (extract returns no refs there). Use click / type with CSS selectors.",
   "- On a CAPTCHA, 2FA prompt, or other human-verification wall, do not attempt to solve or bypass it yourself — pause and let the user handle it, then continue. The session carries over.",
@@ -951,7 +952,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "click_ref",
     description:
-      "Click an element by its snapshot `ref` (e.g. 'e7') from the most recent extract. Prefer this over click: no CSS selector needed, and it scrolls the element into view. Refs are invalidated when the page changes — re-run extract and use the new refs. CloakBrowser only: on Camoufox extract returns no refs, so use click." +
+      "Click an element by its `ref` (e.g. 'e7') from extract. Prefer this over click: no CSS selector needed, and it scrolls the element into view. A ref works on any tab and in any frame, cross-origin iframes included; on a background tab it makes that tab active first. It stays valid while its element lives, and extract gives that element the same ref again. Once the element or its document is gone it fails with STALE_REF, never reaching another element: run extract and use the new refs. CloakBrowser only: on Camoufox extract returns no refs, so use click." +
       INPUT_DELIVERY_NOTE,
     inputSchema: {
       type: "object",
@@ -965,7 +966,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "type_ref",
     description:
-      "Focus an element by its snapshot `ref` (via a real click) and type text into it. Prefer this over type. Refs come from extract and are invalidated when the page changes. CloakBrowser only: on Camoufox extract returns no refs, so use type." +
+      "Focus an element by its `ref` (via a real click) and type text into it. Prefer this over type. Refs come from extract and work the way click_ref describes: any tab, any frame, STALE_REF once the element is gone. CloakBrowser only: on Camoufox extract returns no refs, so use type." +
       INPUT_DELIVERY_NOTE,
     inputSchema: {
       type: "object",
@@ -1022,7 +1023,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "extract",
     description:
-      "Snapshot the current page: returns the URL, title, and a trimmed accessibility tree. Interactive/meaningful nodes carry a short `ref` (e.g. 'e7') — pass it to click_ref / type_ref to act on that element without a CSS selector. The calling LLM parses the tree into whatever it needs. MultiZen does not call any external API.",
+      "Snapshot the active tab: returns the URL, title, and a trimmed accessibility tree. An iframe's content hangs under its Iframe node, cross-origin ones included; framesSkipped, when present, counts frames left out for being too many or not answering. Interactive/meaningful nodes carry a short `ref` (e.g. 'e7') — pass it to click_ref / type_ref to act on that element without a CSS selector. The calling LLM parses the tree into whatever it needs. MultiZen does not call any external API.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1200,7 +1201,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "list_tabs",
-    description: "List open targets (tabs/pages) via Target.getTargets.",
+    description:
+      "List open targets via Target.getTargets: tabs (type page), and frames in their own process (type iframe). activeTargetId is the tab page actions go to.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1209,7 +1211,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "new_tab",
-    description: "Open a new tab via Target.createTarget. Defaults to about:blank if no url is given.",
+    description:
+      "Open a new tab via Target.createTarget and make it the active tab, in the foreground. Defaults to about:blank if no url is given. Returns once the tab can be used, so navigate can follow at once; a url passed here may still be loading then.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],
@@ -1222,7 +1225,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "activate_tab",
-    description: "Bring a tab to the foreground via Target.activateTarget.",
+    description:
+      "Make a tab the active one, in the foreground: navigate, click, type, extract, screenshot and the other page actions then go to it. A popup the page opens does not become active by itself. An unknown target_id gets TAB_NOT_FOUND.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "target_id"],
@@ -1235,7 +1239,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "close_tab",
-    description: "Close a tab via Target.closeTarget.",
+    description:
+      "Close a tab via Target.closeTarget. Closing the active tab makes the most recently used remaining tab active. Closing the last tab ends the browser, as closing its window would.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "target_id"],

@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { MultizenError } from "@multizen/types";
 import {
+  assertSpawnedBrowser,
   waitForCdpSessionReady,
   type ReadinessDeps,
   type ReadinessResponseLike,
@@ -113,4 +115,22 @@ test("retries connect() and succeeds on a later attempt (idempotent connect)", a
   };
   await assert.doesNotReject(waitForCdpSessionReady(9304, session, 2000, deps));
   assert.equal(attempts, 3);
+});
+
+test("a different browser answering on the port fails the launch", async () => {
+  await assert.rejects(
+    assertSpawnedBrowser({ browserPid: async () => 222 }, 111, 9300),
+    (e: unknown) => {
+      assert.ok(e instanceof MultizenError);
+      assert.equal(e.code, "LAUNCH_FAILED");
+      assert.match(e.message, /222/);
+      assert.match(e.message, /111/);
+      return true;
+    },
+  );
+});
+
+test("the spawned browser passes, and one that can't say gets the benefit of the doubt", async () => {
+  await assert.doesNotReject(assertSpawnedBrowser({ browserPid: async () => 111 }, 111, 9300));
+  await assert.doesNotReject(assertSpawnedBrowser({ browserPid: async () => null }, 111, 9300));
 });

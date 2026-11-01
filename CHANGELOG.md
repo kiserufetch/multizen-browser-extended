@@ -11,10 +11,30 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 ### Added
 
+- **MCP `press_key`, `hover`, `select_option`, `scroll`, `upload_file`,
+  `list_downloads`, `get_download`, `set_dialog_policy`, `list_dialogs` and
+  `handle_dialog`** on CloakBrowser profiles. On the desktop, a profile's downloads
+  start going to its `downloads` directory at the first `list_downloads` or
+  `get_download`, not before.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.
   `list_profiles` now reports each profile's engine.
+
+### Changed
+
+- **`new_tab` makes the new tab the active one** on CloakBrowser profiles, in the
+  foreground, as it already was on Camoufox. Page tools (`navigate`, `click`,
+  `extract`, ...) now follow the active tab, which `activate_tab` also changes.
+  Before, they stayed on the first tab whatever was open. `list_tabs` reports
+  `activeTargetId`, and closing the first tab no longer ends the session.
+- **`click_ref` and `type_ref` work on any tab and in any iframe**, cross-origin
+  included, and `extract` shows what is inside iframes. A ref stays the same while
+  its element lives. Once the element or its document is gone it fails with
+  `STALE_REF`. It used to be reassigned on every `extract`, so an old ref could
+  click a different element.
+- `navigate` fails with `NAVIGATION_FAILED` when the load fails. It used to report
+  success on a connection error page.
 
 ### Fixed
 

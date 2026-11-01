@@ -7,7 +7,7 @@ import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProfileManager } from "@multizen/profile-manager";
-import type { ChromiumStatus, ProfileId } from "@multizen/types";
+import type { ChromiumStatus, MultizenError, ProfileId } from "@multizen/types";
 import { ChromiumBrowserDriver, type ChromiumBrowserDriverOptions } from "./ChromiumBrowserDriver.ts";
 import type { EngineRegistry } from "./engineRegistry.ts";
 import { EngineRouter } from "./engineRouter.ts";
@@ -179,5 +179,101 @@ test("the router hands firefoxOptions to the driver it constructs", async () => 
     const constructed = (router as unknown as { firefoxDriver: { launchExtras: unknown } })
       .firefoxDriver;
     assert.deepEqual(constructed.launchExtras, launchExtras);
+  });
+});
+
+/** A running record with a stand-in session, so the verbs run without a browser. */
+function graftRunning(
+  driver: ChromiumBrowserDriver,
+  id: ProfileId,
+  session: Record<string, unknown>,
+): void {
+  (driver as unknown as { running: Map<ProfileId, unknown> }).running.set(id, {
+    session,
+    windowWatcher: setInterval(() => {}, 60_000).unref(),
+  });
+}
+
+test("downloads arm on the first list or get, once, into the profile's downloads dir", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    const armed: string[] = [];
+    graftRunning(driver, id, {
+      enableDownloads: async (downloadsDir: string) => armed.push(downloadsDir),
+    });
+    assert.deepEqual(await driver.listDownloads(id), []);
+    assert.equal(await driver.getDownload(id, "nope"), null);
+    assert.deepEqual(armed, [join(pm.get(id)!.dataDir, "downloads")]);
+  });
+});
+
+test("arming that failed is tried again on the next call", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    let attempts = 0;
+    graftRunning(driver, id, {
+      enableDownloads: async () => {
+        if (++attempts === 1) throw new Error("browser busy");
+      },
+    });
+    await assert.rejects(driver.listDownloads(id), /browser busy/);
+    assert.deepEqual(await driver.listDownloads(id), []);
+    assert.equal(attempts, 2);
+  });
+});
+
+test("a stopped profile lists its downloads without arming anything", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    assert.deepEqual(await driver.listDownloads(id), []);
+    assert.equal(await driver.getDownload(id, "nope"), null);
+  });
+});
+
+test("performAction reaches the session verb for each action", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    const seen: unknown[][] = [];
+    const record =
+      (name: string) =>
+      async (...args: unknown[]): Promise<void> => {
+        seen.push([name, ...args]);
+      };
+    graftRunning(driver, id, {
+      pressKey: record("pressKey"),
+      hover: record("hover"),
+      selectOption: record("selectOption"),
+      scroll: record("scroll"),
+      uploadFile: record("uploadFile"),
+      bringToFront: record("bringToFront"),
+    });
+    const target = { ref: "e1" };
+    await driver.performAction(id, { type: "press_key", key: "Enter", target });
+    await driver.performAction(id, { type: "hover", target });
+    await driver.performAction(id, { type: "select_option", target, label: "Two" });
+    await driver.performAction(id, { type: "scroll", deltaY: 5 });
+    await driver.performAction(id, { type: "upload_file", target, paths: ["a"] });
+    await driver.performAction(id, { type: "bring_to_front" });
+    assert.deepEqual(seen, [
+      ["pressKey", "Enter", target],
+      ["hover", target],
+      ["selectOption", target, { label: "Two" }],
+      ["scroll", { type: "scroll", deltaY: 5 }],
+      ["uploadFile", target, ["a"]],
+      ["bringToFront"],
+    ]);
+  });
+});
+
+test("only the handoff panel's capture and input still refuse on this engine", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const driver = driverFor(pm, join(dir, "x.exe"));
+    await assert.rejects(driver.captureFrame(), (e: MultizenError) => e.code === "UNSUPPORTED_ON_ENGINE");
+    await assert.rejects(driver.dispatchInput(), (e: MultizenError) => e.code === "UNSUPPORTED_ON_ENGINE");
+    await assert.rejects(
+      driver.performAction(id, { type: "hover", target: { ref: "e1" } }),
+      (e: MultizenError) => e.code === "PROFILE_NOT_RUNNING",
+    );
+    await assert.rejects(driver.listDialogs(id), (e: MultizenError) => e.code === "PROFILE_NOT_RUNNING");
   });
 });

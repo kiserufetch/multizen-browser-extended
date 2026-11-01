@@ -191,12 +191,37 @@ test("a verb on a profile that isn't running is typed", () => {
   assert.equal(r.runningInfo("p"), null);
 });
 
+test("downloads of a stopped profile come from its engine's driver", async () => {
+  const driver = new FakeDriver() as FakeDriver & {
+    listDownloads: () => Promise<unknown[]>;
+    getDownload: (id: ProfileId, downloadId: string) => Promise<unknown>;
+  };
+  driver.listDownloads = async () => [{ id: "d1" }];
+  driver.getDownload = async (_id, downloadId) => ({ id: downloadId });
+  const r = router(new FakeBootstrap(true), driver);
+  assert.deepEqual(await r.listDownloads("p"), [{ id: "d1" }]);
+  assert.deepEqual(await r.getDownload("p", "d1"), { id: "d1" });
+});
+
+test("a stopped Camoufox profile whose driver never loaded has no downloads to report", async () => {
+  const r = new EngineRouter({
+    profileManager: {
+      get: (id: ProfileId) => ({ id, engine: "camoufox", dataDir: "unused" }) as Profile,
+    } as unknown as ProfileManager,
+    engineRegistry: { get: () => new FakeBootstrap(true) } as unknown as EngineRegistry,
+    getDefaultEngine: (): BrowserEngine => "cloakbrowser",
+    chromiumDriver: new FakeDriver() as unknown as ChromiumBrowserDriver,
+  });
+  assert.deepEqual(await r.listDownloads("p"), []);
+  assert.equal(await r.getDownload("p", "d1"), null);
+});
+
 test("closing a profile clears its upload inbox and nothing else", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mz-router-"));
   try {
     const inbox = join(dir, "uploads", ".inbox");
-    mkdirSync(inbox, { recursive: true });
-    writeFileSync(join(inbox, "uuid-a.pdf"), "inbox");
+    mkdirSync(join(inbox, "uuid"), { recursive: true });
+    writeFileSync(join(inbox, "uuid", "a.pdf"), "inbox");
     writeFileSync(join(dir, "uploads", "kept.pdf"), "kept");
 
     const driver = new FakeDriver();

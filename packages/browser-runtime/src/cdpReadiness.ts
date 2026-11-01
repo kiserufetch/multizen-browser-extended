@@ -1,3 +1,5 @@
+import { MultizenError } from "@multizen/types";
+
 /**
  * Staged CDP readiness within a single fixed budget, reusing the supplied
  * session (connect() is idempotent). Stages, each polled on a fixed backoff:
@@ -93,4 +95,24 @@ export async function waitForCdpSessionReady(
   throw new Error(
     `CDP connect/attach failed on port ${port} within ${budgetMs}ms: ${String(lastError)}`,
   );
+}
+
+/**
+ * What answers on the port is the browser this launch spawned, not another one that
+ * got there first. A browser that can't say gets the benefit of the doubt: only a
+ * different PID is proof of the wrong browser.
+ */
+export async function assertSpawnedBrowser(
+  session: { browserPid(): Promise<number | null> },
+  childPid: number,
+  port: number,
+): Promise<void> {
+  const answering = await session.browserPid();
+  if (answering !== null && answering !== childPid) {
+    throw new MultizenError(
+      "LAUNCH_FAILED",
+      `Port ${port} answers as browser process ${answering}, not the spawned ${childPid}. ` +
+        "Another browser holds the port, and driving it would act on the wrong profile.",
+    );
+  }
 }

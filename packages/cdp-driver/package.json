@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import ../mcp-server/node_modules/tsx/dist/loader.mjs --test src/CdpSession.test.ts"
+    "test": "node --import ../mcp-server/node_modules/tsx/dist/loader.mjs --test src/CdpSession.test.ts src/multiTarget.test.ts"
   },
   "dependencies": {
     "@multizen/types": "workspace:*",

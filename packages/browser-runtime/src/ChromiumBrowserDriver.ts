@@ -13,6 +13,8 @@ import type {
   CapturedFrame,
   ChromiumStatus,
   ClientHints,
+  DialogPolicy,
+  DialogResponse,
   DownloadFile,
   DownloadRecord,
   DriverAction,
@@ -21,7 +23,12 @@ import type {
   OpenDialog,
   ProfileId,
 } from "@multizen/types";
-import { MultizenError, resolveEngine, type BrowserEngine } from "@multizen/types";
+import {
+  MultizenError,
+  PROFILE_DOWNLOADS_DIR,
+  resolveEngine,
+  type BrowserEngine,
+} from "@multizen/types";
 import { CdpSession } from "@multizen/cdp-driver";
 import { EngineRegistry } from "./engineRegistry.ts";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
@@ -29,7 +36,8 @@ import { resolveProxyLaunchGeo } from "./launchGeo";
 import { companionDir } from "./extensions/companion";
 import { resolveLoadDir } from "./extensions/extensionStore.ts";
 import { killProcessTree, gracefulShutdown } from "./processTree";
-import { waitForCdpSessionReady } from "./cdpReadiness";
+import { assertSpawnedBrowser, waitForCdpSessionReady } from "./cdpReadiness";
+import { DownloadTracker } from "./downloads.ts";
 import { sanitizeStartUrl } from "./startPage";
 import { firstFreePort } from "./portProbe.ts";
 import type { RuntimeHost } from "./host.ts";
@@ -88,6 +96,8 @@ interface RunningProcess {
   browserDataDir: string;
   /** Polls /json/list and kills the child when no page targets remain. */
   windowWatcher: NodeJS.Timeout;
+  /** Set once this browser's downloads go to the profile's downloads directory. */
+  downloadsArmed?: Promise<void>;
 }
 
 export interface ChromiumBrowserDriverOptions {
@@ -134,6 +144,13 @@ export interface ChromiumBrowserDriverOptions {
   allocatePort?: () => Promise<number>;
   /** Added to the launch's one `--disable-features=` switch. Default: none. */
   extraDisabledFeatures?: readonly string[];
+  /**
+   * Send a browser's downloads to the profile's downloads directory from launch, for
+   * a server, whose browsers nobody clicks in. Default: from the first list_downloads
+   * or get_download, so a person's downloads in a desktop profile stay as they were
+   * until an agent asks.
+   */
+  armDownloadsAtLaunch?: boolean;
 }
 
 export type RunningStateChange =
@@ -175,6 +192,9 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private readonly readinessBudgetMs: number;
   private readonly customAllocatePort?: () => Promise<number>;
   private readonly extraDisabledFeatures: readonly string[];
+  private readonly armDownloadsAtLaunch: boolean;
+  /** Outlive the browser, so a finished download stays reachable after it closes. */
+  private readonly downloadTrackers = new Map<ProfileId, Promise<DownloadTracker>>();
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     super();
@@ -190,6 +210,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     this.readinessBudgetMs = opts.readinessBudgetMs ?? 15000;
     this.customAllocatePort = opts.allocatePort;
     this.extraDisabledFeatures = opts.extraDisabledFeatures ?? [];
+    this.armDownloadsAtLaunch = opts.armDownloadsAtLaunch ?? false;
   }
 
   override on<K extends keyof DriverEvents>(event: K, listener: DriverEvents[K]): this {
@@ -605,7 +626,12 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         signalCrashIfConfirmed();
       });
 
-      const session = new CdpSession({ port, engine });
+      const session = new CdpSession({
+        port,
+        host: "127.0.0.1",
+        engine,
+        platform: cloakBrowserPlatform(fp),
+      });
       // Readiness ladder within a fixed budget, reusing this one session
       // (connect() is idempotent): (1) /json/version answers, (2) /json/list has
       // a page target, (3) connect()+attach succeeds. Raced against a confirmed
@@ -619,6 +645,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
           waitForCdpSessionReady(port, session, this.readinessBudgetMs),
           crashSignal,
         ]);
+        await assertSpawnedBrowser(session, pid, port);
       } catch (e) {
         // Tear down the half-launched browser — this record isn't in
         // `this.running` yet, so kill the spawned child directly. The caller
@@ -790,6 +817,12 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       }
     });
 
+    if (this.armDownloadsAtLaunch) {
+      await this.armDownloads(profileId, record).catch((e: unknown) => {
+        console.warn("[multizen] arming downloads failed:", (e as Error).message);
+      });
+    }
+
     this.emit("running-changed", { kind: "launched", profileId });
     return { id: profileId, cdpEndpoint, pid, startedAt };
   }
@@ -883,13 +916,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   //    non-CDP engine. Each needs no domain enable, preserving the stealth
   //    baseline. ────────────────────────────────────────────────────────────
   async evaluateJs(profileId: ProfileId, expression: string, sessionId?: string): Promise<unknown> {
-    return this.cdpSend(
-      profileId,
-      "Runtime.evaluate",
-      { expression, returnByValue: true },
-      sessionId,
-      { safe: true },
-    );
+    return this.requireSession(profileId).evaluateJs(expression, sessionId);
   }
 
   async getCookies(profileId: ProfileId, urls?: string[], sessionId?: string): Promise<unknown> {
@@ -903,53 +930,110 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   }
 
   async listTabs(profileId: ProfileId, sessionId?: string): Promise<unknown> {
-    return this.cdpSend(profileId, "Target.getTargets", {}, sessionId, { safe: true });
+    return this.requireSession(profileId).listTabs(sessionId);
   }
 
   async newTab(profileId: ProfileId, url?: string, sessionId?: string): Promise<unknown> {
-    return this.cdpSend(
-      profileId,
-      "Target.createTarget",
-      { url: url ?? "about:blank" },
-      sessionId,
-      { safe: true },
-    );
+    return this.requireSession(profileId).newTab(url, sessionId);
   }
 
   async activateTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown> {
-    return this.cdpSend(profileId, "Target.activateTarget", { targetId }, sessionId, { safe: true });
+    return this.requireSession(profileId).activateTab(targetId, sessionId);
   }
 
   async closeTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown> {
-    return this.cdpSend(profileId, "Target.closeTarget", { targetId }, sessionId, { safe: true });
+    return this.requireSession(profileId).closeTab(targetId, sessionId);
   }
 
-  // The driver surface a later change fills in. Until then each refuses by code, so a
-  // client sees a typed error rather than a missing method.
-  async performAction(_profileId: ProfileId, action: DriverAction): Promise<{ ok: true }> {
-    throw notAvailableYet(action.type);
+  async performAction(profileId: ProfileId, action: DriverAction): Promise<{ ok: true }> {
+    const session = this.requireSession(profileId);
+    switch (action.type) {
+      case "press_key":
+        await session.pressKey(action.key, action.target);
+        break;
+      case "hover":
+        await session.hover(action.target);
+        break;
+      case "select_option":
+        await session.selectOption(action.target, {
+          ...(action.value !== undefined ? { value: action.value } : {}),
+          ...(action.label !== undefined ? { label: action.label } : {}),
+          ...(action.index !== undefined ? { index: action.index } : {}),
+        });
+        break;
+      case "scroll":
+        await session.scroll(action);
+        break;
+      case "upload_file":
+        await session.uploadFile(action.target, action.paths);
+        break;
+      case "bring_to_front":
+        await session.bringToFront();
+        break;
+    }
+    return { ok: true };
   }
 
-  async listDownloads(): Promise<DownloadRecord[]> {
-    throw notAvailableYet("list_downloads");
+  private downloadTracker(profileId: ProfileId): Promise<DownloadTracker> {
+    let tracker = this.downloadTrackers.get(profileId);
+    if (!tracker) {
+      const profile = this.profileManager.get(profileId);
+      if (!profile) {
+        throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
+      }
+      tracker = DownloadTracker.open(join(profile.dataDir, PROFILE_DOWNLOADS_DIR));
+      this.downloadTrackers.set(profileId, tracker);
+      tracker.catch(() => this.downloadTrackers.delete(profileId));
+    }
+    return tracker;
   }
 
-  async getDownload(): Promise<DownloadFile | null> {
-    throw notAvailableYet("get_download");
+  private armDownloads(profileId: ProfileId, r: RunningProcess): Promise<void> {
+    r.downloadsArmed ??= (async () => {
+      const tracker = await this.downloadTracker(profileId);
+      await r.session.enableDownloads(tracker.dir, tracker);
+    })().catch((e: unknown) => {
+      r.downloadsArmed = undefined; // The next call tries again.
+      throw e;
+    });
+    return r.downloadsArmed;
   }
 
-  async setDialogPolicy(): Promise<{ ok: true }> {
-    throw notAvailableYet("set_dialog_policy");
+  /** On a running browser this is also what starts catching its downloads (C11). */
+  private async downloadsOf(profileId: ProfileId): Promise<DownloadTracker> {
+    const r = this.running.get(profileId);
+    if (r) await this.armDownloads(profileId, r);
+    return this.downloadTracker(profileId);
   }
 
-  async listDialogs(): Promise<OpenDialog[]> {
-    throw notAvailableYet("list_dialogs");
+  async listDownloads(profileId: ProfileId): Promise<DownloadRecord[]> {
+    return (await this.downloadsOf(profileId)).list();
   }
 
-  async handleDialog(): Promise<{ ok: true }> {
-    throw notAvailableYet("handle_dialog");
+  async getDownload(profileId: ProfileId, downloadId: string): Promise<DownloadFile | null> {
+    return (await this.downloadsOf(profileId)).get(downloadId);
   }
 
+  async setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }> {
+    await this.requireSession(profileId).setDialogPolicy(policy);
+    return { ok: true };
+  }
+
+  async listDialogs(profileId: ProfileId): Promise<OpenDialog[]> {
+    return this.requireSession(profileId).listDialogs();
+  }
+
+  async handleDialog(profileId: ProfileId, response: DialogResponse): Promise<{ ok: true }> {
+    await this.requireSession(profileId).handleDialog(response);
+    return { ok: true };
+  }
+
+  hasOpenDialog(profileId: ProfileId): boolean {
+    return this.running.get(profileId)?.session.hasOpenDialog() ?? false;
+  }
+
+  // The handoff panel's view and input, which a later change fills in. Until then
+  // each refuses by code, so a client sees a typed error rather than a missing method.
   async captureFrame(): Promise<CapturedFrame> {
     throw notAvailableYet("captureFrame");
   }

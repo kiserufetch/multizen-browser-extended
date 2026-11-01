@@ -286,11 +286,17 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   performAction(profileId: ProfileId, action: DriverAction): Promise<{ ok: true }> {
     return this.require(profileId).performAction(profileId, action);
   }
-  listDownloads(profileId: ProfileId): Promise<DownloadRecord[]> {
-    return this.require(profileId).listDownloads(profileId);
+  /** Downloads outlive the browser. A stopped profile asks the driver of its engine. */
+  private downloadsDriver(profileId: ProfileId): BrowserDriver | null {
+    const bound = this.bindings.get(profileId);
+    if (bound) return bound;
+    return isChromiumEngine(this.engineFor(profileId)) ? this.chromiumDriver : this.firefoxDriver;
   }
-  getDownload(profileId: ProfileId, downloadId: string): Promise<DownloadFile | null> {
-    return this.require(profileId).getDownload(profileId, downloadId);
+  async listDownloads(profileId: ProfileId): Promise<DownloadRecord[]> {
+    return (await this.downloadsDriver(profileId)?.listDownloads(profileId)) ?? [];
+  }
+  async getDownload(profileId: ProfileId, downloadId: string): Promise<DownloadFile | null> {
+    return (await this.downloadsDriver(profileId)?.getDownload(profileId, downloadId)) ?? null;
   }
   setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }> {
     return this.require(profileId).setDialogPolicy(profileId, policy);
