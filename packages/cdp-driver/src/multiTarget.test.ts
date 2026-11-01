@@ -109,6 +109,15 @@ class FakeBrowser extends EventEmitter {
     );
   }
 
+  /** Any other kind of target, paused until someone resumes it. */
+  attachTarget(
+    targetInfo: { targetId: string; type: string; url: string },
+    sessionId: string,
+    parentSessionId?: string,
+  ): void {
+    this.event("Target.attachedToTarget", { sessionId, targetInfo, waitingForDebugger: true }, parentSessionId);
+  }
+
   methods(sessionId?: string): string[] {
     return this.log
       .filter((c) => sessionId === undefined || c.sessionId === sessionId)
@@ -196,7 +205,6 @@ test("connect attaches each page through the browser socket and enables only Pag
     autoAttach: true,
     waitForDebuggerOnStart: true,
     flatten: true,
-    filter: [{ type: "page" }],
   });
   for (const session of ["S-A", "S-B"]) {
     assert.ok(b.methods(session).includes("Page.enable"));
@@ -400,12 +408,42 @@ test("page and iframe sessions auto-attach iframes, so nested OOPIFs arrive", as
       autoAttach: true,
       waitForDebuggerOnStart: true,
       flatten: true,
-      filter: [{ type: "iframe" }],
     });
     assert.ok(!b.methods(session).includes("Page.enable"), "no enable on an iframe session");
   }
   assertStealth(b);
 });
+
+test("a filter on auto-attach leaves workers paused forever, so none is sent anywhere", async () => {
+  const { b } = await connected(["A"]);
+  b.attachIframe("IF1", "S-IF1", "S-A");
+  await settle();
+  const autoAttaches = b.calls("Target.setAutoAttach");
+  assert.ok(autoAttaches.length >= 3, "browser, page and frame sessions");
+  for (const call of autoAttaches) assert.equal("filter" in call.params, false, String(call.sessionId));
+});
+
+for (const [type, parent] of [
+  ["worker", "S-A"],
+  ["service_worker", undefined],
+  ["shared_worker", undefined],
+  ["other", undefined],
+] as const) {
+  test(`a ${type} target is resumed and dropped as it attaches, and never counts as a tab`, async () => {
+    const { b, s } = await connected(["A"]);
+    b.attachTarget({ targetId: `T-${type}`, type, url: "http://t/w.js" }, `S-${type}`, parent);
+    await settle();
+    assert.ok(b.methods(`S-${type}`).includes("Runtime.runIfWaitingForDebugger"));
+    assert.deepEqual(
+      b.calls("Target.detachFromTarget").map((c) => c.params.sessionId),
+      [`S-${type}`],
+    );
+    assert.deepEqual(b.methods(`S-${type}`).filter((m) => m.endsWith(".enable")), [], "no domain enabled on it");
+    const tabs = (await s.listTabs()) as { tabs?: Array<{ targetId: string }> };
+    assert.ok(!(tabs.tabs ?? []).some((t) => t.targetId === `T-${type}`));
+    assertStealth(b);
+  });
+}
 
 test("a session an agent attached through cdp_send stays its own", async () => {
   const { b, s } = await connected(["A"]);

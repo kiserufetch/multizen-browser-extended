@@ -1,0 +1,25 @@
+{
+  "creepjs": {
+    "repository": "https://github.com/abrahamjuliot/creepjs",
+    "commit": "10aa6724cd33a1015db1574211890518cd04f0cc",
+    "urlTemplate": "https://raw.githubusercontent.com/abrahamjuliot/creepjs/{commit}/docs/{file}",
+    "files": {
+      "index.html": "e59328901b58f9cd77776a282a9de8c01aa57e4ea36b3e94283050807ae28b59",
+      "creep.js": "80f43f364bd973bc03cb5b82de033ce28b2bbb145cb04237632a46ef040a92be",
+      "style.min.css": "6756a37800b6050c73d799a5099da121b3498d75ed01577d84f3e182e105cbd3",
+      "favicon.ico": "ebcbc2b5c5f1ed55ed74cca8719247b95a683ef0acd6bf30e4d4aea8f35ba4c3"
+    }
+  },
+  "rebrowser-bot-detector": {
+    "repository": "https://github.com/rebrowser/rebrowser-bot-detector",
+    "commit": "55fa59b9da0610563d896aa956f145ef00431a6b",
+    "urlTemplate": "https://raw.githubusercontent.com/rebrowser/rebrowser-bot-detector/{commit}/{file}",
+    "files": {
+      "index.html": "7f1a5310db9f9ac5dab0c516fc0472b9dbc740b839038f82ecb19af3a6834048",
+      "index.js": "cd60904619d05fb6fa9a3f73a748493a50d2ea1d820b492688cf7d75d3a9e0a5",
+      "index.css": "42564c14aba24beda5f28e18f44fdd9289b69cd46e49655605fac8ea2bcf0087",
+      "aba/mid/index.html": "44f9d053ed874ff7b6fbf7b6868b2396885b4b42b9d1f466a109a8a5215c1340",
+      "aba/leaf/index.html": "1a7737500ce30276b1ac670d8a50403edb64594902f4764ecbb181fb6e84cd49"
+    }
+  }
+}

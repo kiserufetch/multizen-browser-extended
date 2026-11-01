@@ -50,5 +50,27 @@ services:
       timeout: 5s
       start_period: 10s
 
+  # The detection baseline, only when asked for. Its results land in docs/detection-baselines:
+  #   docker compose run --rm baseline --engine cloakbrowser --mode xvfb --label linux-xvfb \n  #     --data-dir /data --cache-dir /data/baseline-assets
+  baseline:
+    profiles:
+      - baseline
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: baseline
+    image: multizen-baseline:local
+    hostname: multizen
+    shm_size: 1gb
+    security_opt:
+      - seccomp=./docker/seccomp-chromium.json
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - multizen-baseline-data:/data
+      - ./docs/detection-baselines:/repo/docs/detection-baselines
+
 volumes:
   multizen-data: {}
+  multizen-baseline-data: {}

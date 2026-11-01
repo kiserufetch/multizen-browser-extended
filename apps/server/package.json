@@ -7,6 +7,9 @@
   "bin": {
     "multizen-server": "./bin/multizen-server.js"
   },
+  "exports": {
+    "./runtime": "./src/runtime.ts"
+  },
   "engines": {
     "node": ">=22"
   },

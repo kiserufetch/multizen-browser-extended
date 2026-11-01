@@ -1119,6 +1119,21 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@multizen/detection-baseline@workspace:scripts/detection-baseline":
+  version: 0.0.0-use.local
+  resolution: "@multizen/detection-baseline@workspace:scripts/detection-baseline"
+  dependencies:
+    "@multizen/browser-runtime": "workspace:*"
+    "@multizen/profile-manager": "workspace:*"
+    "@multizen/server": "workspace:*"
+    "@multizen/types": "workspace:*"
+    "@types/node": "npm:^22.10.0"
+    selfsigned: "npm:^2.4.1"
+    tsx: "npm:^4.19.2"
+    typescript: "npm:^5.7.0"
+  languageName: unknown
+  linkType: soft
+
 "@multizen/mcp-server@workspace:*, @multizen/mcp-server@workspace:packages/mcp-server":
   version: 0.0.0-use.local
   resolution: "@multizen/mcp-server@workspace:packages/mcp-server"
@@ -1149,7 +1164,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@multizen/server@workspace:apps/server":
+"@multizen/server@workspace:*, @multizen/server@workspace:apps/server":
   version: 0.0.0-use.local
   resolution: "@multizen/server@workspace:apps/server"
   dependencies:
@@ -1731,6 +1746,15 @@ __metadata:
   version: 2.1.0
   resolution: "@types/ms@npm:2.1.0"
   checksum: 10c0/5ce692ffe1549e1b827d99ef8ff71187457e0eb44adbae38fdf7b9a74bae8d20642ee963c14516db1d35fa2652e65f47680fdf679dcbde52bbfadd021f497225
+  languageName: node
+  linkType: hard
+
+"@types/node-forge@npm:^1.3.0":
+  version: 1.3.14
+  resolution: "@types/node-forge@npm:1.3.14"
+  dependencies:
+    "@types/node": "npm:*"
+  checksum: 10c0/da6158fd34fa7652aa7f8164508f97a76b558724ab292f13c257e39d54d95d4d77604e8fb14dc454a867f1aeec7af70118294889195ec4400cecbb8a5c77a212
   languageName: node
   linkType: hard
 
@@ -5305,6 +5329,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"node-forge@npm:^1":
+  version: 1.4.2
+  resolution: "node-forge@npm:1.4.2"
+  checksum: 10c0/fb80d5eac8018f413647e17e6278876d0bfff8b32e8e51c4132584ddcef6b1881cc647a278072af3c2611744397e7844fc0f87f940ed818ec423f4d0c48db10a
+  languageName: node
+  linkType: hard
+
 "node-gyp@npm:^9.0.0":
   version: 9.4.1
   resolution: "node-gyp@npm:9.4.1"
@@ -6060,6 +6091,16 @@ __metadata:
   version: 0.27.0
   resolution: "scheduler@npm:0.27.0"
   checksum: 10c0/4f03048cb05a3c8fddc45813052251eca00688f413a3cee236d984a161da28db28ba71bd11e7a3dd02f7af84ab28d39fb311431d3b3772fed557945beb00c452
+  languageName: node
+  linkType: hard
+
+"selfsigned@npm:^2.4.1":
+  version: 2.4.1
+  resolution: "selfsigned@npm:2.4.1"
+  dependencies:
+    "@types/node-forge": "npm:^1.3.0"
+    node-forge: "npm:^1"
+  checksum: 10c0/521829ec36ea042f7e9963bf1da2ed040a815cf774422544b112ec53b7edc0bc50a0f8cc2ae7aa6cc19afa967c641fd96a15de0fc650c68651e41277d2e1df09
   languageName: node
   linkType: hard
 

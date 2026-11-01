@@ -137,6 +137,45 @@ test("Camoufox's occlusion tracker is off on Windows only, and reaches the route
   });
 });
 
+test("a measurement's overrides reach the drivers, and nothing the server runs passes any", async () => {
+  const dir = dataDirWithEngine();
+  const runtime = await buildRuntime({
+    dataDir: dir,
+    measurement: {
+      disabledFeatures: [],
+      firefoxPrefs: {},
+      firefoxLaunchExtras: { ignoreHTTPSErrors: true },
+      chromiumArgs: ["--log-net-log=x"],
+      companionDir: join(dir, "companion"),
+    },
+  });
+  try {
+    const router = runtime.driver as unknown as {
+      firefoxOptions: { extraPrefs: unknown; launchExtras: unknown };
+      chromiumDriver: {
+        extraDisabledFeatures: unknown;
+        extraArgs: unknown;
+        host: { resourceDir(name: string): string | null };
+      };
+    };
+    assert.deepEqual(router.chromiumDriver.extraDisabledFeatures, []);
+    assert.deepEqual(router.chromiumDriver.extraArgs, ["--log-net-log=x"]);
+    assert.equal(router.chromiumDriver.host.resourceDir("companion"), join(dir, "companion"));
+    assert.equal(router.chromiumDriver.host.resourceDir("linux-sandbox"), null);
+    assert.deepEqual(router.firefoxOptions.extraPrefs, {});
+    assert.deepEqual(router.firefoxOptions.launchExtras, {
+      ...SERVER_FIREFOX_OPTIONS.launchExtras,
+      ignoreHTTPSErrors: true,
+    });
+  } finally {
+    await runtime.close();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+  for (const file of ["cli.ts", "config.ts", join("commands", "serve.ts"), join("commands", "stdio.ts")]) {
+    assert.doesNotMatch(readFileSync(join(SRC, file), "utf8"), /measurement/i, file);
+  }
+});
+
 test("the egress policy is one object, known to both drivers and to the tools", async () => {
   const dir = dataDirWithEngine();
   const runtime = await buildRuntime({

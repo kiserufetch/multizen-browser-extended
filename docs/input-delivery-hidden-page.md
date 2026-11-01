@@ -60,7 +60,7 @@ The full MultiZen launch through `multizen-server` behaves the same. The window 
 
 So the advice in the error message does not always work: with the display off (or the screen locked, which was not tested), nothing a client can do makes this page paint. `multizen-server` therefore launches with that one feature disabled, on Windows only (`serverDisabledFeatures` in `apps/server/src/runtime.ts`), since nobody is watching its windows. With it, the first `click_ref` on a freshly loaded page delivers. The desktop's launch flags are unchanged, and a desktop profile opened behind other windows or with the display off still reports `INPUT_NOT_DELIVERED`.
 
-Not measured: whether a page can tell the difference (detection baselines should compare it).
+A page can't tell the difference while the window is uncovered, and a covered one reads `visible` and keeps its frames: see `docs/detection-baselines/README.md`.
 
 ### Camoufox (2026-10-31, Camoufox 152.0.4-beta.30, headed, Windows 11)
 
@@ -70,7 +70,7 @@ Camoufox goes through Playwright, so this probe doesn't apply, but it has the sa
 - Later clicks hung earlier, at "waiting for element to be visible, enabled and stable". `page.bringToFront()` didn't help.
 - With `widget.windows.window_occlusion_tracking.enabled` set to false, the same click took about 100 ms and the page saw `pointerdown`, `mouseup` and `click`.
 
-The window's position was not inspected: that the pref fixes it is what points at occlusion. `multizen-server` sets it, on Windows only (`serverFirefoxPrefs` in `apps/server/src/runtime.ts`). The desktop doesn't, so there the tools end in `TIMEOUT` until the window is raised, and the error's hint says so. Whether a page can tell the difference was not measured for this pref either.
+The window's position was not inspected: that the pref fixes it is what points at occlusion. `multizen-server` sets it, on Windows only (`serverFirefoxPrefs` in `apps/server/src/runtime.ts`). The desktop doesn't, so there the tools end in `TIMEOUT` until the window is raised, and the error's hint says so. A page can't tell the difference for this pref either: see `docs/detection-baselines/README.md`, which also measured the click on a covered window at over 7 s without it and about 100 ms with it.
 
 ### Headless (2026-10-31, CloakBrowser 146.0.7680.177.5 and Camoufox 152.0.4-beta.30, Windows 11)
 

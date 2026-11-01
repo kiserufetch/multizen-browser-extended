@@ -163,6 +163,29 @@ test("extra disabled features join the one --disable-features switch; default ad
   });
 });
 
+test("extra arguments go ahead of the start page, which has to stay last; default adds none", async () => {
+  await withProfile(async (pm, id, dir) => {
+    let captured: readonly string[] = [];
+    const spawnMock = mock.method(childProcess, "spawn", (_bin: string, args: readonly string[]) => {
+      captured = args;
+      throw new Error("stop before a real spawn");
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(driverFor(pm, join(dir, "x.exe")).launch(id), /stop before a real spawn/);
+      assert.equal(captured.includes("--a-flag"), false);
+
+      const withExtra = driverFor(pm, join(dir, "x.exe"), { extraArgs: ["--a-flag"] });
+      await assert.rejects(withExtra.launch(id), /stop before a real spawn/);
+      assert.equal(captured.at(-2), "--a-flag");
+      assert.equal(captured.at(-1), "about:blank");
+    } finally {
+      spawnMock.mock.restore();
+      syncBuiltinESMExports();
+    }
+  });
+});
+
 /** Spawns stand in for a browser that dies at once with this on stderr. */
 function mockBrowserDying(stderr: string): { spawned: string[][]; restore: () => void } {
   const spawned: string[][] = [];

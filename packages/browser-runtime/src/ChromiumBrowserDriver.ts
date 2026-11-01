@@ -237,6 +237,8 @@ export interface ChromiumBrowserDriverOptions {
   allocatePort?: () => Promise<number>;
   /** Added to the launch's one `--disable-features=` switch. Default: none. */
   extraDisabledFeatures?: readonly string[];
+  /** Added to the launch's command line, ahead of the start page. Default: none. */
+  extraArgs?: readonly string[];
   /**
    * Send a browser's downloads to the profile's downloads directory from launch, for
    * a server, whose browsers nobody clicks in. Default: from the first list_downloads
@@ -298,6 +300,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private readonly readinessBudgetMs: number;
   private readonly customAllocatePort?: () => Promise<number>;
   private readonly extraDisabledFeatures: readonly string[];
+  private readonly extraArgs: readonly string[];
   private readonly armDownloadsAtLaunch: boolean;
   private readonly downloadQuotaBytes: number | undefined;
   private readonly egress?: EgressPolicy;
@@ -320,6 +323,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     this.readinessBudgetMs = opts.readinessBudgetMs ?? 15000;
     this.customAllocatePort = opts.allocatePort;
     this.extraDisabledFeatures = opts.extraDisabledFeatures ?? [];
+    this.extraArgs = opts.extraArgs ?? [];
     this.armDownloadsAtLaunch = opts.armDownloadsAtLaunch ?? false;
     this.downloadQuotaBytes = opts.downloadQuotaBytes;
     this.egress = opts.egress;
@@ -661,6 +665,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     }
 
     if (displayMode === "headless") args.push(...HEADLESS_CHROMIUM_ARGS);
+    args.push(...this.extraArgs);
 
     // NOTE on Sec-CH-UA: The Client Hints headers (`Sec-CH-UA`,
     // `Sec-CH-UA-Platform`, `Sec-CH-UA-Platform-Version`, `Sec-CH-UA-Arch`,

@@ -35,7 +35,7 @@ function findTestFiles(dir: string): string[] {
 }
 
 function workspaceDirs(): string[] {
-  return ["apps", "packages"].flatMap((parent) =>
+  return ["apps", "packages", "scripts"].flatMap((parent) =>
     readdirSync(join(REPO_ROOT, parent), { withFileTypes: true })
       .filter((e) => e.isDirectory() && existsSync(join(REPO_ROOT, parent, e.name, "package.json")))
       .map((e) => join(parent, e.name)),

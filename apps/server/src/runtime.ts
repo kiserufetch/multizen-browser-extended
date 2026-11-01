@@ -205,6 +205,23 @@ export async function takeOverFromPreviousRun(dataDir: string): Promise<ProcessJ
 }
 
 /**
+ * What `scripts/detection-baseline` varies to compare a launch with the desktop's. No flag
+ * and no tool reaches this: the server itself never passes any of it.
+ */
+export interface MeasurementOverrides {
+  /** Replaces {@link serverDisabledFeatures}. The desktop's launch has none. */
+  disabledFeatures?: readonly string[];
+  /** Replaces {@link serverFirefoxPrefs}. The desktop's launch has none. */
+  firefoxPrefs?: Readonly<Record<string, boolean>>;
+  /** Over Playwright's launch options. For a self-signed measurement site. */
+  firefoxLaunchExtras?: { ignoreHTTPSErrors: boolean };
+  /** On the browser's command line. For a NetLog. */
+  chromiumArgs?: readonly string[];
+  /** The desktop's bundled companion extension, which the server doesn't load. */
+  companionDir?: string;
+}
+
+/**
  * The browser runtime as the server runs it. Compared with the desktop's startup
  * this leaves out, on purpose: EngineUpdateService (the version stays pinned, so a
  * UA can't change mid-work), UpdaterService, UsageReporting, backfillProxyCountries
@@ -221,12 +238,13 @@ export async function buildRuntime(
     | "headless"
     | "egressPolicy"
     | "egressAllow"
-  > & { handoffTtlMs?: number; downloadQuotaBytes?: number },
+  > & { handoffTtlMs?: number; downloadQuotaBytes?: number; measurement?: MeasurementOverrides },
   processJournal?: ProcessJournal,
   /** Whether people work on handoffs through a panel here. Plain stdio has none. */
   panel = false,
 ): Promise<ServerRuntime> {
   const { extensionStoreRoot, xvfbRunDir } = dataPaths(cfg.dataDir);
+  const measurement = cfg.measurement ?? {};
   const downloadQuotaBytes = cfg.downloadQuotaBytes ?? DOWNLOAD_QUOTA_BYTES;
   const settings = new SettingsStore(defaultSettingsPath(cfg.dataDir));
   const initialSettings = await settings.load();
@@ -235,7 +253,11 @@ export async function buildRuntime(
   const profileManager = openProfiles(cfg.dataDir);
   sweepExtensionStore(profileManager, extensionStoreRoot);
 
-  const host = createNodeHost(cfg.dataDir);
+  const nodeHost = createNodeHost(cfg.dataDir);
+  const companion = measurement.companionDir;
+  const host = companion
+    ? { ...nodeHost, resourceDir: (name: "companion" | "linux-sandbox") => (name === "companion" ? companion : null) }
+    : nodeHost;
   const engineRegistry = new EngineRegistry(host);
   engineRegistry.on("status", engineProgressLogger());
   const egress = new EgressPolicy({ mode: cfg.egressPolicy, allow: cfg.egressAllow });
@@ -251,7 +273,8 @@ export async function buildRuntime(
     extensionStoreRoot,
     readinessBudgetMs: READINESS_BUDGET_MS,
     allocatePort: () => randomFreePort(),
-    extraDisabledFeatures: serverDisabledFeatures(process.platform),
+    extraDisabledFeatures: measurement.disabledFeatures ?? serverDisabledFeatures(process.platform),
+    ...(measurement.chromiumArgs ? { extraArgs: measurement.chromiumArgs } : {}),
     armDownloadsAtLaunch: true,
     downloadQuotaBytes,
     requireSandbox: true,
@@ -268,8 +291,8 @@ export async function buildRuntime(
     getDefaultEngine,
     chromiumDriver,
     firefoxOptions: {
-      ...SERVER_FIREFOX_OPTIONS,
-      extraPrefs: serverFirefoxPrefs(process.platform),
+      launchExtras: { ...SERVER_FIREFOX_OPTIONS.launchExtras, ...measurement.firefoxLaunchExtras },
+      extraPrefs: measurement.firefoxPrefs ?? serverFirefoxPrefs(process.platform),
       downloadQuotaBytes,
       egress,
       processJournal,

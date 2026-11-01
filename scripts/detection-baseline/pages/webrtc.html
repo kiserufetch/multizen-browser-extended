@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MultiZen baseline WebRTC</title>
+</head>
+<body>
+<h1>WebRTC</h1>
+<pre id="mz-report" hidden></pre>
+<script>
+const GATHER_BUDGET_MS = 6000;
+const kindOf = (address) => {
+  if (!address) return 'none';
+  if (address.endsWith('.local')) return 'mdns';
+  return address.includes(':') ? 'ipv6' : 'ipv4';
+};
+
+async function gather() {
+  const stun = new URLSearchParams(location.search).get('stun');
+  const candidates = [];
+  const peer = new RTCPeerConnection({ iceServers: [{ urls: `stun:${stun}` }] });
+  const done = new Promise((resolve) => {
+    peer.onicecandidate = (event) => {
+      if (!event.candidate) return resolve();
+      const c = event.candidate;
+      candidates.push({ type: c.type, protocol: c.protocol, kind: kindOf(c.address), sameAsStun: c.address === stun.split(':')[0] });
+    };
+    setTimeout(resolve, GATHER_BUDGET_MS);
+  });
+  peer.createDataChannel('probe');
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+  await done;
+  const sdp = peer.localDescription ? peer.localDescription.sdp : '';
+  const report = {
+    gatheringState: peer.iceGatheringState,
+    candidates,
+    srflx: candidates.filter((c) => c.type === 'srflx').length,
+    host: candidates.filter((c) => c.type === 'host').length,
+    ipLiteralHost: candidates.filter((c) => c.type === 'host' && c.kind !== 'mdns').length,
+    sdpHasCandidateLines: /a=candidate:/.test(sdp),
+  };
+  peer.close();
+  return report;
+}
+
+const finish = (report) => {
+  const out = document.getElementById('mz-report');
+  out.textContent = JSON.stringify(report);
+  out.dataset.done = '1';
+};
+if (typeof RTCPeerConnection === 'undefined') finish({ blocked: true });
+else gather().then(finish, (e) => finish({ pageError: String(e) }));
+</script>
+</body>
+</html>

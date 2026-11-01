@@ -123,3 +123,6 @@ jobs:
 
       - name: Image build
         run: docker build -f docker/Dockerfile -t multizen-server:ci .
+
+      - name: Detection baseline image build
+        run: docker build -f docker/Dockerfile --target baseline -t multizen-baseline:ci .

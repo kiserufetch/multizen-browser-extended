@@ -633,13 +633,15 @@ export class CdpSession {
       });
       this.listenForTargets(client);
       await sendTo(client, "Target.setDiscoverTargets", { discover: true });
-      // Pages only. Each page session asks for its own iframes, and nothing else
-      // (service workers, extension background pages) is ever paused here.
+      // No filter, here or on a page's session: Chromium pauses a new worker of any kind
+      // whatever the filter says, and a target left out of it is then never attached and
+      // never resumed. Measured on CloakBrowser 146: with `page` and `iframe` filters no
+      // dedicated, shared, service or extension worker ever ran. Everything that isn't a
+      // tab or a frame gets resumed and dropped as it attaches: see onAttachedToTarget.
       await sendTo(client, "Target.setAutoAttach", {
         autoAttach: true,
         waitForDebuggerOnStart: true,
         flatten: true,
-        filter: [{ type: "page" }],
       });
       const { targetInfos } = await sendTo<{ targetInfos: TargetInfo[] }>(
         client,
@@ -757,10 +759,11 @@ export class CdpSession {
 
   /**
    * Every page the browser opens lands here, and each page or OOPIF session then asks
-   * for the iframes under it, because nested OOPIFs attach only from their parent's
-   * session. The first session for a target wins: a second one (auto-attach racing an
-   * explicit attach) is resumed and dropped, so setup runs once per target. Sessions
-   * an agent attached itself through cdp_send stay its own, untouched.
+   * for what's under it, because nested OOPIFs attach only from their parent's session.
+   * The first session for a target wins: a second one (auto-attach racing an explicit
+   * attach) is resumed and dropped, so setup runs once per target, and so is whatever
+   * isn't a tab or a frame, a worker above all. Sessions an agent attached itself
+   * through cdp_send stay its own, untouched.
    */
   private onAttachedToTarget(
     client: CDP.Client,
@@ -825,12 +828,7 @@ export class CdpSession {
       await sendTo(
         client,
         "Target.setAutoAttach",
-        {
-          autoAttach: true,
-          waitForDebuggerOnStart: true,
-          flatten: true,
-          filter: [{ type: "iframe" }],
-        },
+        { autoAttach: true, waitForDebuggerOnStart: true, flatten: true },
         sessionId,
       );
       await this.runTargetSetup(client, targetId, sessionId, type);

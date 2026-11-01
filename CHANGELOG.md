@@ -110,6 +110,15 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 - **`stdio --connect` keeps its session.** It pings the server every `--keepalive-ms` (30000), so
   an idle relay outlasts `--session-idle-ttl-ms`. When the session is gone anyway, because the server
   restarted or the token was revoked, it says so on stderr and exits 1, instead of answering 404s.
+- **`scripts/detection-baseline`: what pages and servers can see of a browser here.** `run.ts`
+  launches a profile through the server's own runtime and records a probe page, the request
+  headers, a font list, every input tool as a page's event log sees it, JA4 and HTTP/2 from a local
+  sniffer, WebRTC against a local STUN responder, and self-hosted CreepJS and
+  rebrowser-bot-detector at pinned commits, each section `unavailable` with a reason rather than
+  failing the run. `compare.ts` turns two runs into a Markdown table, and fails on `HeadlessChrome`,
+  `webdriver: true` or `pointer: none` on a desktop persona. `matrix.ts` runs all of it, on Windows
+  and in the image of `docker build --target baseline`. Results and what they mean:
+  `docs/detection-baselines/README.md`.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.

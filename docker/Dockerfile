@@ -35,6 +35,7 @@ COPY packages/mcp-server/package.json packages/mcp-server/package.json
 COPY packages/profile-manager/package.json packages/profile-manager/package.json
 COPY packages/settings-store/package.json packages/settings-store/package.json
 COPY packages/types/package.json packages/types/package.json
+COPY scripts/detection-baseline/package.json scripts/detection-baseline/package.json
 RUN corepack yarn workspaces focus @multizen/server
 COPY packages packages
 COPY apps/server apps/server
@@ -44,6 +45,24 @@ FROM build AS production-deps
 # esbuild inlined every @multizen package, which are all dev dependencies, so this leaves
 # no packages/ trees or dangling links to them.
 RUN corepack yarn workspaces focus @multizen/server --production
+
+FROM build AS baseline-deps
+# Before anything is taken away: the baseline runs as TypeScript, and on the runtime's sources.
+RUN corepack yarn workspaces focus @multizen/server @multizen/detection-baseline
+COPY scripts/detection-baseline scripts/detection-baseline
+
+# The detection baseline, on the same system packages as the server (see its compose service):
+#   docker build -f docker/Dockerfile --target baseline -t multizen-baseline:local .
+FROM runtime-base AS baseline
+ENV LANG=C.UTF-8
+COPY --from=baseline-deps /repo /repo
+RUN mkdir -p /data /tmp/.X11-unix /repo/docs/detection-baselines /repo/scripts/detection-baseline/.cache \
+  && chown -R node:node /data /repo/docs /repo/scripts/detection-baseline/.cache \
+  && chmod 1777 /tmp/.X11-unix
+USER node
+VOLUME /data
+WORKDIR /repo/scripts/detection-baseline
+ENTRYPOINT ["tini", "--", "node", "--import", "tsx", "run.ts"]
 
 FROM runtime-base
 # With no UTF-8 locale a browser can't open a file whose name isn't ASCII: upload_file and a
