@@ -13,7 +13,7 @@ import {
 import { camoufoxConfigForProfile } from "./firefoxFingerprint.ts";
 // Type-only: the concrete module (which statically imports camoufox-js +
 // playwright-core) is loaded lazily, so Chromium-only sessions never pull it in.
-import type { FirefoxBrowserDriver } from "./FirefoxBrowserDriver.ts";
+import type { FirefoxBrowserDriver, FirefoxBrowserDriverOptions } from "./FirefoxBrowserDriver.ts";
 
 interface EngineRouterEvents {
   "running-changed": (change: RunningStateChange) => void;
@@ -26,6 +26,8 @@ export interface EngineRouterOptions {
   getDefaultEngine: () => BrowserEngine;
   /** The already-constructed Chromium driver (owns companion-install wiring). */
   chromiumDriver: ChromiumBrowserDriver;
+  /** Passed to the Firefox driver, which the router itself constructs lazily. */
+  firefoxOptions?: Pick<FirefoxBrowserDriverOptions, "launchExtras">;
 }
 
 /**
@@ -42,6 +44,7 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   private readonly engineRegistry: EngineRegistry;
   private readonly getDefaultEngine: () => BrowserEngine;
   private readonly chromiumDriver: ChromiumBrowserDriver;
+  private readonly firefoxOptions: EngineRouterOptions["firefoxOptions"];
   private firefoxDriver: FirefoxBrowserDriver | null = null;
   /** profileId → the driver it launched on (bound at launch, cleared on close). */
   private readonly bindings = new Map<ProfileId, BrowserDriver>();
@@ -52,6 +55,7 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     this.engineRegistry = opts.engineRegistry;
     this.getDefaultEngine = opts.getDefaultEngine;
     this.chromiumDriver = opts.chromiumDriver;
+    this.firefoxOptions = opts.firefoxOptions;
     this.chromiumDriver.on("running-changed", (c) => this.onSubEvent(c));
   }
 
@@ -85,6 +89,7 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
       // (via CAMOUFOX_INSTALL_DIR); the driver lets camoufox-js resolve it, so
       // no executable path is threaded here.
       this.firefoxDriver = new FirefoxBrowserDriver({
+        ...this.firefoxOptions,
         profileManager: this.profileManager,
         browserDataDir: (profile) => browserDataDirForEngine(profile.dataDir, "camoufox"),
         buildFingerprintConfig: (profile) => camoufoxConfigForProfile(profile),

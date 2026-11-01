@@ -1,4 +1,4 @@
-export { ProfileManager } from "./ProfileManager.js";
+export { ProfileManager, type DataDirReconciliation } from "./ProfileManager.js";
 export {
   defaultFingerprint,
   generateFingerprint,
@@ -17,3 +17,10 @@ export {
   type GenerateFingerprintOptions,
 } from "./fingerprint.js";
 export { exportProfile, importProfile } from "./archive.js";
+export {
+  archiveFileName,
+  exportProfileToArchive,
+  importProfileFromArchive,
+  type ImportFromArchiveOptions,
+  type ImportedArchive,
+} from "./transfer.js";

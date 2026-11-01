@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
-import { mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
 import type {
   Profile,
   ProfileId,
@@ -39,6 +39,13 @@ interface ProfileRow {
 export interface ProfileManagerOptions {
   dbPath: string;
   profilesRoot: string;
+}
+
+export interface DataDirReconciliation {
+  /** Rows now pointing at the directory found under the profiles root. */
+  rebased: ProfileId[];
+  /** Rows left untouched: outside the root, with no directory for them under it. */
+  unresolved: Array<{ id: ProfileId; name: string; dataDir: string; expected: string }>;
 }
 
 export class ProfileManager {
@@ -347,6 +354,36 @@ export class ProfileManager {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Fix rows whose stored `data_dir` is outside the profiles root, as left by a
+   * copied database or a changed data dir. Launching such a row would open an
+   * empty directory: logged out, with no error. A row is rebased when its
+   * directory exists under the root. If any row can't be, nothing is written and
+   * the caller decides; the desktop never calls this.
+   */
+  reconcileDataDirs(): DataDirReconciliation {
+    const rows = this.db.prepare(`SELECT id, name, data_dir FROM profiles`).all() as Array<
+      Pick<ProfileRow, "id" | "name" | "data_dir">
+    >;
+    const rebase: Array<{ id: ProfileId; dataDir: string }> = [];
+    const unresolved: DataDirReconciliation["unresolved"] = [];
+    for (const row of rows) {
+      // path.relative compares case-insensitively on Windows.
+      const rel = relative(this.profilesRoot, row.data_dir);
+      if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) continue;
+      const expected = join(this.profilesRoot, row.id);
+      if (existsSync(expected)) rebase.push({ id: row.id, dataDir: expected });
+      else unresolved.push({ id: row.id, name: row.name, dataDir: row.data_dir, expected });
+    }
+    if (unresolved.length > 0) return { rebased: [], unresolved };
+
+    const setDataDir = this.db.prepare(`UPDATE profiles SET data_dir = ? WHERE id = ?`);
+    this.db.transaction(() => {
+      for (const { id, dataDir } of rebase) setDataDir.run(dataDir, id);
+    })();
+    return { rebased: rebase.map((r) => r.id), unresolved };
   }
 
   /**

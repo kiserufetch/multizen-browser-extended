@@ -56,6 +56,10 @@ export interface FirefoxBrowserDriverOptions {
   /** T20 seam: map the profile's fingerprint to a Camoufox `launchOptions`
    *  config. When absent, Camoufox generates its own coherent fingerprint. */
   buildFingerprintConfig?: (profile: Profile) => Record<string, unknown>;
+  /** Merged last into Playwright's launch options, over what camoufox produced.
+   *  The server sets `handleSIG*: false` here: Playwright's own SIGINT handler
+   *  calls process.exit(130), cutting a graceful shutdown short. */
+  launchExtras?: Partial<NonNullable<Parameters<typeof firefox.launchPersistentContext>[1]>>;
 }
 
 /** Only these env vars are forwarded to the browser child — deliberately NOT
@@ -111,12 +115,14 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   private readonly profileManager: ProfileManager;
   private readonly browserDataDir: (profile: Profile) => string;
   private readonly buildFingerprintConfig?: (profile: Profile) => Record<string, unknown>;
+  private readonly launchExtras: FirefoxBrowserDriverOptions["launchExtras"];
 
   constructor(opts: FirefoxBrowserDriverOptions) {
     super();
     this.profileManager = opts.profileManager;
     this.browserDataDir = opts.browserDataDir;
     this.buildFingerprintConfig = opts.buildFingerprintConfig;
+    this.launchExtras = opts.launchExtras;
   }
 
   override on<K extends keyof FirefoxDriverEvents>(event: K, listener: FirefoxDriverEvents[K]): this {
@@ -202,7 +208,10 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       // Hand the credential-free bridge URL straight to Playwright, overriding
       // whatever camoufox produced. Keeps the socks5 scheme intact end-to-end.
       if (proxy) opts.proxy = proxy;
-      context = await firefox.launchPersistentContext(userDataDir, opts);
+      context = await firefox.launchPersistentContext(userDataDir, {
+        ...opts,
+        ...this.launchExtras,
+      });
     } catch (e) {
       if (hasProxyBridge) stopBridgeForProfile(profileId);
       throw e;

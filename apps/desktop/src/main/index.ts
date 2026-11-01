@@ -4,8 +4,9 @@ import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import {
   ProfileManager,
-  exportProfile,
-  importProfile,
+  archiveFileName,
+  exportProfileToArchive,
+  importProfileFromArchive,
   generateFingerprint,
   reconcileFingerprint,
   FingerprintReconcileError,
@@ -29,10 +30,10 @@ import {
   ExtensionsService,
   LinuxSandboxManager,
   describeSandboxReason,
+  liveServerLockHolder,
   probeProxyGeo,
   readManifestIcon,
   resolveLoadDir,
-  storeEntryDir,
   sweepOrphans,
   type ProxyGeoResult,
 } from "@multizen/browser-runtime";
@@ -44,7 +45,7 @@ import type {
   SandboxStatus,
   UpdateStatus,
 } from "@multizen/types";
-import { isBrowserEngine, resolveEngine } from "@multizen/types";
+import { resolveEngine } from "@multizen/types";
 import { UpdaterService } from "./UpdaterService.ts";
 import { EngineUpdateService } from "./EngineUpdateService.ts";
 import { UsageReporting } from "./UsageReporting.ts";
@@ -172,6 +173,21 @@ app.whenReady().then(async () => {
   }
 
   const userData = app.getPath("userData");
+
+  // A `multizen-server` owns its data dir: its browsers and database must not be
+  // shared with this process. Only a dir pointed at with --user-data-dir can be
+  // one, so a normal launch pays a single failed file read here.
+  const serverHolder = await liveServerLockHolder(userData);
+  if (serverHolder) {
+    dialog.showErrorBox(
+      "MultiZen can't use this data directory",
+      `A MultiZen server (pid ${serverHolder.pid}) is using ${userData}.\n\n` +
+        "Stop the server, or start MultiZen with a different data directory.",
+    );
+    app.quit();
+    return;
+  }
+
   const dataRoot = join(userData, "data");
   // Shared extension store (deduped extension files loaded into many profiles).
   const extensionStoreRoot = join(dataRoot, "extension-store");
@@ -720,20 +736,11 @@ app.whenReady().then(async () => {
       if (!profile) return { ok: false, reason: "not_found" };
       const result = await dialog.showSaveDialog(mainWindow ?? undefined!, {
         title: "Export profile",
-        defaultPath: `${profile.name.replace(/[^a-z0-9-_]+/gi, "_")}.mzar`,
+        defaultPath: archiveFileName(profile),
         filters: [{ name: "MultiZen archive", extensions: ["mzar"] }],
       });
       if (result.canceled || !result.filePath) return { ok: false, reason: "cancelled" };
-      // Bundle the profile's shared-store extensions so importing on another
-      // machine restores the extension code too, not just a dangling reference.
-      const extensions = (profile.extensions ?? [])
-        .filter((e) => e.scope === "shared")
-        .map((e) => ({
-          id: e.id,
-          version: e.version,
-          dir: storeEntryDir(extensionStoreRoot, e.id, e.version),
-        }));
-      await exportProfile(profile, passphrase, result.filePath, { extensions });
+      await exportProfileToArchive(profile, passphrase, result.filePath, extensionStoreRoot);
       return { ok: true, path: result.filePath };
     },
   );
@@ -752,39 +759,25 @@ app.whenReady().then(async () => {
       const archivePath = result.filePaths[0];
       if (!archivePath) return { ok: false, reason: "cancelled" };
       try {
-        // Restore the full user-data-dir to disk. If the archive's id already
-        // exists here, importProfile mints a fresh id + dataDir so it never
-        // overwrites the existing profile. The returned Profile carries every
-        // field (extensions, icon, startUrl, searchProvider, fingerprint,
-        // proxy) and its dataDir points at the restored files.
-        const restored = await importProfile(archivePath, passphrase, join(dataRoot, "profiles"), {
-          idTaken: (id) => Boolean(profileManager.get(id)),
-          // Restore bundled (v2) extensions into the shared store so they work
-          // on this machine without the user re-adding them.
-          extensionStoreRoot,
-        });
-        // If the archive recorded an engine this build can't run (a legacy
-        // "cft" export, or a newer engine), clear it so the profile resolves to
-        // the app default at launch instead of handing the registry an unknown
-        // engine. Tell the user rather than silently changing their setup.
-        const recordedEngine: unknown = restored.engine;
-        if (recordedEngine !== undefined && !isBrowserEngine(recordedEngine)) {
-          restored.engine = undefined;
+        const { id, unavailableEngine } = await importProfileFromArchive(
+          profileManager,
+          archivePath,
+          passphrase,
+          {
+            profilesRoot: join(dataRoot, "profiles"),
+            extensionStoreRoot,
+            defaultEngine: cachedSettings?.browserEngine ?? "cloakbrowser",
+          },
+        );
+        // Tell the user rather than silently changing their setup.
+        if (unavailableEngine !== undefined) {
           void dialog.showMessageBox(mainWindow ?? undefined!, {
             type: "info",
             message: "Engine not available",
-            detail: `This profile was exported with an engine this version of MultiZen doesn't have (${String(recordedEngine)}). It will run on your default engine instead.`,
+            detail: `This profile was exported with an engine this version of MultiZen doesn't have (${unavailableEngine}). It will run on your default engine instead.`,
           });
         }
-        // Pin an unset engine (cleared above, or an archive that never recorded
-        // one) to the current default, like profiles:create, so a later change of
-        // the default can't move it onto another engine's empty data dir.
-        restored.engine ??= cachedSettings?.browserEngine ?? "cloakbrowser";
-        // Insert the row verbatim so the DB entry points at the restored files
-        // (the old create()-based path minted a new id/dataDir and orphaned the
-        // cookies/logins that were just restored).
-        const inserted = profileManager.insertImported(restored);
-        return { ok: true, id: inserted.id };
+        return { ok: true, id };
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
       }

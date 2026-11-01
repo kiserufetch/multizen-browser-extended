@@ -26,6 +26,7 @@ import { resolveLoadDir } from "./extensions/extensionStore.ts";
 import { killProcessTree, gracefulShutdown } from "./processTree";
 import { waitForCdpSessionReady } from "./cdpReadiness";
 import { sanitizeStartUrl } from "./startPage";
+import { firstFreePort } from "./portProbe.ts";
 import type { RuntimeHost } from "./host.ts";
 
 function readSysctl(path: string): string | null {
@@ -120,6 +121,14 @@ export interface ChromiumBrowserDriverOptions {
    * launch).
    */
   onSandboxInactive?: (binaryPath: string) => void;
+  /** Receives the browser's stderr. Default: raw lines on this process's stderr. */
+  onBrowserStderr?: (pid: number, text: string) => void;
+  /** Budget for the CDP readiness ladder after spawn. Default 15 s. */
+  readinessBudgetMs?: number;
+  /** Picks the --remote-debugging-port. Default: the next free port from 9222. */
+  allocatePort?: () => Promise<number>;
+  /** Added to the launch's one `--disable-features=` switch. Default: none. */
+  extraDisabledFeatures?: readonly string[];
 }
 
 export type RunningStateChange =
@@ -157,6 +166,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     binaryPath: string;
   }) => Promise<{ noSandbox: boolean }>;
   private readonly onSandboxInactive?: (binaryPath: string) => void;
+  private readonly onBrowserStderr?: (pid: number, text: string) => void;
+  private readonly readinessBudgetMs: number;
+  private readonly customAllocatePort?: () => Promise<number>;
+  private readonly extraDisabledFeatures: readonly string[];
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     super();
@@ -168,6 +181,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     this.extensionStoreRoot = opts.extensionStoreRoot;
     this.resolveSandboxDecision = opts.resolveSandboxDecision;
     this.onSandboxInactive = opts.onSandboxInactive;
+    this.onBrowserStderr = opts.onBrowserStderr;
+    this.readinessBudgetMs = opts.readinessBudgetMs ?? 15000;
+    this.customAllocatePort = opts.allocatePort;
+    this.extraDisabledFeatures = opts.extraDisabledFeatures ?? [];
   }
 
   override on<K extends keyof DriverEvents>(event: K, listener: DriverEvents[K]): this {
@@ -200,7 +217,6 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // failed-to-spawn launch counts — the user pressed Launch.
     this.profileManager.markOpened(profileId);
 
-    const port = this.allocatePort();
     // Resolve the profile's engine (its own pin, else the app default, else
     // CloakBrowser) and drive it from that engine's bootstrap binary.
     const engine = resolveEngine(profile.engine, this.getDefaultEngine());
@@ -298,6 +314,9 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       noSandbox = fallbackNeedsNoSandbox();
     }
 
+    // Probed here, after the engine download and geo lookup: this close to the
+    // spawn, a free port is still likely to be free.
+    const port = await this.allocatePort();
     const acceptLangPlain = fp.languages.join(",");
     // Collect every Chromium feature we disable into ONE list, emitted as a
     // single `--disable-features=` switch at the end. Chromium keeps only the
@@ -308,7 +327,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // MediaRouter is intentionally NOT disabled (stock Chrome ships it; turning
     // it off is itself a tell). The DNS/TLS entries are proxy-only and left
     // as-is pending the network-fingerprint golden harness.
-    const disableFeatures = ["Translate"];
+    const disableFeatures = ["Translate", ...this.extraDisabledFeatures];
     const args = [
       `--user-data-dir=${browserDataDir}`,
       `--remote-debugging-port=${port}`,
@@ -537,6 +556,14 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         stdio: ["ignore", "ignore", "pipe"],
         env: cleanEnv,
       });
+      let crashReject: ((e: Error) => void) | undefined;
+      // A failed spawn (missing or non-executable binary) arrives as "error". With
+      // no listener that is an uncaught exception, which Electron survives and
+      // plain Node does not.
+      child.on("error", (e) => {
+        process.stderr.write(`[multizen] Chromium spawn error: ${e.message}\n`);
+        crashReject?.(e);
+      });
       const pid = child.pid;
       if (!pid) throw new Error("Failed to spawn Chromium");
       // Treat as a sandbox crash ONLY when the FATAL signature appeared on
@@ -544,7 +571,6 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       // bare early exit, or a stray signature on a healthy child, is NOT a
       // sandbox crash.
       let sawSandboxCrash = false;
-      let crashReject: ((e: Error) => void) | undefined;
       const signalCrashIfConfirmed = (): void => {
         if (sawSandboxCrash && (child.exitCode !== null || child.signalCode !== null)) {
           crashReject?.(new SandboxStartupError());
@@ -557,7 +583,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
           sawSandboxCrash = true;
           signalCrashIfConfirmed();
         }
-        process.stderr.write(`[chromium ${pid}] ${line}\n`);
+        if (this.onBrowserStderr) this.onBrowserStderr(pid, line);
+        else process.stderr.write(`[chromium ${pid}] ${line}\n`);
       });
       child.on("exit", (code, signal) => {
         // First-line breadcrumb — the record's child.on("exit") below also
@@ -571,7 +598,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       });
 
       const session = new CdpSession({ port, engine });
-      // Readiness ladder within a fixed 15s budget, reusing this one session
+      // Readiness ladder within a fixed budget, reusing this one session
       // (connect() is idempotent): (1) /json/version answers, (2) /json/list has
       // a page target, (3) connect()+attach succeeds. Raced against a confirmed
       // sandbox-crash signal so a failed sandbox aborts at once instead of
@@ -580,7 +607,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         crashReject = reject;
       });
       try {
-        await Promise.race([waitForCdpSessionReady(port, session, 15000), crashSignal]);
+        await Promise.race([
+          waitForCdpSessionReady(port, session, this.readinessBudgetMs),
+          crashSignal,
+        ]);
       } catch (e) {
         // Tear down the half-launched browser — this record isn't in
         // `this.running` yet, so kill the spawned child directly. The caller
@@ -897,8 +927,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return r.session;
   }
 
-  private allocatePort(): number {
-    return this.nextPort++;
+  private allocatePort(): Promise<number> {
+    return this.customAllocatePort
+      ? this.customAllocatePort()
+      : firstFreePort(() => this.nextPort++);
   }
 }
 

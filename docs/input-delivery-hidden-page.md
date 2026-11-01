@@ -36,11 +36,31 @@ Further findings:
 - Turning off the `DropInputEventsBeforeFirstPaint` feature does not change the result (diagnosis only), so the drop comes from another part of Chromium's pre-paint input suppression. The exact switch was not identified.
 - Mouse calls on any hidden page take about 5 s, before and after the fix. Chromium holds the mouse-move ack while the page produces no frames.
 
-## Cause on Windows: not confirmed
+## Cause on Windows: hypothesis at the time
 
-There was no Windows machine for this work, so the original hypothesis is still not measured directly. The Linux results are consistent with it. On Windows, Chromium tracks native window occlusion and reports a fully covered window's pages as hidden. A profile window that opens already covered would load its page hidden and never paint, so all input to it would be lost. A window that paints before it is covered would keep working. That fits the 3-of-6 split.
+Confirmed later, see "Measured on Windows" below. There was no Windows machine for this work, so the original hypothesis was not measured directly. The Linux results are consistent with it. On Windows, Chromium tracks native window occlusion and reports a fully covered window's pages as hidden. A profile window that opens already covered would load its page hidden and never paint, so all input to it would be lost. A window that paints before it is covered would keep working. That fits the 3-of-6 split.
 
 To confirm it, run the packaged app (isolated user data at a short path, for example `%TEMP%\mzlive`, with another `mcpHttpPort` in `settings.json`). Call `launch_profile`, then `evaluate_js` with `[document.visibilityState, performance.getEntriesByType("paint").length]` before any input. Then check whether the profile's window is minimized. With a single tab in a window that is not minimized, `"hidden"` can only come from occlusion, so `["hidden", 0]` means the window opened covered.
+
+## Measured on Windows (2026-10-31, server work)
+
+The cause is confirmed: it is Chromium's native window occlusion tracking, with no MultiZen code in the path. Windows 11, CloakBrowser 146.0.7680.177.5, the bare binary driven over CDP with a temp profile, a `data:` page, sampled at 0.5, 2 and 4 s. The console user had been idle for 69 minutes with a 15-minute display timeout, so the display was presumably off. That was not checked directly.
+
+| Launch | `[visibilityState, paint entries, hasFocus]` |
+| --- | --- |
+| Plain | `["hidden",0,true]` at all three samples |
+| `--disable-features=CalculateNativeWinOcclusion` | `["visible",2,true]` at all three samples |
+
+The full MultiZen launch through `multizen-server` behaves the same. The window was a real one, not minimized: `IsWindowVisible` true, `IsIconic` false, normal rect. In that state:
+
+- `click_ref` failed with `INPUT_NOT_DELIVERED`, as designed.
+- `Page.bringToFront` returned success and did not help on 5 of 5 retries. The foreground window stayed the user's other app, and `hasFocus` flipped to true while the page stayed hidden.
+- Raising the window with `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)` did not help either, for at least 2.5 s.
+- `SetThreadExecutionState(ES_DISPLAY_REQUIRED)`, held for the whole run, did not help.
+
+So the advice in the error message does not always work: with the display off (or the screen locked, which was not tested), nothing a client can do makes this page paint. `multizen-server` therefore launches with that one feature disabled, on Windows only (`serverDisabledFeatures` in `apps/server/src/runtime.ts`), since nobody is watching its windows. With it, the first `click_ref` on a freshly loaded page delivers. The desktop's launch flags are unchanged, and a desktop profile opened behind other windows or with the display off still reports `INPUT_NOT_DELIVERED`.
+
+Not measured: whether the feature is off in the same way for Camoufox, which has its own occlusion handling, and whether a page can tell the difference (detection baselines should compare it).
 
 ## Options weighed
 
@@ -68,6 +88,5 @@ Cost: one probe adds a few local CDP round trips. Median call times on visible p
 
 ## Not verified
 
-- The Windows build of CloakBrowser and the packaged Windows app were not run. `Page.createIsolatedWorld` worked on the CloakBrowser 146 Linux build.
-- The cause on Windows (see above).
+- The packaged Windows app was not run. `Page.createIsolatedWorld` worked on the CloakBrowser 146 Linux build, and on the Windows build through `multizen-server`.
 - Camoufox profiles use `FirefoxBrowserDriver` (Playwright), not this path, and were not tested.

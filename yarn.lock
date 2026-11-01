@@ -1149,6 +1149,36 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@multizen/server@workspace:apps/server":
+  version: 0.0.0-use.local
+  resolution: "@multizen/server@workspace:apps/server"
+  dependencies:
+    "@modelcontextprotocol/sdk": "npm:^1.0.4"
+    "@multizen/browser-runtime": "workspace:*"
+    "@multizen/cdp-driver": "workspace:*"
+    "@multizen/mcp-server": "workspace:*"
+    "@multizen/profile-manager": "workspace:*"
+    "@multizen/settings-store": "workspace:*"
+    "@multizen/types": "workspace:*"
+    "@types/node": "npm:^22.10.0"
+    better-sqlite3: "npm:^11.7.0"
+    camoufox-js: "patch:camoufox-js@npm%3A0.12.0#~/.yarn/patches/camoufox-js-npm-0.12.0-2464878a7a.patch"
+    chrome-remote-interface: "npm:^0.33.3"
+    esbuild: "npm:^0.25.0"
+    extract-zip: "npm:^2.0.1"
+    https-proxy-agent: "npm:^9.0.0"
+    playwright-core: "npm:1.60.0"
+    socks: "npm:^2.8.3"
+    socks-proxy-agent: "npm:^10.0.0"
+    tsx: "npm:^4.19.2"
+    typescript: "npm:^5.7.0"
+    uuid: "npm:^11.0.5"
+    zod: "npm:^3.23.8"
+  bin:
+    multizen-server: ./bin/multizen-server.js
+  languageName: unknown
+  linkType: soft
+
 "@multizen/settings-store@workspace:*, @multizen/settings-store@workspace:packages/settings-store":
   version: 0.0.0-use.local
   resolution: "@multizen/settings-store@workspace:packages/settings-store"

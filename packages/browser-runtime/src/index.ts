@@ -16,6 +16,8 @@ export * from "./launchGeo.ts";
 export * from "./launchTimezone.ts";
 export * from "./cdpReadiness.ts";
 export * from "./processTree.ts";
+export * from "./portProbe.ts";
+export * from "./serverLock.ts";
 export * from "./firefoxFingerprint.ts";
 export * from "./startPage.ts";
 export * from "./linuxSandbox.ts";

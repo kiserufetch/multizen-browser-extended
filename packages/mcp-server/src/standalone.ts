@@ -2,12 +2,12 @@
  * Standalone runner for the MCP server.
  *
  * Used both for `yarn mcp:dev` (development) and as the entry point in
- * `bin/multizen-mcp.js` so an MCP client like Cursor or Claude Desktop
- * can spawn it via stdio without launching the desktop app.
+ * `bin/multizen-mcp.js`.
  *
  * In standalone mode the browser driver is the MockBrowserDriver — useful
- * for protocol tests but not for real browser work. The desktop app embeds
- * the same MCP server with the real Chromium-backed driver.
+ * for protocol tests but not for real browser work, so it runs only with an
+ * explicit `--mock`. Real browsers come from `multizen-server` (apps/server) or
+ * the desktop app, which embed the same MCP server.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ProfileManager } from "@multizen/profile-manager";
@@ -18,7 +18,24 @@ import { mkdirSync } from "node:fs";
 import { createMultizenMcpServer } from "./server.js";
 import { MockBrowserDriver } from "./MockBrowserDriver.js";
 
+const REAL_SERVER_HINT = `multizen-mcp only runs a mock browser driver, and only with --mock.
+
+For real browsers, run the MultiZen server:
+  corepack yarn workspace @multizen/server build
+  node apps/server/bin/multizen-server.js stdio
+or over HTTP:
+  node apps/server/bin/multizen-server.js serve
+
+Or connect to the MCP port of the running desktop app (Settings > MCP).
+`;
+
 async function main(): Promise<void> {
+  // Stderr: an MCP client that spawned this reads stdout as JSON-RPC.
+  if (!process.argv.includes("--mock")) {
+    process.stderr.write(REAL_SERVER_HINT);
+    process.exit(2);
+  }
+
   const dataRoot = join(homedir(), ".multizen");
   mkdirSync(dataRoot, { recursive: true });
 

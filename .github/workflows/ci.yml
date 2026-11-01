@@ -61,7 +61,7 @@ jobs:
       - name: Launch timezone unit tests
         run: yarn test:launch-timezone
 
-      # types / cdp-driver / mcp-server / browser-runtime node:test suites (input events, MCP
+      # types / cdp-driver / mcp-server / profile-manager / browser-runtime / server node:test suites (input events, MCP
       # security gates, transport, process tree, CDP readiness, …).
       - name: Workspace unit tests
         run: yarn test:unit
