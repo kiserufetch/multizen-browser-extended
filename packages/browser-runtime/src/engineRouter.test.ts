@@ -14,6 +14,7 @@ import type {
 } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
 import type { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
+import { DownloadTracker } from "./downloads.ts";
 import type { EngineRegistry } from "./engineRegistry.ts";
 import { EngineRouter, type EngineRouterOptions } from "./engineRouter.ts";
 import { StrictGeoCoherenceError } from "./launchTimezone";
@@ -203,17 +204,36 @@ test("downloads of a stopped profile come from its engine's driver", async () =>
   assert.deepEqual(await r.getDownload("p", "d1"), { id: "d1" });
 });
 
-test("a stopped Camoufox profile whose driver never loaded has no downloads to report", async () => {
-  const r = new EngineRouter({
-    profileManager: {
-      get: (id: ProfileId) => ({ id, engine: "camoufox", dataDir: "unused" }) as Profile,
-    } as unknown as ProfileManager,
-    engineRegistry: { get: () => new FakeBootstrap(true) } as unknown as EngineRegistry,
-    getDefaultEngine: (): BrowserEngine => "cloakbrowser",
-    chromiumDriver: new FakeDriver() as unknown as ChromiumBrowserDriver,
-  });
-  assert.deepEqual(await r.listDownloads("p"), []);
-  assert.equal(await r.getDownload("p", "d1"), null);
+test("a stopped Camoufox profile reaches its downloads with its driver not loaded", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mz-router-"));
+  try {
+    // What an earlier run of the server left: one finished download.
+    const earlier = await DownloadTracker.open(join(dir, "downloads"));
+    earlier.began({ guid: "g1", url: "http://site/f", suggestedFilename: "report.txt" });
+    writeFileSync(join(dir, "downloads", "g1"), "bytes");
+    earlier.progress({ guid: "g1", totalBytes: 5, receivedBytes: 5, state: "completed" });
+    await earlier.settled();
+
+    const r = new EngineRouter({
+      profileManager: {
+        get: (id: ProfileId) => ({ id, engine: "camoufox", dataDir: dir }) as Profile,
+      } as unknown as ProfileManager,
+      engineRegistry: { get: () => new FakeBootstrap(true) } as unknown as EngineRegistry,
+      getDefaultEngine: (): BrowserEngine => "cloakbrowser",
+      chromiumDriver: new FakeDriver() as unknown as ChromiumBrowserDriver,
+    });
+    const [record] = await r.listDownloads("p");
+    assert.equal(record?.fileName, "report.txt");
+    assert.equal((await r.getDownload("p", record!.id))?.path, join(dir, "downloads", "report.txt"));
+    assert.equal(await r.getDownload("p", "nope"), null);
+    assert.equal(
+      (r as unknown as { firefoxDriver: unknown }).firefoxDriver,
+      null,
+      "reading downloads must not load camoufox-js",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("closing a profile clears its upload inbox and nothing else", async () => {

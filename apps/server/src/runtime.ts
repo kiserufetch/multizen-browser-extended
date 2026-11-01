@@ -45,6 +45,15 @@ export function serverDisabledFeatures(platform: NodeJS.Platform): string[] {
   return platform === "win32" ? ["CalculateNativeWinOcclusion"] : [];
 }
 
+/**
+ * The same for Camoufox on Windows. A covered window still reads as visible there, but
+ * takes no input. Measured on the bare engine: a click hangs at "performing click
+ * action" without this, and takes 100 ms with it.
+ */
+export function serverFirefoxPrefs(platform: NodeJS.Platform): Record<string, boolean> {
+  return platform === "win32" ? { "widget.windows.window_occlusion_tracking.enabled": false } : {};
+}
+
 /** A row points at a directory the server can't find under its own data dir. */
 export class DataDirMismatchError extends Error {}
 
@@ -191,7 +200,7 @@ export async function buildRuntime(
     engineRegistry,
     getDefaultEngine,
     chromiumDriver,
-    firefoxOptions: SERVER_FIREFOX_OPTIONS,
+    firefoxOptions: { ...SERVER_FIREFOX_OPTIONS, extraPrefs: serverFirefoxPrefs(process.platform) },
     engineNotReady: "reject",
   });
   driver.on("running-changed", (change) => log.info("profile state", { ...change }));

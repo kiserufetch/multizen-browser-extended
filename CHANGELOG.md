@@ -13,9 +13,12 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 - **MCP `press_key`, `hover`, `select_option`, `scroll`, `upload_file`,
   `list_downloads`, `get_download`, `set_dialog_policy`, `list_dialogs` and
-  `handle_dialog`** on CloakBrowser profiles. On the desktop, a profile's downloads
-  start going to its `downloads` directory at the first `list_downloads` or
-  `get_download`, not before.
+  `handle_dialog`** on both engines. On the desktop, a CloakBrowser profile's
+  downloads start going to its `downloads` directory at the first `list_downloads`
+  or `get_download`, not before. A Camoufox profile's are copied there from launch,
+  because they would otherwise be deleted when the browser closes.
+- **`click_ref` and `type_ref` on Camoufox.** Its `extract` now also returns
+  `ariaSnapshot`, text with iframes nested in it and refs like `p3.e7`.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.
@@ -28,13 +31,16 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   `extract`, ...) now follow the active tab, which `activate_tab` also changes.
   Before, they stayed on the first tab whatever was open. `list_tabs` reports
   `activeTargetId`, and closing the first tab no longer ends the session.
+- **Page tools on Camoufox follow the active tab too.** They used to go to the tab
+  opened last, so a popup took them over. `new_tab` with a URL now returns without
+  waiting for it to load, as on CloakBrowser.
 - **`click_ref` and `type_ref` work on any tab and in any iframe**, cross-origin
   included, and `extract` shows what is inside iframes. A ref stays the same while
   its element lives. Once the element or its document is gone it fails with
   `STALE_REF`. It used to be reassigned on every `extract`, so an old ref could
   click a different element.
 - `navigate` fails with `NAVIGATION_FAILED` when the load fails. It used to report
-  success on a connection error page.
+  success on a connection error page. On Camoufox it was a generic error.
 
 ### Fixed
 
@@ -56,14 +62,14 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 ### Known limitations
 
-- Camoufox has no CDP. This is intended: `click_ref`, `type_ref`, `cdp_send` and
-  `cdp_send_no_safety` always return an error there, and `request_human` cannot
-  bring the window forward. Use `click` / `type` with CSS selectors.
+- Camoufox has no CDP. This is intended: `cdp_send` and `cdp_send_no_safety` return
+  `UNSUPPORTED_ON_ENGINE` there, and `request_human` cannot bring the window forward.
+- On Windows, a Camoufox window that is fully covered takes no input: page tools time
+  out until it is raised. The same condition on CloakBrowser gives
+  `INPUT_NOT_DELIVERED`.
 - Profiles created through MCP or imported on 0.10.0 still have no stored engine
   and follow the default. Picking an engine for such a profile in its edit sheet
   stores it.
-- Camoufox has still not been run live. The new MCP engine paths are covered by
-  unit tests only.
 
 ## [0.10.0] - 2026-10-31
 

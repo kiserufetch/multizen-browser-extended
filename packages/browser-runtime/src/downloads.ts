@@ -168,6 +168,24 @@ export class DownloadTracker {
   }
 }
 
+const sharedTrackers = new Map<string, Promise<DownloadTracker>>();
+
+/**
+ * The one tracker of a directory in this process, kept past the browser so a finished
+ * download stays reachable after it closes. Both engines' drivers and the router reach
+ * it: a profile can change engine, and two trackers would overwrite each other's index.
+ * A directory that failed to open is tried again by the next caller.
+ */
+export function sharedDownloadTracker(dir: string): Promise<DownloadTracker> {
+  let tracker = sharedTrackers.get(dir);
+  if (!tracker) {
+    tracker = DownloadTracker.open(dir);
+    sharedTrackers.set(dir, tracker);
+    tracker.catch(() => sharedTrackers.delete(dir));
+  }
+  return tracker;
+}
+
 function publicRecord(entry: Entry): DownloadRecord {
   const { guid: _guid, storedAs: _storedAs, ...record } = entry;
   return record;

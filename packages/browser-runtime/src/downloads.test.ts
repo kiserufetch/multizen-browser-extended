@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DownloadTracker, sanitizeFilename } from "./downloads.ts";
+import { DownloadTracker, sanitizeFilename, sharedDownloadTracker } from "./downloads.ts";
 
 const DIRS: string[] = [];
 function tempDir(): string {
@@ -13,6 +13,18 @@ function tempDir(): string {
 }
 after(() => {
   for (const dir of DIRS) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
+
+test("a directory has one shared tracker, tried again if it failed to open", async () => {
+  const dir = tempDir();
+  assert.equal(await sharedDownloadTracker(dir), await sharedDownloadTracker(dir));
+  assert.notEqual(await sharedDownloadTracker(tempDir()), await sharedDownloadTracker(dir));
+
+  const blocked = join(tempDir(), "file");
+  writeFileSync(blocked, "not a directory");
+  await assert.rejects(sharedDownloadTracker(blocked));
+  rmSync(blocked);
+  assert.ok(await sharedDownloadTracker(blocked));
 });
 
 /** As the browser does: the file exists under the guid by the time it completes. */

@@ -14,6 +14,7 @@ import {
   openProfiles,
   SERVER_FIREFOX_OPTIONS,
   serverDisabledFeatures,
+  serverFirefoxPrefs,
   type ServerRuntime,
 } from "./runtime.ts";
 
@@ -117,6 +118,21 @@ test("the occlusion tracker is off on Windows only, and only here", async () => 
       runtime.driver as unknown as { chromiumDriver: { extraDisabledFeatures: unknown } }
     ).chromiumDriver;
     assert.deepEqual(chromium.extraDisabledFeatures, serverDisabledFeatures(process.platform));
+  });
+});
+
+test("Camoufox's occlusion tracker is off on Windows only, and reaches the router", async () => {
+  assert.deepEqual(serverFirefoxPrefs("win32"), {
+    "widget.windows.window_occlusion_tracking.enabled": false,
+  });
+  assert.deepEqual(serverFirefoxPrefs("linux"), {});
+  assert.deepEqual(serverFirefoxPrefs("darwin"), {});
+  await withRuntime(async (runtime) => {
+    const { firefoxOptions } = runtime.driver as unknown as {
+      firefoxOptions: { extraPrefs: unknown; launchExtras: unknown };
+    };
+    assert.deepEqual(firefoxOptions.extraPrefs, serverFirefoxPrefs(process.platform));
+    assert.deepEqual(firefoxOptions.launchExtras, SERVER_FIREFOX_OPTIONS.launchExtras);
   });
 });
 

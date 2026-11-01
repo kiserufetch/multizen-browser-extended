@@ -1,6 +1,6 @@
 import type { FingerprintConfig, Profile } from "@multizen/types";
 
-function osForDevice(device: string): "windows" | "macos" | "linux" {
+export function osForDevice(device: string): "windows" | "macos" | "linux" {
   if (device.startsWith("mac") || device.startsWith("imac")) return "macos";
   if (device.startsWith("windows")) return "windows";
   if (device.startsWith("linux")) return "linux";

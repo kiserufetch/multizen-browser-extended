@@ -1,6 +1,7 @@
 import type { EventEmitter } from "node:events";
 import CDP from "chrome-remote-interface";
 import {
+  DEFAULT_DIALOG_ANSWERS,
   MultizenError,
   type DialogPolicy,
   type DialogResponse,
@@ -313,14 +314,6 @@ export interface DownloadEventSink {
     state: "inProgress" | "completed" | "canceled";
   }): void;
 }
-
-/** Today's answers: accept what has one outcome, nothing affirmative the agent didn't ask for. */
-const DEFAULT_DIALOG_ANSWERS: Readonly<Record<DialogType, "accept" | "dismiss">> = {
-  alert: "accept",
-  beforeunload: "accept",
-  confirm: "dismiss",
-  prompt: "dismiss",
-};
 
 /**
  * Thrown when Chromium accepted an Input.dispatch* command but the page

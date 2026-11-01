@@ -1,19 +1,37 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { firefox, type BrowserContext, type Page } from "playwright-core";
+import { rm, stat } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  firefox,
+  type BrowserContext,
+  type Dialog,
+  type Download,
+  type Locator,
+  type Page,
+} from "playwright-core";
 import { launchOptions } from "camoufox-js";
+import { parseChord, TargetRegistry, type KeyPlatform } from "@multizen/cdp-driver";
 import type { BrowserDriver } from "@multizen/types";
 import type {
   CapturedFrame,
+  DialogPolicy,
+  DialogResponse,
+  DialogType,
   DownloadFile,
   DownloadRecord,
   DriverAction,
+  ElementTarget,
   LaunchedProfile,
   OpenDialog,
   Profile,
   ProfileId,
 } from "@multizen/types";
-import { MultizenError } from "@multizen/types";
+import { DEFAULT_DIALOG_ANSWERS, MultizenError, PROFILE_DOWNLOADS_DIR } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
+import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
+import { osForDevice } from "./firefoxFingerprint.ts";
+import { frameOfRef, playwrightChord, snapshotRefs, TabRefs, tabOfRef } from "./firefoxRefs.ts";
 import { resolveProxyLaunchGeo } from "./launchGeo";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { sanitizeStartUrl } from "./startPage";
@@ -24,7 +42,9 @@ import type { RunningStateChange } from "./ChromiumBrowserDriver.ts";
  * through playwright-core's Firefox and configures its anti-detect fingerprint
  * via camoufox-js. There is NO CDP here, so `cdpSend` is rejected — the curated
  * tools work because T16 promoted them to first-class BrowserDriver verbs, which
- * this driver implements natively via Playwright.
+ * this driver implements natively via Playwright. Page verbs act on the active
+ * tab, as on the CDP path. Input goes through Playwright's own actions, which wait
+ * for the element to take it, so there is no separate delivery check.
  *
  * Security hardening baked in (from the Camoufox review):
  *   - The binary is app-vendored: CamoufoxBootstrap downloads it into
@@ -39,6 +59,39 @@ import type { RunningStateChange } from "./ChromiumBrowserDriver.ts";
  *     (upstream auth + remote DNS), not raw credentials on the command line.
  */
 
+/** Long enough for a page to settle: the wait Playwright's own actions default to. */
+const ACTION_TIMEOUT_MS = 30_000;
+/** A <select> has its options or it doesn't: the CDP path doesn't wait for them at all. */
+const SELECT_OPTION_TIMEOUT_MS = 3_000;
+const FILE_CHOOSER_TIMEOUT_MS = 5_000;
+const DOCUMENT_READ_TIMEOUT_MS = 5_000;
+const WHEEL_AFTER_MOVE_MS = 150;
+/** How long closing waits for a finished download to be copied out. */
+const DOWNLOAD_DRAIN_MS = 3_000;
+/** Under the downloads dir: Playwright's working copies, which it deletes on close. A
+ *  kept file can't collide with this: its sanitized name never starts with a dot. */
+const PLAYWRIGHT_DOWNLOADS_DIR = ".playwright";
+/**
+ * Differs between two documents in a frame, and stays through pushState and hash
+ * changes. Read in the main world, as `extract` reads the text: a page that tampers
+ * with it can only confuse refs into its own elements.
+ */
+const DOCUMENT_ID = "performance.timeOrigin";
+
+interface OpenFirefoxDialog extends OpenDialog {
+  pageId: string;
+  dialog: Dialog;
+}
+
+interface ResolvedElement {
+  page: Page;
+  pageId: string;
+  locator: Locator;
+  /** How error messages call it. */
+  label: string;
+  ref?: string;
+}
+
 interface RunningFirefox {
   context: BrowserContext;
   startedAt: string;
@@ -49,6 +102,19 @@ interface RunningFirefox {
   /** Stable per-tab ids (Firefox has no CDP targetId). */
   pageIds: Map<Page, string>;
   nextPageId: number;
+  /** Which tab page verbs act on, and which one takes over when it closes. */
+  targets: TargetRegistry;
+  /** The active tab changed without the browser showing it: the next page verb raises it. */
+  activeNeedsRaise: boolean;
+  /** The persona's platform, which decides what `ControlOrMeta` means. */
+  platform: KeyPlatform;
+  tabRefs: Map<string, TabRefs>;
+  dialogPolicy: DialogPolicy;
+  openDialogs: Map<string, OpenFirefoxDialog>;
+  dialogSeq: number;
+  dialogWatchers: Set<{ pageId: string; fire: () => void }>;
+  /** Downloads on their way out of Playwright's directory, which closing empties. */
+  savingDownloads: Set<Promise<void>>;
   /** Polls for zero open windows and closes the context when the user shuts the
    *  last window (macOS keeps the browser alive otherwise). Set after launch. */
   windowWatcher?: NodeJS.Timeout;
@@ -70,6 +136,29 @@ export interface FirefoxBrowserDriverOptions {
    *  The server sets `handleSIG*: false` here: Playwright's own SIGINT handler
    *  calls process.exit(130), cutting a graceful shutdown short. */
   launchExtras?: Partial<NonNullable<Parameters<typeof firefox.launchPersistentContext>[1]>>;
+  /** Firefox prefs on top of camoufox's own, which `launchExtras` would replace whole. */
+  extraPrefs?: Readonly<Record<string, string | number | boolean>>;
+}
+
+type PersistentContextOptions = NonNullable<Parameters<typeof firefox.launchPersistentContext>[1]>;
+
+/** What Playwright launches with: camoufox's options, then ours, then the caller's extras. */
+export function persistentContextOptions(
+  camoufox: PersistentContextOptions,
+  ours: Pick<FirefoxBrowserDriverOptions, "launchExtras" | "extraPrefs"> & {
+    downloadsPath: string;
+    proxy?: { server: string };
+  },
+): PersistentContextOptions {
+  return {
+    ...camoufox,
+    // Hand the credential-free bridge URL straight to Playwright, overriding
+    // whatever camoufox produced. Keeps the socks5 scheme intact end-to-end.
+    ...(ours.proxy ? { proxy: ours.proxy } : {}),
+    downloadsPath: ours.downloadsPath,
+    firefoxUserPrefs: { ...camoufox.firefoxUserPrefs, ...ours.extraPrefs },
+    ...ours.launchExtras,
+  };
 }
 
 /** Only these env vars are forwarded to the browser child — deliberately NOT
@@ -126,6 +215,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   private readonly browserDataDir: (profile: Profile) => string;
   private readonly buildFingerprintConfig?: (profile: Profile) => Record<string, unknown>;
   private readonly launchExtras: FirefoxBrowserDriverOptions["launchExtras"];
+  private readonly extraPrefs: FirefoxBrowserDriverOptions["extraPrefs"];
 
   constructor(opts: FirefoxBrowserDriverOptions) {
     super();
@@ -133,6 +223,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     this.browserDataDir = opts.browserDataDir;
     this.buildFingerprintConfig = opts.buildFingerprintConfig;
     this.launchExtras = opts.launchExtras;
+    this.extraPrefs = opts.extraPrefs;
   }
 
   override on<K extends keyof FirefoxDriverEvents>(event: K, listener: FirefoxDriverEvents[K]): this {
@@ -214,25 +305,32 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     try {
       const opts = (await launchOptions(
         config as Parameters<typeof launchOptions>[0],
-      )) as NonNullable<Parameters<typeof firefox.launchPersistentContext>[1]>;
-      // Hand the credential-free bridge URL straight to Playwright, overriding
-      // whatever camoufox produced. Keeps the socks5 scheme intact end-to-end.
-      if (proxy) opts.proxy = proxy;
-      context = await firefox.launchPersistentContext(userDataDir, {
-        ...opts,
-        ...this.launchExtras,
-      });
+      )) as PersistentContextOptions;
+      // Playwright deletes these when the context closes, so each is copied out when
+      // it completes. What a crash left in there belongs to nothing.
+      const downloadsPath = join(profile.dataDir, PROFILE_DOWNLOADS_DIR, PLAYWRIGHT_DOWNLOADS_DIR);
+      await rm(downloadsPath, { recursive: true, force: true }).catch(() => {});
+      context = await firefox.launchPersistentContext(
+        userDataDir,
+        persistentContextOptions(opts, {
+          downloadsPath,
+          ...(proxy ? { proxy } : {}),
+          ...(this.launchExtras ? { launchExtras: this.launchExtras } : {}),
+          ...(this.extraPrefs ? { extraPrefs: this.extraPrefs } : {}),
+        }),
+      );
     } catch (e) {
       if (hasProxyBridge) stopBridgeForProfile(profileId);
       throw e;
     }
 
-    const startedAt = new Date().toISOString();
-    const pageIds = new Map<Page, string>();
-    let nextPageId = 1;
-    const initial = context.pages();
-    if (initial.length === 0) initial.push(await context.newPage());
-    for (const p of initial) pageIds.set(p, String(nextPageId++));
+    if (context.pages().length === 0) await context.newPage();
+    const record = this.adopt(
+      profileId,
+      context,
+      hasProxyBridge,
+      osForDevice(profile.fingerprint.device),
+    );
 
     // Open the profile's start page on EVERY launch. Unlike Chromium (which
     // restores the previous tabs via --restore-last-session), Playwright-driven
@@ -242,25 +340,48 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     // back to the app default, like the Chromium path. Fire-and-forget: a nav
     // failure (bad proxy/network) must not throw out of launch().
     const startUrl = sanitizeStartUrl(profile.startUrl);
-    void initial[0]?.goto(startUrl).catch(() => {});
+    void context.pages()[0]?.goto(startUrl).catch(() => {});
 
+    this.emit("running-changed", { kind: "launched", profileId });
+    return { id: profileId, cdpEndpoint: "", pid: record.pid, startedAt: record.startedAt };
+  }
+
+  /** Takes over a started browser: its tabs, and every event that outlives launch(). */
+  private adopt(
+    profileId: ProfileId,
+    context: BrowserContext,
+    hasProxyBridge: boolean,
+    platform: KeyPlatform,
+  ): RunningFirefox {
     const record: RunningFirefox = {
       context,
-      startedAt,
+      startedAt: new Date().toISOString(),
       // Firefox/Playwright exposes no stable child pid for a persistent context;
       // pid is informational only, so 0 = unknown.
       pid: 0,
       hasProxyBridge,
       closingByRequest: false,
-      pageIds,
-      nextPageId,
+      pageIds: new Map(),
+      nextPageId: 1,
+      targets: new TargetRegistry(),
+      activeNeedsRaise: false,
+      platform,
+      tabRefs: new Map(),
+      dialogPolicy: { mode: "auto" },
+      openDialogs: new Map(),
+      dialogSeq: 0,
+      dialogWatchers: new Set(),
+      savingDownloads: new Set(),
     };
+    for (const p of context.pages()) {
+      record.targets.upsert({ targetId: this.trackPage(record, profileId, p), type: "page" });
+    }
     this.running.set(profileId, record);
 
-    // Track tabs opened later so list/activate/close_tab can address them.
+    // Track tabs opened later so list/activate/close_tab can address them. A popup or
+    // a tab the operator opened doesn't take the active tab away.
     context.on("page", (p: Page) => {
-      const r = this.running.get(profileId);
-      if (r && !r.pageIds.has(p)) r.pageIds.set(p, String(r.nextPageId++));
+      record.targets.addIdle({ targetId: this.trackPage(record, profileId, p), type: "page" });
     });
     context.on("close", () => {
       if (record.windowWatcher) clearInterval(record.windowWatcher);
@@ -298,18 +419,50 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
         zeroSinceMs = null;
       }
     }, 1000);
+    return record;
+  }
 
-    this.emit("running-changed", { kind: "launched", profileId });
-    return { id: profileId, cdpEndpoint: "", pid: record.pid, startedAt };
+  /** Every tab gets its id and its listeners once. Returns the id. */
+  private trackPage(r: RunningFirefox, profileId: ProfileId, page: Page): string {
+    const known = r.pageIds.get(page);
+    if (known) return known;
+    const pageId = String(r.nextPageId++);
+    r.pageIds.set(page, pageId);
+    r.tabRefs.set(pageId, new TabRefs(pageId));
+    page.on("dialog", (dialog: Dialog) => this.onDialog(r, pageId, dialog));
+    page.on("download", (download: Download) => this.onDownload(r, profileId, download));
+    page.on("close", () => this.onPageClosed(r, pageId, page));
+    return pageId;
+  }
+
+  /**
+   * Closing the active tab makes the most recently used remaining tab active. The
+   * browser picks its own neighbour to show, so the one chosen here gets raised.
+   */
+  private onPageClosed(r: RunningFirefox, pageId: string, page: Page): void {
+    r.pageIds.delete(page);
+    r.tabRefs.delete(pageId);
+    for (const dialog of [...r.openDialogs.values()]) {
+      if (dialog.pageId === pageId) r.openDialogs.delete(dialog.id);
+    }
+    const wasActive = r.targets.active() === pageId;
+    r.targets.remove(pageId);
+    if (wasActive && r.targets.active()) r.activeNeedsRaise = true;
   }
 
   async close(profileId: ProfileId): Promise<void> {
     const r = this.running.get(profileId);
     if (!r) return;
     r.closingByRequest = true;
+    // A finished download may still be being copied out; one still running is
+    // canceled by the close.
+    if (r.savingDownloads.size > 0) {
+      await Promise.race([Promise.allSettled(r.savingDownloads), delay(DOWNLOAD_DRAIN_MS)]);
+    }
     // The "close" handler clears the map entry, stops the bridge, and emits the
     // running-changed "closed" event.
     await r.context.close().catch(() => {});
+    await Promise.allSettled(r.savingDownloads);
   }
 
   isRunning(profileId: ProfileId): boolean {
@@ -322,68 +475,379 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     return r;
   }
 
-  /** The page a driving command targets: the last opened, else the first. */
-  private activePage(profileId: ProfileId): Page {
-    const r = this.require(profileId);
-    const pages = r.context.pages();
-    if (pages.length === 0) {
-      throw new MultizenError("TAB_NOT_FOUND", `Profile ${profileId} has no open page`);
+  /** The tab page verbs act on, or TAB_NOT_FOUND when none is open. */
+  private activeTab(r: RunningFirefox): { page: Page; pageId: string } {
+    const pageId = r.targets.active();
+    const page = pageId ? this.pageOfId(r, pageId) : undefined;
+    if (!pageId || !page) {
+      throw new MultizenError("TAB_NOT_FOUND", "This browser has no open tab.", {
+        hint: "Call new_tab, or list_tabs for the open tabs.",
+      });
     }
-    return pages[pages.length - 1]!;
+    return { page, pageId };
   }
 
+  /** The active tab, raised if closing another one left it unseen. */
+  private async foregroundTab(r: RunningFirefox): Promise<{ page: Page; pageId: string }> {
+    const tab = this.activeTab(r);
+    if (r.activeNeedsRaise) {
+      r.activeNeedsRaise = false;
+      await tab.page.bringToFront().catch(() => {});
+    }
+    return tab;
+  }
+
+  private pageOfId(r: RunningFirefox, pageId: string): Page | undefined {
+    for (const [page, id] of r.pageIds) {
+      if (id === pageId && !page.isClosed()) return page;
+    }
+    return undefined;
+  }
+
+  /** Makes a tab the target of page verbs, and brings it to the foreground. */
+  private async activate(r: RunningFirefox, pageId: string, page: Page): Promise<void> {
+    await page.bringToFront();
+    // Moves it to most recent, which is what re-selection goes by.
+    r.targets.upsert({ targetId: pageId, type: "page" });
+    r.targets.setActive(pageId);
+    r.activeNeedsRaise = false;
+  }
+
+  // ── Dialogs ─────────────────────────────────────────────────────────────────
+
+  /**
+   * A dialog blocks its page, and with it every command that needs the page, until
+   * someone answers. In auto mode that is us, at once. In manual mode the dialog waits
+   * for handleDialog, and operations on its tab report DIALOG_OPEN instead of hanging.
+   */
+  private onDialog(r: RunningFirefox, pageId: string, dialog: Dialog): void {
+    const type = dialog.type() as DialogType;
+    if (r.dialogPolicy.mode === "auto") {
+      void answerDialog(dialog, type, r.dialogPolicy);
+      return;
+    }
+    const id = `d${++r.dialogSeq}`;
+    const url = dialog.page()?.url();
+    r.openDialogs.set(id, {
+      id,
+      type,
+      message: dialog.message(),
+      ...(type === "prompt" ? { defaultPrompt: dialog.defaultValue() } : {}),
+      ...(url !== undefined ? { url } : {}),
+      openedAt: new Date().toISOString(),
+      pageId,
+      dialog,
+    });
+    for (const watcher of [...r.dialogWatchers]) {
+      if (watcher.pageId === pageId) watcher.fire();
+    }
+  }
+
+  private assertNoDialog(r: RunningFirefox, pageId: string): void {
+    for (const dialog of r.openDialogs.values()) {
+      if (dialog.pageId === pageId) {
+        throw new MultizenError(
+          "DIALOG_OPEN",
+          `A ${dialog.type} dialog is open on this tab: "${dialog.message.slice(0, 200)}"`,
+          {
+            hint: "Answer it with handle_dialog, then retry.",
+            details: { dialog_id: dialog.id, type: dialog.type, message: dialog.message },
+          },
+        );
+      }
+    }
+  }
+
+  /**
+   * Settles with `work`, or as soon as a dialog is left open on this tab: `work` may
+   * then not finish until someone answers it, so it is left to run on its own.
+   */
+  private async untilDialog<T>(
+    r: RunningFirefox,
+    pageId: string,
+    work: Promise<T>,
+  ): Promise<{ dialog: false; value: T } | { dialog: true }> {
+    let watcher: { pageId: string; fire: () => void } | undefined;
+    const opened = new Promise<{ dialog: true }>((resolve) => {
+      watcher = { pageId, fire: () => resolve({ dialog: true }) };
+      r.dialogWatchers.add(watcher);
+      // It may have opened during whatever came just before this.
+      for (const dialog of r.openDialogs.values()) {
+        if (dialog.pageId === pageId) watcher.fire();
+      }
+    });
+    work.catch(() => {});
+    try {
+      return await Promise.race([work.then((value) => ({ dialog: false as const, value })), opened]);
+    } finally {
+      r.dialogWatchers.delete(watcher!);
+    }
+  }
+
+  /** An operation on a tab's page. Refuses, or stops waiting, when a dialog is in the way. */
+  private async pageOp<T>(r: RunningFirefox, pageId: string, work: () => Promise<T>): Promise<T> {
+    this.assertNoDialog(r, pageId);
+    const outcome = await this.untilDialog(
+      r,
+      pageId,
+      work().catch((e: unknown) => {
+        throw pageError(e);
+      }),
+    );
+    if (outcome.dialog) {
+      this.assertNoDialog(r, pageId);
+      throw new MultizenError("DIALOG_OPEN", "A dialog opened on this tab.");
+    }
+    return outcome.value;
+  }
+
+  /**
+   * An input action on an element. A dialog it leaves open counts as delivered: only
+   * the action could have opened it, and it blocks the page that would have to confirm.
+   */
+  private async deliver(
+    r: RunningFirefox,
+    el: ResolvedElement,
+    work: () => Promise<unknown>,
+  ): Promise<void> {
+    this.assertNoDialog(r, el.pageId);
+    await this.untilDialog(
+      r,
+      el.pageId,
+      work().catch(async (e: unknown) => {
+        throw await elementError(e, el);
+      }),
+    );
+  }
+
+  async setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }> {
+    const r = this.require(profileId);
+    r.dialogPolicy = policy;
+    // Dialogs left open under manual mode are answered by the new policy if it is auto.
+    if (policy.mode === "auto") {
+      const open = [...r.openDialogs.values()];
+      r.openDialogs.clear();
+      await Promise.all(open.map((d) => answerDialog(d.dialog, d.type, policy)));
+    }
+    return { ok: true };
+  }
+
+  async listDialogs(profileId: ProfileId): Promise<OpenDialog[]> {
+    return [...this.require(profileId).openDialogs.values()].map(
+      ({ pageId: _pageId, dialog: _dialog, ...open }) => open,
+    );
+  }
+
+  async handleDialog(profileId: ProfileId, response: DialogResponse): Promise<{ ok: true }> {
+    const r = this.require(profileId);
+    const open = response.dialogId
+      ? r.openDialogs.get(response.dialogId)
+      : r.openDialogs.values().next().value;
+    if (!open) {
+      throw new MultizenError(
+        "INVALID_INPUT",
+        response.dialogId ? `No open dialog ${response.dialogId}` : "No dialog is open",
+        { hint: "Call list_dialogs for the open dialogs." },
+      );
+    }
+    r.openDialogs.delete(open.id);
+    if (response.action === "accept") await open.dialog.accept(response.promptText);
+    else await open.dialog.dismiss();
+    return { ok: true };
+  }
+
+  hasOpenDialog(profileId: ProfileId): boolean {
+    return (this.running.get(profileId)?.openDialogs.size ?? 0) > 0;
+  }
+
+  // ── Downloads ───────────────────────────────────────────────────────────────
+
+  /**
+   * Caught from launch, desktop included: unlike the CDP path there is nothing to arm,
+   * since Playwright takes every download anyway and deletes it with the context.
+   */
+  private onDownload(r: RunningFirefox, profileId: ProfileId, download: Download): void {
+    const saving: Promise<void> = this.saveDownload(profileId, download)
+      .catch((e: unknown) => {
+        console.warn("[multizen] saving a download failed:", (e as Error).message);
+      })
+      .finally(() => r.savingDownloads.delete(saving));
+    r.savingDownloads.add(saving);
+  }
+
+  private async saveDownload(profileId: ProfileId, download: Download): Promise<void> {
+    const tracker = await this.downloadTracker(profileId);
+    const guid = randomUUID();
+    tracker.began({ guid, url: download.url(), suggestedFilename: download.suggestedFilename() });
+    const path = join(tracker.dir, guid);
+    try {
+      // Waits for the download to finish, and fails if it fails.
+      await download.saveAs(path);
+      const { size } = await stat(path);
+      tracker.progress({ guid, totalBytes: size, receivedBytes: size, state: "completed" });
+    } catch {
+      tracker.progress({ guid, totalBytes: 0, receivedBytes: 0, state: "canceled" });
+    }
+    await tracker.settled();
+  }
+
+  private async downloadTracker(profileId: ProfileId): Promise<DownloadTracker> {
+    const profile = this.profileManager.get(profileId);
+    if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
+    return sharedDownloadTracker(join(profile.dataDir, PROFILE_DOWNLOADS_DIR));
+  }
+
+  async listDownloads(profileId: ProfileId): Promise<DownloadRecord[]> {
+    return (await this.downloadTracker(profileId)).list();
+  }
+
+  async getDownload(profileId: ProfileId, downloadId: string): Promise<DownloadFile | null> {
+    return (await this.downloadTracker(profileId)).get(downloadId);
+  }
+
+  // ── Elements ────────────────────────────────────────────────────────────────
+
+  /**
+   * The element a public ref names, on its tab, which becomes the active one first.
+   * Reaches it only in the document the ref came from: by now Playwright's name for it
+   * may mean something else.
+   */
+  private async resolveRef(r: RunningFirefox, ref: string): Promise<ResolvedElement> {
+    const pageId = tabOfRef(ref);
+    if (pageId === null) throw unknownRef(ref);
+    const page = this.pageOfId(r, pageId);
+    if (!page) {
+      if (Number(pageId) >= 1 && Number(pageId) < r.nextPageId) throw staleRef(ref);
+      throw tabNotFound(pageId);
+    }
+    const entry = r.tabRefs.get(pageId)?.lookup(ref);
+    if (!entry || entry === "unknown") throw unknownRef(ref);
+    if (entry === "stale") throw staleRef(ref);
+    this.assertNoDialog(r, pageId);
+    if (r.targets.active() !== pageId) await this.activate(r, pageId, page);
+    else await this.foregroundTab(r);
+    const locator = page.locator(`aria-ref=${entry.inner}`);
+    await this.pageOp(r, pageId, async () => {
+      if ((await resolvedCount(locator)) === 0) throw staleRef(ref);
+      const document = await readDocument(locator).catch(() => null);
+      if (document !== entry.document) throw staleRef(ref);
+    });
+    return { page, pageId, locator, label: `ref "${ref}"`, ref };
+  }
+
+  private async resolveTarget(r: RunningFirefox, target: ElementTarget): Promise<ResolvedElement> {
+    if ("ref" in target) return this.resolveRef(r, target.ref);
+    const { page, pageId } = await this.foregroundTab(r);
+    return {
+      page,
+      pageId,
+      // The first match, as querySelector gives on the other engine.
+      locator: page.locator(target.selector).first(),
+      label: `selector ${target.selector}`,
+    };
+  }
+
+  // ── Page verbs ──────────────────────────────────────────────────────────────
+
   async navigate(profileId: ProfileId, url: string): Promise<{ url: string }> {
-    const page = this.activePage(profileId);
-    await page.goto(url);
-    return { url: page.url() };
+    const r = this.require(profileId);
+    const { page, pageId } = await this.foregroundTab(r);
+    return this.pageOp(r, pageId, async () => {
+      await page.goto(url).catch((e: unknown) => {
+        throw navigationError(url, e);
+      });
+      return { url: page.url() };
+    });
   }
 
   async click(profileId: ProfileId, selector: string): Promise<{ ok: true }> {
-    await this.activePage(profileId).click(selector);
+    const r = this.require(profileId);
+    const el = await this.resolveTarget(r, { selector });
+    await this.deliver(r, el, () => el.locator.click({ timeout: ACTION_TIMEOUT_MS }));
     return { ok: true };
   }
 
   async type(profileId: ProfileId, selector: string, text: string): Promise<{ ok: true }> {
-    await this.activePage(profileId).fill(selector, text);
+    const r = this.require(profileId);
+    const el = await this.resolveTarget(r, { selector });
+    await this.deliver(r, el, () => el.locator.fill(text, { timeout: ACTION_TIMEOUT_MS }));
     return { ok: true };
   }
 
-  /** Refs come from the CDP accessibility tree, so `extract` here returns none. */
-  async clickRef(): Promise<{ ok: true }> {
-    throw new MultizenError(
-      "UNSUPPORTED_ON_ENGINE",
-      "click_ref is unsupported on the Firefox (Camoufox) engine; use click with a CSS selector",
-    );
+  async clickRef(profileId: ProfileId, ref: string): Promise<{ ok: true }> {
+    const r = this.require(profileId);
+    const el = await this.resolveRef(r, ref);
+    await this.deliver(r, el, () => el.locator.click({ timeout: ACTION_TIMEOUT_MS }));
+    return { ok: true };
   }
 
-  async typeRef(): Promise<{ ok: true }> {
-    throw new MultizenError(
-      "UNSUPPORTED_ON_ENGINE",
-      "type_ref is unsupported on the Firefox (Camoufox) engine; use type with a CSS selector",
+  /** Real keys after a real click. A dialog opened before the last key stops the typing. */
+  async typeRef(profileId: ProfileId, ref: string, text: string): Promise<{ ok: true }> {
+    const r = this.require(profileId);
+    const el = await this.resolveRef(r, ref);
+    await this.deliver(r, el, () => el.locator.click({ timeout: ACTION_TIMEOUT_MS }));
+    this.assertNoDialog(r, el.pageId);
+    const chars = [...text];
+    const progress = { sent: 0, stopped: false };
+    const outcome = await this.untilDialog(
+      r,
+      el.pageId,
+      (async () => {
+        for (const ch of chars) {
+          if (progress.stopped) return;
+          progress.sent++;
+          await el.page.keyboard.type(ch, { delay: randIn(12, 45) });
+          await delay(randIn(8, 30));
+        }
+      })().catch((e: unknown) => {
+        throw pageError(e);
+      }),
     );
+    if (outcome.dialog) {
+      progress.stopped = true;
+      if (progress.sent < chars.length) this.assertNoDialog(r, el.pageId);
+    }
+    return { ok: true };
   }
 
   async extract(profileId: ProfileId): Promise<{ result: unknown }> {
-    const page = this.activePage(profileId);
-    const result = {
-      url: page.url(),
-      title: await page.title(),
-      text: await page.evaluate("document.body ? document.body.innerText : ''"),
-    };
-    return { result };
+    const r = this.require(profileId);
+    const { page, pageId } = await this.foregroundTab(r);
+    return this.pageOp(r, pageId, async () => {
+      const snapshot = await page.ariaSnapshot({ mode: "ai", timeout: ACTION_TIMEOUT_MS });
+      const documents = await documentsOf(page, snapshotRefs(snapshot));
+      const refs = r.tabRefs.get(pageId);
+      if (!refs) throw tabNotFound(pageId);
+      const result = {
+        url: page.url(),
+        title: await page.title(),
+        text: await page.evaluate("document.body ? document.body.innerText : ''"),
+        ariaSnapshot: refs.publish(snapshot, documents),
+      };
+      return { result };
+    });
   }
 
   async screenshot(profileId: ProfileId): Promise<{ pngBase64: string }> {
-    const buf = await this.activePage(profileId).screenshot({ type: "png" });
-    return { pngBase64: Buffer.from(buf).toString("base64") };
+    const r = this.require(profileId);
+    const { page, pageId } = await this.foregroundTab(r);
+    return this.pageOp(r, pageId, async () => {
+      // Playwright's default hides the caret with a style injected into the page's DOM.
+      const buf = await page.screenshot({ type: "png", caret: "initial" });
+      return { pngBase64: Buffer.from(buf).toString("base64") };
+    });
   }
 
   // ── Engine-neutral curated verbs, implemented natively (no CDP). ────────────
   async evaluateJs(profileId: ProfileId, expression: string): Promise<unknown> {
-    const value = await this.activePage(profileId).evaluate(expression);
-    // Mirror the Chromium shape so shared consumers (e.g. the wait_for_* polls
-    // that read `result.value`) work identically across engines.
-    return { result: { value } };
+    const r = this.require(profileId);
+    const { page, pageId } = await this.foregroundTab(r);
+    return this.pageOp(r, pageId, async () => {
+      const value = await page.evaluate(expression);
+      // Mirror the Chromium shape so shared consumers (e.g. the wait_for_* polls
+      // that read `result.value`) work identically across engines.
+      return { result: { value } };
+    });
   }
 
   async getCookies(profileId: ProfileId, urls?: string[]): Promise<unknown> {
@@ -405,36 +869,39 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
       type: "page",
       url: p.url(),
     }));
-    return { targetInfos };
+    return { targetInfos, activeTargetId: r.targets.active() };
   }
 
+  /**
+   * Opens a tab and makes it the active one. A url here may still be loading when this
+   * returns, as on the other engine; a navigate that follows simply takes over.
+   */
   async newTab(profileId: ProfileId, url?: string): Promise<unknown> {
     const r = this.require(profileId);
     const page = await r.context.newPage();
-    if (url) await page.goto(url);
-    const targetId = r.pageIds.get(page) ?? String(r.nextPageId++);
-    r.pageIds.set(page, targetId);
+    const targetId = this.trackPage(r, profileId, page);
+    await this.activate(r, targetId, page);
+    if (url) void page.goto(url).catch(() => {});
     return { targetId };
   }
 
   async activateTab(profileId: ProfileId, targetId: string): Promise<unknown> {
-    const page = this.pageById(profileId, targetId);
-    await page.bringToFront();
+    const r = this.require(profileId);
+    await this.activate(r, targetId, this.pageById(r, targetId));
     return { ok: true };
   }
 
   async closeTab(profileId: ProfileId, targetId: string): Promise<unknown> {
-    const page = this.pageById(profileId, targetId);
-    await page.close();
+    const r = this.require(profileId);
+    await this.pageById(r, targetId).close();
+    if (r.targets.active()) await this.foregroundTab(r);
     return { ok: true };
   }
 
-  private pageById(profileId: ProfileId, targetId: string): Page {
-    const r = this.require(profileId);
-    for (const [page, id] of r.pageIds) {
-      if (id === targetId && !page.isClosed()) return page;
-    }
-    throw new MultizenError("TAB_NOT_FOUND", `No tab ${targetId} on profile ${profileId}`);
+  private pageById(r: RunningFirefox, targetId: string): Page {
+    const page = this.pageOfId(r, targetId);
+    if (!page) throw tabNotFound(targetId);
+    return page;
   }
 
   /** Raw CDP is Chromium-only; Camoufox speaks the Firefox protocol (AC6). */
@@ -442,35 +909,184 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     throw new MultizenError(
       "UNSUPPORTED_ON_ENGINE",
       "cdp_send is unsupported on the Firefox (Camoufox) engine",
+      { hint: "Use the page tools, or evaluate_js for what they don't cover." },
     );
   }
 
-  // The driver surface a later change fills in. Until then each refuses by code, so a
-  // client sees a typed error rather than a missing method.
-  async performAction(_profileId: ProfileId, action: DriverAction): Promise<{ ok: true }> {
-    throw notAvailableYet(action.type);
+  async performAction(profileId: ProfileId, action: DriverAction): Promise<{ ok: true }> {
+    const r = this.require(profileId);
+    switch (action.type) {
+      case "press_key":
+        await this.pressKey(r, action.key, action.target);
+        break;
+      case "hover": {
+        const el = await this.resolveTarget(r, action.target);
+        await this.deliver(r, el, () => el.locator.hover({ timeout: ACTION_TIMEOUT_MS }));
+        break;
+      }
+      case "select_option":
+        await this.selectOption(r, action.target, {
+          ...(action.value !== undefined ? { value: action.value } : {}),
+          ...(action.label !== undefined ? { label: action.label } : {}),
+          ...(action.index !== undefined ? { index: action.index } : {}),
+        });
+        break;
+      case "scroll":
+        await this.scroll(r, action);
+        break;
+      case "upload_file":
+        await this.uploadFile(r, action.target, action.paths);
+        break;
+      case "bring_to_front":
+        await this.activeTab(r).page.bringToFront();
+        break;
+    }
+    return { ok: true };
   }
 
-  async listDownloads(): Promise<DownloadRecord[]> {
-    throw notAvailableYet("list_downloads");
+  /** With a target, a click focuses it first. Without one the key goes wherever focus is. */
+  private async pressKey(r: RunningFirefox, key: string, target?: ElementTarget): Promise<void> {
+    const chord = parseChord(key, r.platform);
+    let tab: { page: Page; pageId: string };
+    if (target) {
+      const el = await this.resolveTarget(r, target);
+      await this.deliver(r, el, () => el.locator.click({ timeout: ACTION_TIMEOUT_MS }));
+      tab = el;
+    } else {
+      tab = await this.foregroundTab(r);
+    }
+    this.assertNoDialog(r, tab.pageId);
+    // A glyph off the US layout has no physical key, on either engine: it is inserted.
+    const press =
+      chord.key.code || chord.modifiers.length > 0
+        ? tab.page.keyboard.press(playwrightChord(chord), { delay: randIn(12, 45) })
+        : tab.page.keyboard.insertText(chord.key.key);
+    await this.untilDialog(
+      r,
+      tab.pageId,
+      press.catch((e: unknown) => {
+        throw keyError(key, e);
+      }),
+    );
   }
 
-  async getDownload(): Promise<DownloadFile | null> {
-    throw notAvailableYet("get_download");
+  /**
+   * Playwright's own way: the selection is set directly, the events are untrusted.
+   * Measured: when the mouse was in use before, Firefox itself fires input and change
+   * once more at the next mouse move, with the same value.
+   */
+  private async selectOption(
+    r: RunningFirefox,
+    target: ElementTarget,
+    choice: { value?: string; label?: string; index?: number },
+  ): Promise<void> {
+    const el = await this.resolveTarget(r, target);
+    await this.pageOp(r, el.pageId, () =>
+      el.locator
+        .selectOption(choice, { timeout: SELECT_OPTION_TIMEOUT_MS })
+        .catch(async (e: unknown) => {
+          if (/did not find some options/.test(errorText(e))) {
+            throw new MultizenError(
+              "ELEMENT_NOT_FOUND",
+              `${el.label} has no option matching ${JSON.stringify(choice)}`,
+            );
+          }
+          throw await elementError(e, el);
+        }),
+    );
   }
 
-  async setDialogPolicy(): Promise<{ ok: true }> {
-    throw notAvailableYet("set_dialog_policy");
+  /**
+   * Wheel over the element or, with none, the middle of the viewport. An element with
+   * no deltas is scrolled into view instead.
+   */
+  private async scroll(
+    r: RunningFirefox,
+    opts: { target?: ElementTarget; deltaX?: number; deltaY?: number },
+  ): Promise<void> {
+    const { target, deltaX, deltaY } = opts;
+    let tab: { page: Page; pageId: string };
+    let point: { x: number; y: number };
+    if (target) {
+      const el = await this.resolveTarget(r, target);
+      tab = el;
+      const intoView = (): Promise<void> =>
+        el.locator
+          .scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT_MS })
+          .catch(async (e: unknown) => {
+            throw await elementError(e, el);
+          });
+      if (deltaX === undefined && deltaY === undefined) {
+        await this.pageOp(r, el.pageId, intoView);
+        return;
+      }
+      point = await this.pageOp(r, el.pageId, async () => {
+        await intoView();
+        const box = await el.locator.boundingBox({ timeout: ACTION_TIMEOUT_MS });
+        if (!box) throw notVisible(el);
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      });
+    } else {
+      tab = await this.foregroundTab(r);
+      const { page } = tab;
+      point = await this.pageOp(r, tab.pageId, () =>
+        page.evaluate<{ x: number; y: number }>("({ x: innerWidth / 2, y: innerHeight / 2 })"),
+      );
+    }
+    const { page } = tab;
+    await this.untilDialog(
+      r,
+      tab.pageId,
+      (async () => {
+        await page.mouse.move(point.x, point.y);
+        // Firefox keeps scrolling the frame it last wheeled until the mouse has been
+        // moved for 100 ms. Measured: at once, a wheel over an iframe scrolled the page.
+        await delay(WHEEL_AFTER_MOVE_MS);
+        await page.mouse.wheel(deltaX ?? 0, deltaY ?? 0);
+      })().catch((e: unknown) => {
+        throw pageError(e);
+      }),
+    );
   }
 
-  async listDialogs(): Promise<OpenDialog[]> {
-    throw notAvailableYet("list_dialogs");
+  /** Files for a file input, or for the chooser an element opens when clicked. */
+  private async uploadFile(
+    r: RunningFirefox,
+    target: ElementTarget,
+    paths: readonly string[],
+  ): Promise<void> {
+    const el = await this.resolveTarget(r, target);
+    const isFileInput = await this.pageOp(r, el.pageId, () =>
+      el.locator
+        .setInputFiles([...paths], { timeout: ACTION_TIMEOUT_MS })
+        .then(() => true)
+        .catch(async (e: unknown) => {
+          if (/Node is not an HTMLInputElement|Not an input\[type=file\]/.test(errorText(e))) {
+            return false;
+          }
+          if (/Non-multiple file input/.test(errorText(e))) {
+            throw new MultizenError("INVALID_INPUT", `${el.label} takes a single file`);
+          }
+          throw await elementError(e, el);
+        }),
+    );
+    if (isFileInput) return;
+    const chooser = el.page.waitForEvent("filechooser", { timeout: FILE_CHOOSER_TIMEOUT_MS });
+    chooser.catch(() => {});
+    await this.deliver(r, el, () => el.locator.click({ timeout: ACTION_TIMEOUT_MS }));
+    const opened = await chooser.catch((e: unknown) => {
+      throw (e as Error).name === "TimeoutError"
+        ? new MultizenError(
+            "TIMEOUT",
+            `${el.label} did not open a file chooser within ${FILE_CHOOSER_TIMEOUT_MS}ms`,
+          )
+        : pageError(e);
+    });
+    await opened.setFiles([...paths]);
   }
 
-  async handleDialog(): Promise<{ ok: true }> {
-    throw notAvailableYet("handle_dialog");
-  }
-
+  // The handoff panel's view and input, which a later change fills in. Until then
+  // each refuses by code, so a client sees a typed error rather than a missing method.
   async captureFrame(): Promise<CapturedFrame> {
     throw notAvailableYet("captureFrame");
   }
@@ -490,4 +1106,162 @@ function notAvailableYet(what: string): MultizenError {
     "UNSUPPORTED_ON_ENGINE",
     `${what} is not available on Camoufox in this build.`,
   );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randIn(min: number, max: number): number {
+  return Math.round(min + Math.random() * (max - min));
+}
+
+function answerDialog(dialog: Dialog, type: DialogType, policy: DialogPolicy): Promise<void> {
+  const accept = (policy[type] ?? DEFAULT_DIALOG_ANSWERS[type]) === "accept";
+  const answered = accept
+    ? dialog.accept(type === "prompt" ? policy.promptText : undefined)
+    : dialog.dismiss();
+  return answered.catch(() => {
+    // The dialog may already be gone (navigated away / page closed).
+  });
+}
+
+function readDocument(locator: Locator): Promise<string> {
+  return locator
+    .evaluate(DOCUMENT_ID, undefined, { timeout: DOCUMENT_READ_TIMEOUT_MS })
+    .then(String);
+}
+
+/**
+ * The document in each frame a snapshot covers, read through one element of that frame.
+ * A frame that can't answer gets a value nothing will ever match: its refs are then
+ * stale from the start, which is right for a frame navigating away under the snapshot.
+ */
+async function documentsOf(page: Page, refs: readonly string[]): Promise<Map<string, string>> {
+  const firstOfFrame = new Map<string, string>();
+  for (const ref of refs) {
+    if (!firstOfFrame.has(frameOfRef(ref))) firstOfFrame.set(frameOfRef(ref), ref);
+  }
+  const documents = new Map<string, string>();
+  await Promise.all(
+    [...firstOfFrame].map(async ([frame, ref]) => {
+      const document = await readDocument(page.locator(`aria-ref=${ref}`)).catch(() => randomUUID());
+      documents.set(frame, document);
+    }),
+  );
+  return documents;
+}
+
+/** A frame that went away fails the query itself instead of matching nothing. */
+async function resolvedCount(locator: Locator): Promise<number> {
+  return locator.count().catch((e: unknown) => {
+    if (/Invalid frame in aria-ref selector/.test(errorText(e))) return 0;
+    throw e;
+  });
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** Playwright's message without its call log, and without the name of the method. */
+function briefly(e: unknown): string {
+  const first = errorText(e).split("\n")[0] ?? "";
+  return first.replace(/^[A-Za-z]+\.[A-Za-z]+: /, "");
+}
+
+function staleRef(ref: string): MultizenError {
+  return new MultizenError(
+    "STALE_REF",
+    `Element ref "${ref}" is stale: its element or document is gone since extract.`,
+    { hint: "Call extract and use the refs it gives." },
+  );
+}
+
+function unknownRef(ref: string): MultizenError {
+  return new MultizenError("ELEMENT_NOT_FOUND", `Unknown element ref "${ref}".`, {
+    hint: "Call extract and use the refs it gives.",
+  });
+}
+
+function tabNotFound(targetId: string): MultizenError {
+  return new MultizenError("TAB_NOT_FOUND", `No tab with target id ${targetId}`, {
+    hint: "Call list_tabs for the open tabs.",
+  });
+}
+
+function notVisible(el: ResolvedElement): MultizenError {
+  return new MultizenError("ELEMENT_NOT_VISIBLE", `The element for ${el.label} is not visible.`, {
+    hint: "Take a screenshot to see the page, then scroll or open what hides it.",
+  });
+}
+
+/** What a failing page operation means to a client. Anything else passes through as it is. */
+function pageError(e: unknown): unknown {
+  if (e instanceof MultizenError) return e;
+  const name = (e as Error | undefined)?.name;
+  if (name === "TargetClosedError") {
+    return new MultizenError("TAB_NOT_FOUND", "The tab closed during this call.", {
+      hint: "Call list_tabs for the open tabs.",
+    });
+  }
+  if (name === "TimeoutError") return new MultizenError("TIMEOUT", briefly(e));
+  return e;
+}
+
+/** As {@link pageError}, knowing the element: a timeout can say why it never acted. */
+async function elementError(e: unknown, el: ResolvedElement): Promise<unknown> {
+  if (/while parsing|Unknown engine/.test(errorText(e))) {
+    return new MultizenError("INVALID_INPUT", `Invalid selector: ${el.label}`);
+  }
+  if (/Element is not a <select> element/.test(errorText(e))) {
+    return new MultizenError("INVALID_INPUT", `${el.label} is not a <select> element`);
+  }
+  if ((e as Error | undefined)?.name === "TimeoutError") {
+    if ((await resolvedCount(el.locator).catch(() => 1)) === 0) {
+      if (el.ref) return staleRef(el.ref);
+      return new MultizenError("ELEMENT_NOT_FOUND", `Element not found for ${el.label}`);
+    }
+    if (!(await el.locator.isVisible().catch(() => true))) return notVisible(el);
+    const last = lastLogLine(e);
+    return new MultizenError("TIMEOUT", `${el.label} did not take the action: ${last}`, {
+      // Found ready and still not acting is what a fully covered window does on Windows.
+      ...(/performing .* action/.test(last)
+        ? { hint: "If the browser window is covered, raise it, then retry." }
+        : {}),
+    });
+  }
+  return pageError(e);
+}
+
+/** The last thing Playwright saw while waiting, usually what covers the element. */
+function lastLogLine(e: unknown): string {
+  const lines = errorText(e)
+    // The call log comes with terminal colors.
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.at(-1)?.replace(/^- /, "") ?? "";
+}
+
+/** A load that fails. A URL that serves a file ends this way too, having started a download. */
+function navigationError(url: string, e: unknown): unknown {
+  if ((e as Error | undefined)?.name === "TimeoutError") {
+    return new MultizenError("TIMEOUT", `Navigation to ${url} timed out: ${briefly(e)}`);
+  }
+  const text = briefly(e);
+  return new MultizenError("NAVIGATION_FAILED", `Navigation to ${url} failed: ${text}`, {
+    details: { error_text: text },
+    ...(/Download is starting/.test(text)
+      ? { hint: "If this URL serves a file, list_downloads shows it." }
+      : {}),
+  });
+}
+
+function keyError(key: string, e: unknown): unknown {
+  if (/Unknown key/.test(errorText(e))) {
+    return new MultizenError("INVALID_INPUT", `Can't press "${key}": ${briefly(e)}`);
+  }
+  return pageError(e);
 }

@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   MultizenError,
+  PROFILE_DOWNLOADS_DIR,
   PROFILE_UPLOADS_DIR,
   resolveEngine,
   UPLOAD_INBOX_DIR,
@@ -31,6 +32,7 @@ import {
   type ChromiumBrowserDriver,
   type RunningStateChange,
 } from "./ChromiumBrowserDriver.ts";
+import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
 import { camoufoxConfigForProfile } from "./firefoxFingerprint.ts";
 import { StrictGeoCoherenceError } from "./launchTimezone";
 // Type-only: the concrete module (which statically imports camoufox-js +
@@ -59,7 +61,7 @@ export interface EngineRouterOptions {
   /** The already-constructed Chromium driver (owns companion-install wiring). */
   chromiumDriver: ChromiumBrowserDriver;
   /** Passed to the Firefox driver, which the router itself constructs lazily. */
-  firefoxOptions?: Pick<FirefoxBrowserDriverOptions, "launchExtras">;
+  firefoxOptions?: Pick<FirefoxBrowserDriverOptions, "launchExtras" | "extraPrefs">;
   /**
    * A launch while the engine is still installing. `wait` (the default, the desktop
    * with its progress UI) blocks until it is ready. `reject` (the server) answers at
@@ -292,11 +294,23 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     if (bound) return bound;
     return isChromiumEngine(this.engineFor(profileId)) ? this.chromiumDriver : this.firefoxDriver;
   }
+  /**
+   * A stopped Camoufox profile after a restart, its driver not loaded yet. The tracker
+   * doesn't need it, and loading it now would freeze camoufox-js's install dir too early.
+   */
+  private async unloadedDriverDownloads(profileId: ProfileId): Promise<DownloadTracker | null> {
+    const dataDir = this.profileManager.get(profileId)?.dataDir;
+    return dataDir ? sharedDownloadTracker(join(dataDir, PROFILE_DOWNLOADS_DIR)) : null;
+  }
   async listDownloads(profileId: ProfileId): Promise<DownloadRecord[]> {
-    return (await this.downloadsDriver(profileId)?.listDownloads(profileId)) ?? [];
+    const driver = this.downloadsDriver(profileId);
+    if (driver) return driver.listDownloads(profileId);
+    return (await this.unloadedDriverDownloads(profileId))?.list() ?? [];
   }
   async getDownload(profileId: ProfileId, downloadId: string): Promise<DownloadFile | null> {
-    return (await this.downloadsDriver(profileId)?.getDownload(profileId, downloadId)) ?? null;
+    const driver = this.downloadsDriver(profileId);
+    if (driver) return driver.getDownload(profileId, downloadId);
+    return (await this.unloadedDriverDownloads(profileId))?.get(downloadId) ?? null;
   }
   setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }> {
     return this.require(profileId).setDialogPolicy(profileId, policy);

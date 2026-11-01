@@ -6,7 +6,7 @@
  *   corepack yarn workspace @multizen/server build
  *   corepack yarn workspace @multizen/server exec tsx scripts/e2e.ts \
  *     --data-dir %TEMP%\mzts2 --engine-version-dir <dir with chrome.exe> \
- *     [--engine cloakbrowser] [--flows http,sigint,stdio,tabs] [--keep]
+ *     [--engine cloakbrowser|camoufox] [--flows http,sigint,stdio,tabs] [--keep]
  *
  * --engine-version-dir links an installed engine into the temp data dir through a
  * junction on the version directory only, so nothing the server does to its own
@@ -23,6 +23,10 @@
  * EOF exits 0 and leaves no process behind. The tabs flow runs real input against
  * local pages in a main frame, a same-process iframe, a cross-origin iframe and one
  * nested in that, and asserts each page's own handler reported back to the fixture.
+ *
+ * --engine camoufox runs the same flows on Camoufox, minus what is CDP's or CloakBrowser's:
+ * there are no OOPIF targets, cdp_send refuses, its pid is unknown (so nothing is killed
+ * from outside), and no chrome:// pages. Its engine installs into the data dir.
  *
  * Windows only: the signal delivery, the junction and the process scan all are.
  */
@@ -56,6 +60,9 @@ if (!existsSync(CLI)) throw new Error(`${CLI} is missing: build the server first
 
 const FLOWS = (values.flows ?? "http,sigint,stdio,tabs").split(",");
 const ENGINE_ARGS = values.engine ? { engine: values.engine } : {};
+const IS_CAMOUFOX = values.engine === "camoufox";
+/** A server installs its default engine on start: this keeps CloakBrowser out of this run. */
+const ENGINE_FLAGS = IS_CAMOUFOX ? ["--default-engine", "camoufox"] : [];
 const ENGINE_INSTALL_BUDGET_MS = 15 * 60_000;
 const CTRL_C_EXIT_BUDGET_MS = 30_000;
 const results: Array<{ check: string; observed: string }> = [];
@@ -178,7 +185,7 @@ async function waitFor(check: () => boolean, what: string, timeoutMs = 60_000): 
 
 async function startServe(): Promise<Running & { url: string; token: string }> {
   const port = await freePort();
-  const running = startServer(["serve", "--data-dir", DATA_DIR, "--port", String(port)]);
+  const running = startServer(["serve", "--data-dir", DATA_DIR, "--port", String(port), ...ENGINE_FLAGS]);
   await waitFor(() => running.output().includes('"listening"'), `serve to listen:\n${running.output()}`);
   const token = readFileSync(join(DATA_DIR, "owner-token"), "utf8");
   expect(!running.output().includes(token), "the token value appeared in the logs");
@@ -307,6 +314,19 @@ interface AxNode {
   children?: AxNode[];
 }
 
+/** What extract gives: an accessibility tree on CloakBrowser, aria snapshot text on Camoufox. */
+type PageTree = AxNode[] | string;
+
+interface Extracted {
+  title: string;
+  accessibilityTree?: AxNode[];
+  ariaSnapshot?: string;
+}
+
+function treeOf(extracted: Extracted): PageTree {
+  return extracted.ariaSnapshot ?? extracted.accessibilityTree ?? [];
+}
+
 function findRef(nodes: AxNode[], role: string, name: string): string | null {
   for (const node of nodes) {
     if (node.role === role && node.name === name && node.ref) return node.ref;
@@ -314,6 +334,11 @@ function findRef(nodes: AxNode[], role: string, name: string): string | null {
     if (inChild) return inChild;
   }
   return null;
+}
+
+/** The line of a snapshot that shows an element of this name, quoted as a name is. */
+function snapshotLine(snapshot: string, name: string): string | undefined {
+  return snapshot.split("\n").find((line) => line.includes(`"${name}"`));
 }
 
 /** Windows delivers no signals: a console control event is the graceful equivalent. */
@@ -384,7 +409,7 @@ async function httpFlow(fixture: Fixture): Promise<string> {
     await toolSurfaceChecks(client, id);
 
     const launched = await launch(client, id);
-    expect(Number(launched.pid) > 0, "launch_profile returned no pid");
+    expect(IS_CAMOUFOX || Number(launched.pid) > 0, "launch_profile returned no pid");
     pass("launch_profile", `pid ${launched.pid}, ${launched.cdpEndpoint}`);
 
     const navigated = await call(client, "navigate", { profile_id: id, url: fixture.url });
@@ -392,10 +417,12 @@ async function httpFlow(fixture: Fixture): Promise<string> {
     pass("navigate to the local fixture", String(navigated.url));
 
     const extracted = await call(client, "extract", { profile_id: id });
-    const before = extracted.result as { title: string; accessibilityTree: AxNode[] };
+    const before = extracted.result as Extracted;
     expect(before.title === "MZ Fixture", `extract saw the title "${before.title}"`);
-    const ref = findRef(before.accessibilityTree, "button", "Press me");
-    expect(ref, "extract gave no ref for the button");
+    const ref = refOf(treeOf(before), "Press me");
+    if (!IS_CAMOUFOX) {
+      expect(findRef(before.accessibilityTree ?? [], "button", "Press me") === ref, "not the button");
+    }
     pass("extract", `title "${before.title}", button is ${ref}`);
 
     pass("page state before the first input [visibility, paints]", await pageState(client, id));
@@ -498,20 +525,22 @@ async function sigintFlow(profileId: string): Promise<void> {
 
     // A browser dying under the server must cost that profile only. In Electron a
     // stray socket error is survivable; under plain Node it would end the process.
-    const killed = spawnSync("taskkill", ["/PID", String(launched.pid), "/T", "/F"], {
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    expect(killed.status === 0, `taskkill failed: ${killed.stderr}`);
-    await waitFor(() => /"reason":"external-exit"/.test(serve.output()), "the browser's exit to register");
-    const after = (await call(client, "list_profiles")).profiles as Array<{ isRunning: boolean }>;
-    expect(after[0]?.isRunning === false, "the killed browser still reads as running");
-    expect(serve.child.exitCode === null, "the server died with its browser");
-    expect(!/uncaught exception|unhandled rejection/.test(serve.output()), "a killed browser was fatal");
-    pass("a browser killed from outside", "the server stays up, the profile reads as closed");
+    if (!IS_CAMOUFOX) {
+      const killed = spawnSync("taskkill", ["/PID", String(launched.pid), "/T", "/F"], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      expect(killed.status === 0, `taskkill failed: ${killed.stderr}`);
+      await waitFor(() => /"reason":"external-exit"/.test(serve.output()), "the browser's exit to register");
+      const after = (await call(client, "list_profiles")).profiles as Array<{ isRunning: boolean }>;
+      expect(after[0]?.isRunning === false, "the killed browser still reads as running");
+      expect(serve.child.exitCode === null, "the server died with its browser");
+      expect(!/uncaught exception|unhandled rejection/.test(serve.output()), "a killed browser was fatal");
+      pass("a browser killed from outside", "the server stays up, the profile reads as closed");
 
-    await launch(client, profileId);
-    pass("relaunch after the kill");
+      await launch(client, profileId);
+      pass("relaunch after the kill");
+    }
     await client.close();
     sendConsoleCtrl(serve.child.pid!, "CTRL_C");
     const code = await Promise.race([
@@ -535,7 +564,7 @@ async function sigintFlow(profileId: string): Promise<void> {
 async function stdioFlow(fixture: Fixture): Promise<void> {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [CLI, "stdio", "--data-dir", DATA_DIR],
+    args: [CLI, "stdio", "--data-dir", DATA_DIR, ...ENGINE_FLAGS],
     // Makes the driver log from its launch path, which is the noise that would
     // corrupt stdout if the rebinding were not in place.
     env: { MULTIZEN_DEBUG: "1" },
@@ -559,7 +588,7 @@ async function stdioFlow(fixture: Fixture): Promise<void> {
   await call(client, "navigate", { profile_id: id, url: fixture.url });
   const page = (await call(client, "extract", { profile_id: id })).result as { title: string };
   expect(page.title === "MZ Fixture", `extract over stdio saw "${page.title}"`);
-  expect(/post-bootstrap probe/.test(stderrText), "MULTIZEN_DEBUG produced no driver log line");
+  expect(IS_CAMOUFOX || /post-bootstrap probe/.test(stderrText), "MULTIZEN_DEBUG produced no driver log line");
   expect(protocolErrors.length === 0, `stdout carried non-JSON-RPC: ${String(protocolErrors)}`);
   pass(
     "stdio: a real client created and launched a profile",
@@ -655,6 +684,7 @@ async function startSite(): Promise<Site> {
         "S5 main",
         "main",
         `<h1>Main</h1>${controls("Main")}
+        <p>see [ref=e1] here</p>
         <a href="/file">Download report</a>
         <button onclick="hit('confirm', confirm('Sure?'))">Confirm button</button>
         <button onclick="hit('prompt', prompt('Name?', 'nobody'))">Prompt button</button>
@@ -743,8 +773,15 @@ function findByName(nodes: AxNode[], name: string): AxNode | null {
   return null;
 }
 
-function refOf(tree: AxNode[], name: string): string {
-  const ref = findByName(tree, name)?.ref;
+function hasName(tree: PageTree, name: string): boolean {
+  return typeof tree === "string" ? snapshotLine(tree, name) !== undefined : findByName(tree, name) !== null;
+}
+
+function refOf(tree: PageTree, name: string): string {
+  const ref =
+    typeof tree === "string"
+      ? /\[ref=([^\]]+)\]/.exec(snapshotLine(tree, name) ?? "")?.[1]
+      : findByName(tree, name)?.ref;
   expect(ref, `extract gave no ref for "${name}"`);
   return ref;
 }
@@ -775,9 +812,8 @@ async function tabsFlow(): Promise<void> {
     const profile = { profile_id: id };
     await launch(client, id);
 
-    const extract = async (): Promise<AxNode[]> =>
-      ((await call(client, "extract", profile)).result as { accessibilityTree: AxNode[] })
-        .accessibilityTree;
+    const extract = async (): Promise<PageTree> =>
+      treeOf((await call(client, "extract", profile)).result as Extracted);
     const tabs = async (): Promise<TabList> =>
       (await call(client, "list_tabs", profile)) as unknown as TabList;
     const evaluate = async (expression: string): Promise<unknown> =>
@@ -788,11 +824,11 @@ async function tabsFlow(): Promise<void> {
     const code = async (name: string, args: Record<string, unknown>): Promise<string> =>
       String((await callError(client, name, { ...profile, ...args })).code);
     /** The tree once every frame's content is there: frames load after their parent. */
-    const extractUntil = async (name: string): Promise<AxNode[]> => {
+    const extractUntil = async (name: string): Promise<PageTree> => {
       const deadline = Date.now() + 15_000;
       for (;;) {
         const tree = await extract();
-        if (findByName(tree, name)) return tree;
+        if (hasName(tree, name)) return tree;
         expect(Date.now() < deadline, `"${name}" never appeared: ${JSON.stringify(tree).slice(0, 1500)}`);
         await new Promise((done) => setTimeout(done, 200));
       }
@@ -806,12 +842,16 @@ async function tabsFlow(): Promise<void> {
     // ── targets and refs ──
     const targets = await tabs();
     const iframes = targets.targetInfos.filter((t) => t.type === "iframe");
-    expect(
-      iframes.some((t) => t.url.startsWith(site.child)) && iframes.some((t) => t.url.startsWith(site.nested)),
-      `no OOPIF targets: ${JSON.stringify(targets.targetInfos)}`,
-    );
-    expect(!iframes.some((t) => t.url.endsWith("/same")), "the same-origin frame should not be a target");
-    pass("type:iframe targets exist", iframes.map((t) => t.url).join(", "));
+    if (IS_CAMOUFOX) {
+      expect(iframes.length === 0, `frames as targets: ${JSON.stringify(targets.targetInfos)}`);
+    } else {
+      expect(
+        iframes.some((t) => t.url.startsWith(site.child)) && iframes.some((t) => t.url.startsWith(site.nested)),
+        `no OOPIF targets: ${JSON.stringify(targets.targetInfos)}`,
+      );
+      expect(!iframes.some((t) => t.url.endsWith("/same")), "the same-origin frame should not be a target");
+      pass("type:iframe targets exist", iframes.map((t) => t.url).join(", "));
+    }
     const firstTab = targets.activeTargetId;
     expect(
       targets.targetInfos.some((t) => t.targetId === firstTab && t.type === "page"),
@@ -822,20 +862,41 @@ async function tabsFlow(): Promise<void> {
     const frames = ["Main", "Same", "Child", "Nested"];
     const refs = Object.fromEntries(frames.map((f) => [f, refOf(tree, `${f} button`)]));
     pass("extract gives refs in all four frames", JSON.stringify(refs));
-    const childFrame = findByName(tree, "Child frame");
-    expect(
-      childFrame?.role === "Iframe" &&
-        findByName(childFrame.children ?? [], "Child button") &&
-        findByName(findByName(childFrame.children ?? [], "Nested frame")?.children ?? [], "Nested button"),
-      `frames are not stitched under their owners: ${JSON.stringify(childFrame).slice(0, 800)}`,
-    );
-    const buttons = (nodes: AxNode[], name: string): number =>
-      nodes.reduce(
-        (n, node) => n + (node.role === "button" && node.name === name ? 1 : 0) + buttons(node.children ?? [], name),
-        0,
+    if (typeof tree === "string") {
+      const snapshot = tree;
+      const indent = (name: string): number => /^\s*/.exec(snapshotLine(snapshot, name) ?? "")![0].length;
+      expect(
+        indent("Main button") < indent("Same button") &&
+          indent("Same button") === indent("Child button") &&
+          indent("Child button") < indent("Nested button"),
+        `frames are not nested in the snapshot: ${snapshot.slice(0, 800)}`,
       );
-    for (const name of frames) expect(buttons(tree, `${name} button`) === 1, `${name} button appears twice`);
-    pass("each frame's tree hangs under its owner, once", "Iframe > Iframe > Nested button");
+      for (const name of frames) {
+        expect(snapshot.split(`"${name} button"`).length === 2, `${name} button appears twice`);
+      }
+      pass("each frame's tree hangs under its iframe, once", "iframe > iframe > Nested button");
+      // The page wrote one of these in its text: that stays text, and no other survives.
+      expect(snapshot.includes("see [ref=e1] here"), "the page's own text was rewritten");
+      expect(
+        !/\[ref=(f\d+)?e\d+\]/.test(snapshot.replace("see [ref=e1] here", "")),
+        `Playwright's own refs came through: ${snapshot.slice(0, 400)}`,
+      );
+    } else {
+      const childFrame = findByName(tree, "Child frame");
+      expect(
+        childFrame?.role === "Iframe" &&
+          findByName(childFrame.children ?? [], "Child button") &&
+          findByName(findByName(childFrame.children ?? [], "Nested frame")?.children ?? [], "Nested button"),
+        `frames are not stitched under their owners: ${JSON.stringify(childFrame).slice(0, 800)}`,
+      );
+      const buttons = (nodes: AxNode[], name: string): number =>
+        nodes.reduce(
+          (n, node) => n + (node.role === "button" && node.name === name ? 1 : 0) + buttons(node.children ?? [], name),
+          0,
+        );
+      for (const name of frames) expect(buttons(tree, `${name} button`) === 1, `${name} button appears twice`);
+      pass("each frame's tree hangs under its owner, once", "Iframe > Iframe > Nested button");
+    }
 
     const firstLocale = await evaluate("Intl.DateTimeFormat().resolvedOptions().locale");
     const realDpr = await evaluate("window.devicePixelRatio");
@@ -882,18 +943,20 @@ async function tabsFlow(): Promise<void> {
     pass("click_ref in scrolled frames, there and back", "same-process and OOPIF");
 
     // ── device scale factor: no fingerprint path sets one, so CDP emulation stands in ──
-    await act("cdp_send", {
-      method: "Emulation.setDeviceMetricsOverride",
-      params: { width: 0, height: 0, deviceScaleFactor: 1.75, mobile: false },
-    });
-    const scaled = await evaluate("window.devicePixelRatio");
-    expect(scaled === 1.75, `devicePixelRatio ${String(scaled)}`);
-    for (const name of frames) {
-      await act("click_ref", { ref: refOf(tree, `${name} button`) });
-      await site.waitHit(name.toLowerCase(), "click");
+    if (!IS_CAMOUFOX) {
+      await act("cdp_send", {
+        method: "Emulation.setDeviceMetricsOverride",
+        params: { width: 0, height: 0, deviceScaleFactor: 1.75, mobile: false },
+      });
+      const scaled = await evaluate("window.devicePixelRatio");
+      expect(scaled === 1.75, `devicePixelRatio ${String(scaled)}`);
+      for (const name of frames) {
+        await act("click_ref", { ref: refOf(tree, `${name} button`) });
+        await site.waitHit(name.toLowerCase(), "click");
+      }
+      await act("cdp_send", { method: "Emulation.clearDeviceMetricsOverride", params: {} });
+      pass("click_ref in all four frames at an emulated scale factor", `devicePixelRatio ${String(scaled)}`);
     }
-    await act("cdp_send", { method: "Emulation.clearDeviceMetricsOverride", params: {} });
-    pass("click_ref in all four frames at an emulated scale factor", `devicePixelRatio ${String(scaled)}`);
     site.hits.length = 0;
 
     // ── keys ──
@@ -948,6 +1011,8 @@ async function tabsFlow(): Promise<void> {
     await act("scroll", { ref: refOf(tree, "Bottom button") });
     await site.waitHit("main", "scrolled");
     pass("scroll by wheel and into view", `page to ${wheelPage.value}, OOPIF to ${wheelFrame.value}`);
+    const selected = await evaluate("document.querySelector('select').value");
+    expect(selected === "a", `after the wheels, the page's select holds ${String(selected)}`);
 
     // ── upload ──
     const hello = Buffer.from("hello").toString("base64");
@@ -963,12 +1028,18 @@ async function tabsFlow(): Promise<void> {
     await upload({ ref: refOf(tree, "Same chooser") }, "chosen-too.txt");
     await site.waitHit("same", "chooser", "chosen-too.txt");
     pass("upload_file through a file chooser", "main and same-process frames' change handlers saw it");
-    const oopifChooser = await code("upload_file", {
-      ref: refOf(tree, "Child chooser"),
-      files: [{ file_name: "x.txt", data_base64: hello }],
-    });
-    expect(oopifChooser === "INVALID_INPUT", `a chooser in an OOPIF: ${oopifChooser}`);
-    pass("upload_file through a chooser in an OOPIF is refused, nothing clicked", oopifChooser);
+    if (IS_CAMOUFOX) {
+      await upload({ ref: refOf(tree, "Child chooser") }, "chosen-across.txt");
+      await site.waitHit("child", "chooser", "chosen-across.txt");
+      pass("upload_file through a chooser in a cross-origin frame", "works here: Playwright catches it");
+    } else {
+      const oopifChooser = await code("upload_file", {
+        ref: refOf(tree, "Child chooser"),
+        files: [{ file_name: "x.txt", data_base64: hello }],
+      });
+      expect(oopifChooser === "INVALID_INPUT", `a chooser in an OOPIF: ${oopifChooser}`);
+      pass("upload_file through a chooser in an OOPIF is refused, nothing clicked", oopifChooser);
+    }
     const notAllowed = await code("upload_file", {
       ref: refOf(tree, "Main file"),
       files: [{ file_name: "C:\\Windows\\win.ini" }],
@@ -1083,6 +1154,15 @@ async function tabsFlow(): Promise<void> {
 
     const unknownRef = await code("click_ref", { ref: "e99999999" });
     expect(unknownRef === "ELEMENT_NOT_FOUND", `a ref never issued: ${unknownRef}`);
+    if (IS_CAMOUFOX) {
+      const unknownTab = await code("click_ref", { ref: "p999.e1" });
+      expect(unknownTab === "TAB_NOT_FOUND", `a ref on a tab never opened: ${unknownTab}`);
+      for (const tool of ["cdp_send", "cdp_send_no_safety"]) {
+        const refused = await code(tool, { method: "Browser.getVersion" });
+        expect(refused === "UNSUPPORTED_ON_ENGINE", `${tool}: ${refused}`);
+      }
+      pass("a tab never opened and raw CDP", "TAB_NOT_FOUND, UNSUPPORTED_ON_ENGINE");
+    }
 
     // ── a second tab ──
     site.hits.length = 0;
@@ -1108,7 +1188,7 @@ async function tabsFlow(): Promise<void> {
     const mainTitle = await evaluate("document.title");
     expect(mainTitle === "S5 main", `evaluate went to "${String(mainTitle)}"`);
     const mainTree = await extract();
-    expect(findByName(mainTree, "Main button"), "extract did not follow activate_tab");
+    expect(hasName(mainTree, "Main button"), "extract did not follow activate_tab");
     pass("activate_tab", "evaluate_js and extract act on the first tab");
 
     await act("click_ref", { ref: tab2Button });
@@ -1152,47 +1232,49 @@ async function tabsFlow(): Promise<void> {
     pass("window.open, with an opener and noopener: both load", `active stayed ${beforePopup}`);
     for (const popup of popupTabs) await act("close_tab", { target_id: popup.targetId });
 
-    const viaCdp = (await act("cdp_send", {
-      method: "Target.createTarget",
-      params: { url: `${site.parent}/popup?n=3` },
-    })) as { targetId: string };
-    await popups();
-    list = await tabs();
-    expect(list.activeTargetId === beforePopup, "Target.createTarget through cdp_send took the active tab");
-    pass("a tab from Target.createTarget through cdp_send loads", viaCdp.targetId);
-    await act("activate_tab", { target_id: viaCdp.targetId });
-    await act("close_tab", { target_id: viaCdp.targetId });
+    if (!IS_CAMOUFOX) {
+      const viaCdp = (await act("cdp_send", {
+        method: "Target.createTarget",
+        params: { url: `${site.parent}/popup?n=3` },
+      })) as { targetId: string };
+      await popups();
+      list = await tabs();
+      expect(list.activeTargetId === beforePopup, "Target.createTarget through cdp_send took the active tab");
+      pass("a tab from Target.createTarget through cdp_send loads", viaCdp.targetId);
+      await act("activate_tab", { target_id: viaCdp.targetId });
+      await act("close_tab", { target_id: viaCdp.targetId });
 
-    // new_tab takes http(s) only, so these come through cdp_send, as an expert's would.
-    const openRaw = async (url: string): Promise<string> => {
-      const opened = (await act("cdp_send", { method: "Target.createTarget", params: { url } })) as {
-        targetId: string;
+      // new_tab takes http(s) only, so these come through cdp_send, as an expert's would.
+      const openRaw = async (url: string): Promise<string> => {
+        const opened = (await act("cdp_send", { method: "Target.createTarget", params: { url } })) as {
+          targetId: string;
+        };
+        await act("activate_tab", { target_id: opened.targetId });
+        return opened.targetId;
       };
-      await act("activate_tab", { target_id: opened.targetId });
-      return opened.targetId;
-    };
-    for (const url of ["chrome://version/", "chrome://extensions/", "chrome://newtab/"]) {
-      const opened = await openRaw(url);
-      let readyState: unknown;
-      let title: unknown;
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        readyState = await evaluate("document.readyState");
-        title = await evaluate("document.title");
-        if (readyState === "complete") break;
-        await new Promise((done) => setTimeout(done, 100));
+      for (const url of ["chrome://version/", "chrome://extensions/", "chrome://newtab/"]) {
+        const opened = await openRaw(url);
+        let readyState: unknown;
+        let title: unknown;
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          readyState = await evaluate("document.readyState");
+          title = await evaluate("document.title");
+          if (readyState === "complete") break;
+          await new Promise((done) => setTimeout(done, 100));
+        }
+        expect(readyState === "complete", `${url} stalled at ${String(readyState)}`);
+        pass(`${url} loads`, `readyState complete, title "${String(title)}"`);
+        await act("close_tab", { target_id: opened });
       }
-      expect(readyState === "complete", `${url} stalled at ${String(readyState)}`);
-      pass(`${url} loads`, `readyState complete, title "${String(title)}"`);
+
+      const extensionUrl = "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html";
+      const opened = await openRaw(extensionUrl);
+      await new Promise((done) => setTimeout(done, 1_000));
+      const extensionState = `url ${String(await evaluate("location.href"))}, readyState ${String(await evaluate("document.readyState"))}`;
+      pass("the PDF viewer's extension page", extensionState);
       await act("close_tab", { target_id: opened });
     }
-
-    const extensionUrl = "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html";
-    const opened = await openRaw(extensionUrl);
-    await new Promise((done) => setTimeout(done, 1_000));
-    const extensionState = `url ${String(await evaluate("location.href"))}, readyState ${String(await evaluate("document.readyState"))}`;
-    pass("the PDF viewer's extension page", extensionState);
-    await act("close_tab", { target_id: opened });
 
     // ── the first tab closes, the session stays ──
     const tab3 = String((await act("new_tab", {})).targetId);
@@ -1231,6 +1313,12 @@ async function tabsFlow(): Promise<void> {
     const failed = await callError(client, "navigate", { ...profile, url: "http://127.0.0.1:1/" });
     expect(failed.code === "NAVIGATION_FAILED", `navigate to a closed port: ${JSON.stringify(failed)}`);
     pass("navigate to a failing URL", String(failed.message));
+    const refused = await callError(client, "navigate", {
+      ...profile,
+      url: `http://127.0.0.1:${await freePort()}/`,
+    });
+    expect(refused.code === "NAVIGATION_FAILED", `navigate to a closed port: ${JSON.stringify(refused)}`);
+    pass("navigate to a port nothing listens on", String(refused.message));
 
     const sameDocumentAt = Date.now();
     await act("navigate", { url: `${site.child}/other#there` });
@@ -1239,11 +1327,15 @@ async function tabsFlow(): Promise<void> {
 
     // ── after the browser ──
     await act("set_dialog_policy", { mode: "manual" });
-    await call(client, "cdp_send", {
-      ...profile,
-      method: "Runtime.evaluate",
-      params: { expression: "setTimeout(() => alert('left open'), 10); 1" },
-    });
+    if (IS_CAMOUFOX) {
+      await evaluate("setTimeout(() => alert('left open'), 10); 1");
+    } else {
+      await call(client, "cdp_send", {
+        ...profile,
+        method: "Runtime.evaluate",
+        params: { expression: "setTimeout(() => alert('left open'), 10); 1" },
+      });
+    }
     await waitForDialog(client, id);
     const closingAt = Date.now();
     await act("close_profile", {});
@@ -1263,6 +1355,26 @@ async function tabsFlow(): Promise<void> {
     const exit = await serve.exited;
     expect(exit === 0, `exit code ${exit}:\n${serve.output()}`);
     await assertNoLeftovers("tabs flow");
+
+    // ── a later run of the server, with no browser started ──
+    const later = await startServe();
+    try {
+      const again = await httpClient(later.url, later.token);
+      const kept = (await call(again, "list_downloads", profile)) as unknown as {
+        downloads: Array<{ id: string; fileName: string; state: string }>;
+      };
+      expect(kept.downloads[0]?.id === download!.id, `after a restart: ${JSON.stringify(kept)}`);
+      const fromDisk = (await call(again, "get_download", { ...profile, download_id: download!.id })) as {
+        data_base64?: string;
+      };
+      expect(fromDisk.data_base64 === got.data_base64, "get_download after a restart");
+      pass("the downloads after a restart of the server", kept.downloads[0]!.fileName);
+      await again.close();
+      sendConsoleCtrl(later.child.pid!, "CTRL_BREAK");
+      expect((await later.exited) === 0, `exit code:\n${later.output()}`);
+    } finally {
+      if (later.child.exitCode === null) later.child.kill();
+    }
   } finally {
     if (serve.child.exitCode === null) serve.child.kill();
     await site.close();

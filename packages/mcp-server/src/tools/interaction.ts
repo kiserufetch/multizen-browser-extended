@@ -266,7 +266,7 @@ function act(ctx: ToolContext, id: string, action: DriverAction): Promise<{ ok: 
 
 const PROFILE_ID_PROPERTY = { profile_id: { type: "string" } } as const;
 const TARGET_PROPERTIES = {
-  ref: { type: "string", description: "Element ref from extract, e.g. 'e7'" },
+  ref: { type: "string", description: "Element ref from extract, e.g. 'e7', or 'p3.e7' on Camoufox" },
   selector: { type: "string", description: "CSS selector, when there is no ref" },
 } as const;
 
@@ -275,7 +275,7 @@ export const INTERACTION_TOOLS: ExtensionTool[] = [
     definition: {
       name: "press_key",
       description:
-        "Press a key or chord in the page, e.g. 'Enter', 'Tab', 'Escape', 'Control+A'. 'ControlOrMeta' means Command on a macOS persona and Control otherwise. With ref or selector, clicks that element first. For text, use type or type_ref. Fails with INPUT_NOT_DELIVERED when the page did not receive the key.",
+        "Press a key or chord in the page, e.g. 'Enter', 'Tab', 'Escape', 'Control+A'. 'ControlOrMeta' means Command on a macOS persona and Control otherwise. With ref or selector, clicks that element first. For text, use type or type_ref. On CloakBrowser, fails with INPUT_NOT_DELIVERED when the page did not receive the key; Camoufox sends it through Playwright, with no such check.",
       inputSchema: {
         type: "object",
         required: ["profile_id", "key"],

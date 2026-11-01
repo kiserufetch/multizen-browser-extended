@@ -37,7 +37,7 @@ import { companionDir } from "./extensions/companion";
 import { resolveLoadDir } from "./extensions/extensionStore.ts";
 import { killProcessTree, gracefulShutdown } from "./processTree";
 import { assertSpawnedBrowser, waitForCdpSessionReady } from "./cdpReadiness";
-import { DownloadTracker } from "./downloads.ts";
+import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
 import { sanitizeStartUrl } from "./startPage";
 import { firstFreePort } from "./portProbe.ts";
 import type { RuntimeHost } from "./host.ts";
@@ -193,8 +193,6 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private readonly customAllocatePort?: () => Promise<number>;
   private readonly extraDisabledFeatures: readonly string[];
   private readonly armDownloadsAtLaunch: boolean;
-  /** Outlive the browser, so a finished download stays reachable after it closes. */
-  private readonly downloadTrackers = new Map<ProfileId, Promise<DownloadTracker>>();
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     super();
@@ -975,17 +973,11 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   }
 
   private downloadTracker(profileId: ProfileId): Promise<DownloadTracker> {
-    let tracker = this.downloadTrackers.get(profileId);
-    if (!tracker) {
-      const profile = this.profileManager.get(profileId);
-      if (!profile) {
-        throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
-      }
-      tracker = DownloadTracker.open(join(profile.dataDir, PROFILE_DOWNLOADS_DIR));
-      this.downloadTrackers.set(profileId, tracker);
-      tracker.catch(() => this.downloadTrackers.delete(profileId));
+    const profile = this.profileManager.get(profileId);
+    if (!profile) {
+      throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
     }
-    return tracker;
+    return sharedDownloadTracker(join(profile.dataDir, PROFILE_DOWNLOADS_DIR));
   }
 
   private armDownloads(profileId: ProfileId, r: RunningProcess): Promise<void> {

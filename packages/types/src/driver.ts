@@ -37,6 +37,14 @@ export interface DownloadFile extends DownloadRecord {
 export type DialogType = "alert" | "confirm" | "prompt" | "beforeunload";
 export type DialogAction = "accept" | "dismiss";
 
+/** Auto mode's answers: accept what has one outcome, nothing affirmative the agent didn't ask for. */
+export const DEFAULT_DIALOG_ANSWERS: Readonly<Record<DialogType, DialogAction>> = {
+  alert: "accept",
+  beforeunload: "accept",
+  confirm: "dismiss",
+  prompt: "dismiss",
+};
+
 /** `auto` answers each dialog at once; `manual` leaves it open for handleDialog. */
 export interface DialogPolicy {
   mode: "auto" | "manual";
