@@ -687,6 +687,11 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     hardwareConcurrency: [6, 8, 12, 16],
     deviceMemory: [8, 16, 32],
   },
+  // Linux WebGL is what Chrome reports there: ANGLE on OpenGL, vendor "Google Inc. (<GL vendor>)"
+  // and the driver's own renderer and version inside, as CloakBrowser's own Linux pool has it
+  // (NVIDIA: "ANGLE (NVIDIA Corporation, NVIDIA GeForce …/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 565.77)").
+  // No nouveau chip names like "NV178", and no Windows "(0x…)" device ids: CreepJS grades those F
+  // and C (docs/detection-baselines).
   {
     family: "linux-laptop-intel",
     label: "Linux laptop (Intel Iris Xe)",
@@ -699,9 +704,9 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: COMMON_DESKTOP_SCREENS,
     dpr: 1,
     webgl: [
-      { vendor: "Mesa", renderer: "Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2)" },
-      { vendor: "Mesa", renderer: "Mesa Intel(R) Graphics (RPL-P)" },
-      { vendor: "Intel", renderer: "Intel(R) Iris(R) Xe Graphics (0x0000A7A0)" },
+      { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Mesa Intel(R) Xe Graphics (TGL GT2), OpenGL 4.6 (Core Profile) Mesa 24.0.9-0ubuntu0.1)" },
+      { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Mesa Intel(R) Graphics (RPL-P), OpenGL 4.6 (Core Profile) Mesa 24.0.9-0ubuntu0.1)" },
+      { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Mesa Intel(R) Graphics (ADL GT2), OpenGL 4.6 (Core Profile) Mesa 24.0.9-0ubuntu0.1)" },
     ],
     hardwareConcurrency: [4, 8, 12],
     deviceMemory: [8, 16],
@@ -718,9 +723,9 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: COMMON_DESKTOP_SCREENS,
     dpr: 1,
     webgl: [
-      { vendor: "Mesa", renderer: "AMD Radeon Graphics (radeonsi, rembrandt, LLVM 17.0.6, DRM 3.57, 6.8.0)" },
-      { vendor: "Mesa", renderer: "AMD Radeon 780M (radeonsi, phoenix, LLVM 17.0.6, DRM 3.57, 6.8.0)" },
-      { vendor: "AMD", renderer: "AMD Radeon RX 7600M XT (radeonsi, navi33, LLVM 17.0.6, DRM 3.57, 6.8.0)" },
+      { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon Graphics (radeonsi, rembrandt, LLVM 17.0.6, DRM 3.57, 6.8.0-45-generic), OpenGL 4.6 (Core Profile) Mesa 24.0.9-0ubuntu0.1)" },
+      { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon 780M (radeonsi, gfx1103_r1, LLVM 17.0.6, DRM 3.57, 6.8.0-45-generic), OpenGL 4.6 (Core Profile) Mesa 24.0.9-0ubuntu0.1)" },
+      { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 7600M XT (radeonsi, gfx1102, LLVM 17.0.6, DRM 3.57, 6.8.0-45-generic), OpenGL 4.6 (Core Profile) Mesa 24.0.9-0ubuntu0.1)" },
     ],
     hardwareConcurrency: [6, 8, 12, 16],
     deviceMemory: [8, 16, 32],
@@ -737,9 +742,9 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: COMMON_DESKTOP_SCREENS,
     dpr: 1,
     webgl: [
-      { vendor: "NVIDIA Corporation", renderer: "NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2" },
-      { vendor: "NVIDIA Corporation", renderer: "NVIDIA GeForce RTX 4050 Laptop GPU/PCIe/SSE2" },
-      { vendor: "Mesa", renderer: "NV178" },
+      { vendor: "Google Inc. (NVIDIA Corporation)", renderer: "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 550.120)" },
+      { vendor: "Google Inc. (NVIDIA Corporation)", renderer: "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4050 Laptop GPU/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 565.77)" },
+      { vendor: "Google Inc. (NVIDIA Corporation)", renderer: "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 3060 Laptop GPU/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 550.120)" },
     ],
     hardwareConcurrency: [8, 12, 16],
     deviceMemory: [8, 16, 32],
@@ -756,10 +761,10 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: [...COMMON_DESKTOP_SCREENS, { width: 3840, height: 2160, label: "3840 × 2160 (4K)" }],
     dpr: 1,
     webgl: [
-      { vendor: "Mesa", renderer: "Mesa Intel(R) UHD Graphics 770 (RPL-S)" },
-      { vendor: "Mesa", renderer: "Mesa Intel(R) Graphics (ADL GT2)" },
-      { vendor: "Mesa", renderer: "Mesa Intel(R) Arc(tm) A750 Graphics (DG2)" },
-      { vendor: "Intel", renderer: "Intel(R) Arc(TM) A770 Graphics (0x000056A0)" },
+      { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Mesa Intel(R) UHD Graphics 770 (RPL-S), OpenGL 4.6 (Core Profile) Mesa 24.0.9)" },
+      { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Mesa Intel(R) UHD Graphics 730 (ADL-S GT1), OpenGL 4.6 (Core Profile) Mesa 24.0.9)" },
+      { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Mesa Intel(R) Arc(tm) A750 Graphics (DG2), OpenGL 4.6 (Core Profile) Mesa 24.0.9)" },
+      { vendor: "Google Inc. (Intel)", renderer: "ANGLE (Intel, Mesa Intel(R) Arc(tm) A770 Graphics (DG2), OpenGL 4.6 (Core Profile) Mesa 24.0.9)" },
     ],
     hardwareConcurrency: [4, 8, 12, 16],
     deviceMemory: [8, 16, 32],
@@ -776,10 +781,10 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: [...COMMON_DESKTOP_SCREENS, { width: 3840, height: 2160, label: "3840 × 2160 (4K)" }],
     dpr: 1,
     webgl: [
-      { vendor: "Mesa", renderer: "AMD Radeon RX 7800 XT (radeonsi, navi32, LLVM 17.0.6, DRM 3.57, 6.6.0)" },
-      { vendor: "Mesa", renderer: "AMD Radeon Graphics (radeonsi, renoir, LLVM 17.0.6, DRM 3.57, 6.6.0)" },
-      { vendor: "Mesa", renderer: "AMD Radeon RX 6700 XT (radeonsi, navi22, LLVM 17.0.6, DRM 3.57, 6.6.0)" },
-      { vendor: "AMD", renderer: "AMD Radeon RX 7900 XTX (radeonsi, navi31, LLVM 17.0.6, DRM 3.57, 6.6.0)" },
+      { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 7800 XT (radeonsi, gfx1101, LLVM 17.0.6, DRM 3.57, 6.6.0), OpenGL 4.6 (Core Profile) Mesa 24.0.9)" },
+      { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon Graphics (radeonsi, renoir, LLVM 17.0.6, DRM 3.57, 6.6.0), OpenGL 4.6 (Core Profile) Mesa 24.0.9)" },
+      { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 6700 XT (radeonsi, navi22, LLVM 17.0.6, DRM 3.57, 6.6.0), OpenGL 4.6 (Core Profile) Mesa 24.0.9)" },
+      { vendor: "Google Inc. (AMD)", renderer: "ANGLE (AMD, AMD Radeon RX 7900 XTX (radeonsi, gfx1100, LLVM 17.0.6, DRM 3.57, 6.6.0), OpenGL 4.6 (Core Profile) Mesa 24.0.9)" },
     ],
     hardwareConcurrency: [6, 8, 12, 16, 24],
     deviceMemory: [8, 16, 32, 64],
@@ -796,10 +801,10 @@ const DEVICES: ReadonlyArray<DeviceSpec> = [
     screens: [...COMMON_DESKTOP_SCREENS, { width: 3840, height: 2160, label: "3840 × 2160 (4K)" }],
     dpr: 1,
     webgl: [
-      { vendor: "NVIDIA Corporation", renderer: "NVIDIA GeForce RTX 4070/PCIe/SSE2" },
-      { vendor: "NVIDIA Corporation", renderer: "NVIDIA GeForce RTX 3080/PCIe/SSE2" },
-      { vendor: "Mesa", renderer: "NVIDIA GeForce RTX 4070/PCIe/SSE2" },
-      { vendor: "Mesa", renderer: "NV137" },
+      { vendor: "Google Inc. (NVIDIA Corporation)", renderer: "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4070/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 565.77)" },
+      { vendor: "Google Inc. (NVIDIA Corporation)", renderer: "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 3080/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 550.120)" },
+      { vendor: "Google Inc. (NVIDIA Corporation)", renderer: "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 565.77)" },
+      { vendor: "Google Inc. (NVIDIA Corporation)", renderer: "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 4060 Ti/PCIe/SSE2, OpenGL 4.5.0 NVIDIA 550.120)" },
     ],
     hardwareConcurrency: [8, 12, 16, 24],
     deviceMemory: [16, 32, 64],

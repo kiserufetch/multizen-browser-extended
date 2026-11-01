@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+What a page sees of a browser in the Docker image, closer to a Linux desktop. Measured with
+`scripts/detection-baseline` against the stored runs: [`docs/detection-baselines`](docs/detection-baselines/README.md).
+
+### Changed
+
+- **The Docker image starts a sound server.** `docker/session.sh` runs PipeWire with a silent
+  speaker and microphone (`docker/pipewire.conf`) before the server. Without one, CloakBrowser
+  played into Chromium's fake output (`AudioContext.baseLatency` 441/48000) and showed a made-up
+  device list with two `audiooutput`, and Camoufox had no device at all: 44100 Hz, 0 channels, no
+  media devices. Now both report 48 kHz stereo and a microphone. PipeWire rather than PulseAudio,
+  which pages can't tell apart here but costs 160 MB more. About 20 MB with the fonts below.
+- **Linux desktop fonts in the image:** Ubuntu, Cantarell, FreeSans, and Carlito and Caladea,
+  which Chromium takes for Calibri and Cambria. A Linux persona now has 11 of the probe's 15 Linux
+  fonts instead of 8, a Windows persona 5 of its 59 instead of 3. `fonts-ubuntu` is why the image
+  enables Debian's non-free area. Still no Microsoft fonts.
+- **Linux GPU personas read like Chrome on Linux:** ANGLE on OpenGL, vendor `Google Inc. (…)`, as
+  CloakBrowser's own Linux pool has them. Gone: nouveau chip names (`NV178`, `NV137`), `Mesa` as the
+  vendor of NVIDIA's own driver, Windows `(0x…)` device ids. CreepJS graded `NV178` F and put it in
+  its trash as `suspicious gpu`. Existing profiles keep their GPU; editing the fingerprint of one that
+  has a retired string gives it its family's first GPU.
+- **A Linux persona has its panel on CloakBrowser:** the persona's available screen
+  (`availScreen`, screen height minus 30) reaches the engine as `--fingerprint-taskbar-height`.
+  `screen.availHeight` and `outerHeight` used to equal the screen's, which CreepJS counts twice
+  toward "like headless". This applies to existing Linux profiles on CloakBrowser too: their
+  `availHeight` is 30 px lower from the next launch. Windows personas are unchanged.
+
 ## [0.11.0] - 2026-11-01
 
 MultiZen without the desktop app: `multizen-server` runs the same MCP tools and browser drivers
