@@ -654,8 +654,11 @@ async function launchArgv(
   });
   syncBuiltinESMExports();
   try {
+    // The sandbox decision reads this host's kernel: where user namespaces are restricted, as on
+    // Ubuntu 24.04, it would add --no-sandbox to an argv that these tests compare flag by flag.
+    const options = { resolveSandboxDecision: async () => ({ noSandbox: false }), ...overrides };
     await assert.rejects(
-      driverFor(pm, join(dir, "x.exe"), overrides).launch(id, displayMode ? { displayMode } : undefined),
+      driverFor(pm, join(dir, "x.exe"), options).launch(id, displayMode ? { displayMode } : undefined),
       /stop before a real spawn/,
     );
   } finally {
