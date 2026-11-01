@@ -66,6 +66,9 @@ INTERNAL_*.md
 *.md
 !README.md
 
+# What a GPU driver logs to a browser's working directory
+NVIDIA Corporation/
+
 # Python bytecode caches
 __pycache__/
 *.pyc

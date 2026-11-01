@@ -741,9 +741,15 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       useNoSandbox: boolean,
     ): Promise<{ child: ChildProcess; session: CdpSession }> => {
       if (launch.aborted) throw launchAborted();
-      if (this.ownsDataDir) await removeSingletonFiles(browserDataDir);
+      if (this.ownsDataDir) {
+        await removeSingletonFiles(browserDataDir);
+        await fsp.mkdir(browserDataDir, { recursive: true });
+      }
       const spawnArgs = useNoSandbox ? ["--no-sandbox", ...args] : args;
       const child = spawn(chromiumPath, spawnArgs, {
+        // A GPU driver can log to the working directory (NVIDIA's `NVIDIA Corporation`):
+        // a server keeps that out of wherever it happened to be started.
+        ...(this.ownsDataDir ? { cwd: browserDataDir } : {}),
         // Unix: make the child a process-group leader so we can group-kill the
         // whole Chromium tree (renderers/GPU/utility) with process.kill(-pid),
         // which survives the leader's death. Windows uses taskkill /T instead,

@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HostHttpRequest, RuntimeHost } from "./host.ts";
-import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
+import { ChromiumBootstrap, windowsTarPath } from "./ChromiumBootstrap.ts";
 import { CamoufoxBootstrap } from "./CamoufoxBootstrap.ts";
 import { EngineRegistry } from "./engineRegistry.ts";
 import { companionDir } from "./extensions/companion.ts";
@@ -192,4 +192,9 @@ test("downloadCrxById surfaces a non-2xx from host.request", async () => {
     downloadCrxById("a".repeat(32), "146.0.0.0", fakeHost({ request })),
     /HTTP 500/,
   );
+});
+
+test("the engine zip on Windows goes to Windows' own tar, by path: PATH may find Git's first", () => {
+  assert.equal(windowsTarPath({ SystemRoot: "D:\\Win" }), "D:\\Win\\System32\\tar.exe");
+  assert.equal(windowsTarPath({}), "C:\\Windows\\System32\\tar.exe");
 });

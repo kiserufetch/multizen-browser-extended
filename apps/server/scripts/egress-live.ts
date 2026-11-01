@@ -354,6 +354,27 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+/**
+ * On a busy Windows machine a loopback connect can time out by itself, to any listener: nothing
+ * reached the server, so this says nothing about it, and the request can simply go again.
+ */
+const CONNECT_ATTEMPTS = 20;
+const CONNECT_RETRY_MS = 500;
+const fetchRetryingConnect: typeof fetch = async (input, init) => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fetch(input, init);
+    } catch (e) {
+      const code = (e as { cause?: { code?: string } }).cause?.code;
+      if (attempt >= CONNECT_ATTEMPTS || (code !== "ETIMEDOUT" && code !== "UND_ERR_CONNECT_TIMEOUT")) throw e;
+      await wait(CONNECT_RETRY_MS);
+    }
+  }
+};
+
+/** Whatever a failed run left running would keep this process alive, its pipes open. */
+const startedServers = new Set<ChildProcess>();
+
 async function startServe(flags: string[], stub: DnsStub): Promise<Serve> {
   const port = await freePort();
   const child = spawn(
@@ -386,8 +407,11 @@ async function startServe(flags: string[], stub: DnsStub): Promise<Serve> {
   await client.connect(
     new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
       requestInit: { headers: { authorization: `Bearer ${token}` } },
+      fetch: fetchRetryingConnect,
     }),
   );
+  startedServers.add(child);
+  child.once("close", () => startedServers.delete(child));
   return { child, port, client, output: () => output };
 }
 
@@ -1092,4 +1116,5 @@ async function main(): Promise<void> {
 main().catch((e: unknown) => {
   process.stdout.write(`${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`);
   process.exitCode = 1;
+  for (const child of startedServers) child.kill();
 });

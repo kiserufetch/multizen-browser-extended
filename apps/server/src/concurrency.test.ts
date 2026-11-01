@@ -146,7 +146,7 @@ const host: RuntimeHost = {
   },
 };
 
-const READY: ChromiumStatus = { kind: "ready", version: "146.0.0.0", binaryPath: "unused" };
+const READY = { kind: "ready", version: "146.0.0.0", binaryPath: "unused" } satisfies ChromiumStatus;
 
 function stack(opts: { maxBrowsers?: number; browserQueueTimeoutMs?: number } = {}): {
   driver: ChromiumBrowserDriver;

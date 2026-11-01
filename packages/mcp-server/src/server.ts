@@ -1190,7 +1190,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "evaluate_js",
     description:
-      "Evaluate a JavaScript expression in the page and return the result by value. Runs via Runtime.evaluate without enabling the Runtime domain (stealth-safe).",
+      "Evaluate a JavaScript expression in the page and return the result by value. Runs via Runtime.evaluate without enabling the Runtime domain (stealth-safe). On Camoufox it runs in an isolated world: it sees the DOM but not the page's own globals.",
     inputSchema: {
       type: "object",
       required: ["profile_id", "expression"],

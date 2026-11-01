@@ -131,7 +131,8 @@ test("the built CLI starts: help, no command, an unknown command", () => {
   const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8", timeout: 60_000 });
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /multizen-server serve/);
-  assert.equal(help.stdout.includes("--display-mode"), false);
+  assert.match(help.stdout, /--display-mode/);
+  assert.match(help.stdout, /--headless/);
 
   const none = spawnSync(process.execPath, [cli], { encoding: "utf8", timeout: 60_000 });
   assert.equal(none.status, 2, none.stderr);

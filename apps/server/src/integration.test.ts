@@ -38,7 +38,11 @@ before(async () => {
   await build({ outdir: OUTDIR });
 });
 
+/** A test that fails on its way can leave a server up, which would hold the whole run open. */
+const started = new Set<ChildProcess>();
+
 after(() => {
+  for (const child of started) child.kill();
   rmSync(ABS_OUTDIR, { recursive: true, force: true });
 });
 
@@ -80,6 +84,8 @@ function startCli(args: string[], env: NodeJS.ProcessEnv = {}): Running {
     windowsHide: true,
     env: { ...process.env, ...env },
   });
+  started.add(child);
+  child.once("close", () => started.delete(child));
   let out = "";
   let err = "";
   child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));

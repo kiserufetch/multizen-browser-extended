@@ -26,6 +26,8 @@ async function listener(
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  // A test that fails before its close would otherwise hold the whole run open.
+  server.unref();
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}/hook`,

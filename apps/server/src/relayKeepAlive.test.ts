@@ -77,7 +77,8 @@ test("a server that doesn't answer gets its tries, then it ends", async () => {
   const { keepAlive, pings, gone, answerWith } = rig();
   answerWith(() => Promise.reject(new TypeError("fetch failed")));
   keepAlive.start();
-  await wait(80);
+  // By the count, not the clock: a busy machine runs these timers late.
+  for (let i = 0; i < 300 && gone.length === 0; i += 1) await wait(10);
   assert.equal(pings.length, 3);
   assert.equal(gone.length, 1);
   assert.match(gone[0]!, /does not answer \(3 tries, last: fetch failed\)/);

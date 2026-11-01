@@ -7,15 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Closes the per-profile engine gaps listed as known limitations in 0.10.0.
-
-### Fixed
-
-- **Camoufox: `type_ref` and `press_key` on an element in a cross-origin iframe no longer
-  lose their keys** when focus was in the page around it: the click only gave the frame focus.
+MultiZen without the desktop app: `multizen-server` runs the same MCP tools and browser drivers
+in Docker or on a bare server, with headless and Xvfb display modes, permissions per token, an
+egress policy and a web panel for human handoff. The MCP API grows typed errors, more input tools,
+downloads, dialogs, leases, and refs on every tab, frame and engine. This also closes the
+per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
+[`apps/server/README.md`](apps/server/README.md).
 
 ### Added
 
+- **`multizen-server`: MultiZen's MCP server with real browsers and no Electron.** `serve` is MCP
+  over Streamable HTTP and SSE, `stdio` the same for one client, and `stdio --connect` relays to a
+  running `serve` for clients that can only spawn a process. Logs are JSON lines, and `stdio`'s stdout
+  stays valid JSON-RPC while a driver logs. SIGTERM, Ctrl+C and stdin EOF close the browsers, X
+  servers and bridges, then exit 0, within a time limit. `--max-browsers` limits browsers over both
+  engines (by default what the machine's memory allows), with launches waiting in line for up to 30 s.
+  A second `serve` or `stdio` on a data directory is refused by its lock, as is a desktop app's
+  directory. `profile export` and `profile import` move profiles as `.mzar` archives, between
+  servers and to and from the desktop. A server pins its engine's version, and has no updater and no
+  usage reporting. The browser code moved from `apps/desktop` to `packages/browser-runtime`, behind a
+  small host interface, and the desktop passes its Electron implementation.
+- **Typed errors on every MCP tool.** A failure now has a stable `code` (`PROFILE_NOT_RUNNING`,
+  `STALE_REF`, `DIALOG_OPEN`, `TIMEOUT`, ...), `retryable`, a `hint`, and `details.retry_after_ms`
+  where a wait is known, in the same response shape as before. Every tool carries all four MCP
+  annotation hints.
 - **MCP `press_key`, `hover`, `select_option`, `scroll`, `upload_file`,
   `list_downloads`, `get_download`, `set_dialog_policy`, `list_dialogs` and
   `handle_dialog`** on both engines. On the desktop, a CloakBrowser profile's
@@ -126,6 +141,8 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 
 ### Changed
 
+- `multizen-mcp` runs its mock driver only with `--mock`. Without it, it says how to run the real
+  server, and exits.
 - `launch_profile` reports a Camoufox browser's real `pid`, found from its command line, instead
   of 0. It stays 0 if the search fails, which doesn't fail the launch.
 - MCP over HTTP takes requests of up to 22 MiB on both of its transports, so a large
@@ -163,8 +180,21 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
 - On Camoufox, `extract` stops at 5000 lines of `ariaSnapshot` and 1 MB of text and
   sets `truncated: true`.
 
+### Removed
+
+- `packages/mcp-server/scripts/test-cdp.ts`. It wasn't in CI and already failed most of its
+  checks. The tests of `cdp-driver`, `mcp-server` and `apps/server/scripts/e2e.ts` cover the same.
+
 ### Fixed
 
+- On Windows the engine's zip goes to Windows' own `tar`, by path. Started from Git Bash, `PATH` found Git's GNU
+  tar, which takes `C:\...` for a remote host, so a first start downloaded 562 MB over and over.
+- **A launch can no longer attach to the wrong browser.** Ports used to be handed out by counting
+  from 9222 and anything that answered was taken for ours, so with another browser on that port a
+  new profile drove someone else's cookies. A port now has to be free, and the browser on it has to
+  report the PID that was started. On the desktop only a positive mismatch fails a launch.
+- **Camoufox: `type_ref` and `press_key` on an element in a cross-origin iframe no longer
+  lose their keys** when focus was in the page around it: the click only gave the frame focus.
 - A Streamable HTTP client that disappeared without ending its session left its queued
   calls in line, and they fired later on whatever the page showed by then.
 - On Camoufox, the call after a failed `navigate` could fail by itself: Firefox commits its

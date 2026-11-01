@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { connect as http2Connect, type ClientHttp2Session } from "node:http2";
-import { request as httpsRequest } from "node:https";
+import { request as httpsRequest, type RequestOptions } from "node:https";
 import { connect as netConnect } from "node:net";
 import { ja4 } from "./ja4.ts";
 import { startTlsSite } from "./tlsSite.ts";
@@ -54,7 +54,7 @@ test("an HTTP/1.1 client gets the same page, and its headers in its own order", 
           rejectUnauthorized: false,
           ALPNProtocols: ["http/1.1"],
           headers: { "x-first": "1", "x-second": "2" },
-        },
+        } as RequestOptions,
         (res) => {
           let text = "";
           res.setEncoding("utf8");

@@ -94,7 +94,7 @@ test("the file's mode: 0600 and tightened if loosened; on Windows, a warning onc
     return;
   }
   assert.equal(statSync(path).mode & 0o777, 0o600);
-  assert.deepEqual(warnings, []);
+  assert.equal(warnings.length, 0);
 
   chmodSync(path, 0o644);
   new TokenStore(path, { warn: (m) => warnings.push(m) });

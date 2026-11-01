@@ -69,7 +69,7 @@
  * The signal delivery, the link to the engine and the process scan differ by platform.
  */
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import {
   createServer as createHttpServer,
   request as httpRequest,
@@ -235,6 +235,9 @@ interface Running {
   exited: Promise<number | null>;
 }
 
+/** Whatever a failed flow left running would keep this process alive, its pipes open. */
+const startedServers = new Set<ChildProcess>();
+
 function startServer(args: string[]): Running {
   // windowsHide with no inherited stdio gives the child its own hidden console,
   // which is what lets sendConsoleCtrl below reach it and nothing else.
@@ -242,9 +245,16 @@ function startServer(args: string[]): Running {
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
+  startedServers.add(child);
+  child.once("close", () => startedServers.delete(child));
   let output = "";
-  child.stdout?.on("data", (c: Buffer) => (output += c.toString("utf8")));
-  child.stderr?.on("data", (c: Buffer) => (output += c.toString("utf8")));
+  const take = (c: Buffer): void => {
+    output += c.toString("utf8");
+    // What the servers said, for looking into a failed run.
+    if (process.env.MZ_E2E_SERVER_LOG) appendFileSync(process.env.MZ_E2E_SERVER_LOG, c);
+  };
+  child.stdout?.on("data", take);
+  child.stderr?.on("data", take);
   return {
     child,
     output: () => output,
@@ -278,11 +288,30 @@ async function startServe(extra: string[] = []): Promise<Running & { url: string
   return { ...running, url: `http://127.0.0.1:${port}/mcp`, token };
 }
 
+/**
+ * On a busy Windows machine a loopback connect can time out by itself, to any listener: nothing
+ * reached the server, so this says nothing about it, and the request can simply go again.
+ */
+const CONNECT_ATTEMPTS = 20;
+const CONNECT_RETRY_MS = 500;
+const fetchRetryingConnect: typeof fetch = async (input, init) => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fetch(input, init);
+    } catch (e) {
+      const code = (e as { cause?: { code?: string } }).cause?.code;
+      if (attempt >= CONNECT_ATTEMPTS || (code !== "ETIMEDOUT" && code !== "UND_ERR_CONNECT_TIMEOUT")) throw e;
+      await new Promise((done) => setTimeout(done, CONNECT_RETRY_MS));
+    }
+  }
+};
+
 async function httpClient(url: string, token: string): Promise<Client> {
   const client = new Client({ name: "e2e", version: "1.0.0" });
   await client.connect(
     new StreamableHTTPClientTransport(new URL(url), {
       requestInit: { headers: { authorization: `Bearer ${token}` } },
+      fetch: fetchRetryingConnect,
     }),
   );
   return client;
@@ -2554,13 +2583,17 @@ function sdkClientWithCa(url: string, token: string, ca: string): string {
     process.stdout.write(String(tools.length));
     await client.close();
   `;
-  const res = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
-    cwd: APP_ROOT,
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 60_000,
-    env: { ...process.env, NODE_EXTRA_CA_CERTS: ca, MZ_URL: url, MZ_TOKEN: token },
-  });
+  const run = (): SpawnSyncReturns<string> =>
+    spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      cwd: APP_ROOT,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 60_000,
+      env: { ...process.env, NODE_EXTRA_CA_CERTS: ca, MZ_URL: url, MZ_TOKEN: token },
+    });
+  let res = run();
+  // As in fetchRetryingConnect: nothing reached the server.
+  for (let again = 0; again < 2 && /UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT/.test(res.stderr); again += 1) res = run();
   expect(res.status === 0, `the TLS client failed: ${res.stderr}`);
   return res.stdout;
 }
@@ -3096,6 +3129,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((e: unknown) => {
-  process.stdout.write(`${e instanceof Error ? e.message : String(e)}\n`);
+  const cause = e instanceof Error && e.cause ? ` (${String(e.cause)})` : "";
+  process.stdout.write(`${e instanceof Error ? e.message : String(e)}${cause}\n`);
   process.exitCode = 1;
+  for (const child of startedServers) child.kill();
 });

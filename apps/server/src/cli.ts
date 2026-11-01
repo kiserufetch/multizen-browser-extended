@@ -6,6 +6,7 @@ Usage:
   multizen-server serve [--host 127.0.0.1] [--port 7777] [--data-dir <dir>]
                         [--default-engine cloakbrowser|camoufox] [--no-auth] [--uploads-root <dir>]
                         [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
+                        [--display-mode auto|headed|xvfb|headless] [--headless]
                         [--allow-remote] [--allow-insecure-remote] [--tls-cert <file> --tls-key <file>]
                         [--allowed-hosts <name[:port],...>] [--allowed-origins <origin,...>]
                         [--public-url <url>] [--trust-proxy]
@@ -15,6 +16,7 @@ Usage:
                         [--handoff-ttl-ms <ms>] [--download-quota-bytes <n>]
   multizen-server stdio [--data-dir <dir>] [--default-engine cloakbrowser|camoufox]
                         [--uploads-root <dir>] [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
+                        [--display-mode auto|headed|xvfb|headless] [--headless]
                         [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
   multizen-server stdio --connect <url> [--token-file <path>] [--keepalive-ms <ms>]
   multizen-server profile export <profile-id> [--out <file.mzar>] [--passphrase-file <path>] [--data-dir <dir>]
@@ -28,7 +30,8 @@ Usage:
 
 Environment: MULTIZEN_DATA_DIR, MULTIZEN_HOST, MULTIZEN_PORT, MULTIZEN_DEFAULT_ENGINE,
 MULTIZEN_NO_AUTH=1, MULTIZEN_UPLOADS_ROOT, MULTIZEN_MAX_BROWSERS,
-MULTIZEN_BROWSER_QUEUE_TIMEOUT_MS, MULTIZEN_ARCHIVE_PASSPHRASE, MULTIZEN_ALLOW_REMOTE=1,
+MULTIZEN_BROWSER_QUEUE_TIMEOUT_MS, MULTIZEN_DISPLAY_MODE, MULTIZEN_HEADLESS=1,
+MULTIZEN_ARCHIVE_PASSPHRASE, MULTIZEN_ALLOW_REMOTE=1,
 MULTIZEN_ALLOW_INSECURE_REMOTE=1, MULTIZEN_TLS_CERT, MULTIZEN_TLS_KEY, MULTIZEN_ALLOWED_HOSTS,
 MULTIZEN_ALLOWED_ORIGINS, MULTIZEN_PUBLIC_URL, MULTIZEN_TRUST_PROXY=1,
 MULTIZEN_SESSION_IDLE_TTL_MS, MULTIZEN_MAX_SESSIONS, MULTIZEN_SECRET_KEY,
@@ -37,6 +40,12 @@ MULTIZEN_HANDOFF_WEBHOOK, MULTIZEN_HANDOFF_WEBHOOK_SECRET, MULTIZEN_HANDOFF_TTL_
 MULTIZEN_DOWNLOAD_QUOTA_BYTES.
 
 --max-browsers counts both engines and defaults to what the machine's memory allows.
+
+--display-mode is the mode when a launch and its profile name none: auto takes xvfb on Linux with no
+DISPLAY if Xvfb is installed, headless if not, and headed elsewhere. --headless allows no windows at
+all: a profile saved as headed runs headless, and naming another mode is INVALID_INPUT.
+
+Full documentation: apps/server/README.md.
 
 stdio --connect pings the server every --keepalive-ms (30000), which keeps its session from idling
 out. Below a server's --session-idle-ttl-ms is what it takes. When the session is gone anyway, because

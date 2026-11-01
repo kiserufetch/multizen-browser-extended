@@ -21,6 +21,15 @@ import {
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
 
+/** What buildRuntime needs besides a directory, with this file's tests caring about none of it. */
+const CONFIG = {
+  maxBrowsers: 2,
+  displayMode: "auto",
+  headless: false,
+  egressPolicy: "block-private",
+  egressAllow: [],
+} satisfies Partial<Parameters<typeof buildRuntime>[0]>;
+
 /** A data dir whose engine looks installed, so ensure() stays offline. */
 function dataDirWithEngine(): string {
   const dir = mkdtempSync(join(tmpdir(), "mz-rt-"));
@@ -41,7 +50,7 @@ async function withRuntime<T>(
 ): Promise<T> {
   const dir = dataDirWithEngine();
   prepare(dir);
-  const runtime = await buildRuntime({ dataDir: dir, defaultEngine });
+  const runtime = await buildRuntime({ ...CONFIG, dataDir: dir, defaultEngine });
   try {
     return await fn(runtime, dir);
   } finally {
@@ -140,6 +149,7 @@ test("Camoufox's occlusion tracker is off on Windows only, and reaches the route
 test("a measurement's overrides reach the drivers, and nothing the server runs passes any", async () => {
   const dir = dataDirWithEngine();
   const runtime = await buildRuntime({
+    ...CONFIG,
     dataDir: dir,
     measurement: {
       disabledFeatures: [],
@@ -202,10 +212,11 @@ test("the egress policy is one object, known to both drivers and to the tools", 
 test("--egress-policy allow-all: the drivers have nothing to enforce", async () => {
   const dir = dataDirWithEngine();
   const runtime = await buildRuntime({
+    ...CONFIG,
     dataDir: dir,
     egressPolicy: "allow-all",
     egressAllow: [],
-  } as Parameters<typeof buildRuntime>[0]);
+  });
   try {
     assert.equal(runtime.egress.enforced, false);
   } finally {
@@ -331,7 +342,7 @@ test("a row outside the profiles root with no directory refuses the start, namin
 test("the journal and the Xvfb directory reach both drivers, the Firefox one through the router", async () => {
   const dir = dataDirWithEngine();
   const processJournal = { add: () => {}, remove: () => {} };
-  const runtime = await buildRuntime({ dataDir: dir }, processJournal);
+  const runtime = await buildRuntime({ ...CONFIG, dataDir: dir }, processJournal);
   try {
     const router = runtime.driver as unknown as {
       firefoxOptions: { processJournal: unknown; xvfbRunDir: unknown };
@@ -360,7 +371,7 @@ test("buildRuntime refuses the same way, before any engine work", async () => {
   const dir = dataDirWithEngine();
   try {
     plantMovedRow(dir, false);
-    await assert.rejects(buildRuntime({ dataDir: dir }), DataDirMismatchError);
+    await assert.rejects(buildRuntime({ ...CONFIG, dataDir: dir }), DataDirMismatchError);
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -369,7 +380,7 @@ test("buildRuntime refuses the same way, before any engine work", async () => {
 test("close is idempotent and closes the database", async () => {
   const dir = dataDirWithEngine();
   try {
-    const runtime = await buildRuntime({ dataDir: dir });
+    const runtime = await buildRuntime({ ...CONFIG, dataDir: dir });
     await Promise.all([runtime.close(), runtime.close()]);
     await runtime.close();
     assert.throws(() => runtime.profileManager.list(), /not open/);
@@ -453,6 +464,7 @@ test("display: the flags and the stored setting reach the router", async () => {
   const dir = dataDirWithEngine();
   writeFileSync(join(dir, "settings.json"), JSON.stringify({ defaultDisplayMode: "headless" }));
   const runtime = await buildRuntime({
+    ...CONFIG,
     dataDir: dir,
     maxBrowsers: 1,
     displayMode: "xvfb",
@@ -476,7 +488,7 @@ test("display: the flags and the stored setting reach the router", async () => {
 test("display: without --headless nothing is forced, and a bad setting is simply absent", async () => {
   const dir = dataDirWithEngine();
   writeFileSync(join(dir, "settings.json"), JSON.stringify({ defaultDisplayMode: "holographic" }));
-  const runtime = await buildRuntime({ dataDir: dir, maxBrowsers: 1, displayMode: "auto", headless: false });
+  const runtime = await buildRuntime({ ...CONFIG, dataDir: dir, maxBrowsers: 1 });
   try {
     const router = runtime.driver as unknown as {
       forcedDisplayMode: string | undefined;

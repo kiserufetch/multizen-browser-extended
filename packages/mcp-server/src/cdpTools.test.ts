@@ -45,10 +45,22 @@ interface CdpCall {
   opts?: { safe?: boolean };
 }
 
+const notUsedHere = async (): Promise<never> => {
+  throw new Error("not used by these tests");
+};
+
 /** A BrowserDriver that records every cdpSend and returns a configurable
  *  response, so dispatch composition (method + params + safe flag) is
  *  observable without a browser. */
 class SpyDriver implements BrowserDriver {
+  performAction = notUsedHere;
+  listDownloads = notUsedHere;
+  getDownload = notUsedHere;
+  setDialogPolicy = notUsedHere;
+  listDialogs = notUsedHere;
+  handleDialog = notUsedHere;
+  captureFrame = notUsedHere;
+  dispatchInput = notUsedHere;
   readonly running = new Set<string>();
   readonly calls: CdpCall[] = [];
   respond: (method: string, params?: Record<string, unknown>) => unknown = () => ({ ok: true });

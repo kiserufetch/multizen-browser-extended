@@ -3,9 +3,17 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { promisify } from "node:util";
 import extract from "extract-zip";
+
+/**
+ * The tar Windows ships, which reads zip. A bare `tar` finds Git's GNU tar first in
+ * a process started from Git Bash, and that one takes `C:\...` for a remote host.
+ */
+export function windowsTarPath(env: NodeJS.ProcessEnv = process.env): string {
+  return win32.join(env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+}
 
 /**
  * Extract a zip or tar.gz archive preserving all attributes the OS cares
@@ -29,7 +37,7 @@ async function extractArchive(archivePath: string, destDir: string): Promise<voi
     return;
   }
   if (process.platform === "win32") {
-    await execFileP("tar", ["-xf", archivePath, "-C", destDir]);
+    await execFileP(windowsTarPath(), ["-xf", archivePath, "-C", destDir]);
     return;
   }
   await extract(archivePath, { dir: destDir });

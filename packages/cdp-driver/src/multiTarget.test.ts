@@ -785,10 +785,10 @@ test("a ref on a background tab activates that tab first", async () => {
   await s.clickRef(names.get("Main button")!);
   assert.equal(b.calls("Target.activateTarget").at(-1)?.params.targetId, "A");
   assert.equal(((await s.listTabs()) as { activeTargetId: string }).activeTargetId, "A");
-  const activation = b.log.findLastIndex((c) => c.method === "Target.activateTarget");
-  const press = b.log.findLastIndex(
-    (c) => c.method === "Input.dispatchMouseEvent" && c.params.type === "mousePressed",
-  );
+  const activation = b.log.map((c) => c.method).lastIndexOf("Target.activateTarget");
+  const press = b.log
+    .map((c) => (c.method === "Input.dispatchMouseEvent" ? c.params.type : null))
+    .lastIndexOf("mousePressed");
   assert.ok(activation < press);
   assert.equal(pressPoint(b).sessionId, "S-A");
 });

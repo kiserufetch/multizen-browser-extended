@@ -80,7 +80,7 @@ test("the errors from outside this package map to their codes", () => {
   assert.ok(!zod.success);
   assert.equal(toToolError(zod.error, "x").code, "INVALID_INPUT");
 
-  const reconcile = new FingerprintReconcileError("locale");
+  const reconcile = new FingerprintReconcileError("locale", "unknown");
   assert.deepEqual(toToolError(reconcile, "x"), {
     code: "INVALID_INPUT",
     message: reconcile.message,
