@@ -12,7 +12,9 @@ in Docker or on a bare server, with headless and Xvfb display modes, permissions
 egress policy and a web panel for human handoff. The MCP API grows typed errors, more input tools,
 downloads, dialogs, leases, and refs on every tab, frame and engine. This also closes the
 per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
-[`apps/server/README.md`](apps/server/README.md).
+[`apps/server/README.md`](apps/server/README.md). Where it falls short, and what changed on the
+desktop: [`docs/server-mode.md`](docs/server-mode.md). What was checked and what wasn't:
+[`docs/server-acceptance.md`](docs/server-acceptance.md).
 
 ### Added
 
@@ -32,7 +34,7 @@ per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
   where a wait is known, in the same response shape as before. Every tool carries all four MCP
   annotation hints.
 - **MCP `press_key`, `hover`, `select_option`, `scroll`, `upload_file`,
-  `list_downloads`, `get_download`, `set_dialog_policy`, `list_dialogs` and
+  `list_downloads`, `get_download`, `delete_download`, `set_dialog_policy`, `list_dialogs` and
   `handle_dialog`** on both engines. On the desktop, a CloakBrowser profile's
   downloads start going to its `downloads` directory at the first `list_downloads`
   or `get_download`, not before. A Camoufox profile's are copied there from launch,
@@ -43,7 +45,9 @@ per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
   exclusive lease on a profile. Other sessions can read it but get `PROFILE_LEASED`
   on anything that changes it. A lease lasts 5 minutes by default and at most an hour,
   survives a dropped connection (reattach with its `lease_id`), and a token with the
-  `operator` group can force-release it. With no lease nothing changes.
+  `operator` group can force-release it. With no lease nothing changes. A server's
+  `--lease-on-session-close release` drops a session's leases with it; the default, `keep`,
+  lets them run on.
 - **Display modes: `headed`, `xvfb` and `headless`.** A profile can save one, Settings
   has a default, and MCP `create_profile`, `update_profile` and `launch_profile` take
   `display_mode`. `list_profiles` shows the saved mode and the running one, and a profile
@@ -73,7 +77,8 @@ per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
   with no window opens the panel in a window of its own.
 - **Large downloads.** `get_download` on a file over its inline limit now names a path to
   fetch it from with the same bearer token. A server's profile may keep 2 GB of downloads
-  (`--download-quota-bytes`); past that a download is stopped and deleted.
+  (`--download-quota-bytes`); past that a download is stopped and deleted, and `delete_download`
+  gives back what one took. It keeps 1000 entries, refusing new downloads at the cap.
 - **`multizen-server`: named tokens, remote access and encrypted proxy passwords.**
   `token create`, `token list` and `token revoke` manage tokens that carry tool groups
   (`read`, `act`, `profile-admin`, `raw`, `operator`) or single tools, and a list of
@@ -85,11 +90,12 @@ per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
   (`--tls-cert`, `--tls-key`) or `--allow-insecure-remote`; behind a reverse proxy on
   loopback, `--allowed-hosts` or `--public-url` is enough. Failed logins are limited to
   10 a minute per address (`--trust-proxy` for a proxy of yours in front). Sessions close
-  after 30 idle minutes and there can be 64 of them, a call in flight never counting as
-  idle. Proxy passwords are encrypted at rest with `MULTIZEN_SECRET_KEY` or
+  after 30 idle minutes and there can be 64 of them, 32 per token (`--max-sessions-per-token`),
+  a call in flight never counting as idle. Proxy passwords are encrypted at rest with `MULTIZEN_SECRET_KEY` or
   `<data-dir>/secret.key`, plaintext ones at start, and `secrets rotate` changes the key.
-  The owner's token is in `<data-dir>/owner-token`. The desktop's `mcp-token` keeps full
-  access, and the desktop stores proxy passwords as before.
+  The owner's token is in `<data-dir>/owner-token`, for its owner: agents connect with one from
+  `token create`. The desktop's `mcp-token` keeps full access, and the desktop stores proxy
+  passwords as before.
 - **`multizen-server` in Docker.** `docker compose up -d` builds and runs it, published on
   the host's loopback only, as a non-root user with every capability dropped. The image has
   no browser engine: the first start downloads it into the volume, and a launch meanwhile
@@ -122,6 +128,18 @@ per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
   else is logged and left alone. On Linux a killed server's CloakBrowser browsers do stay behind.
   On Windows they die with it, and Camoufox goes when its pipe closes, on both. The desktop has
   no journal and no reaper.
+- **`multizen-server`: what a hostile page, token or file can't do to it.** Past 128 MiB of request
+  bodies in flight a request gets 503 `RATE_LIMITED` with `Retry-After`, and sockets stop at the larger
+  of 256 and 4 × `--max-sessions`. `timeout_ms` stops at 120 s and URLs at 8192 characters. One
+  profile's base64 uploads may take 1 GiB (`--upload-inbox-quota-bytes`), cleared at close and at the
+  next start. A browser's name lookups have 5 s and its connections 30 s, with `UV_THREADPOOL_SIZE` at 64
+  from `bin/multizen-server.js` and the image (on Windows, set it before starting Node). The bridge logs
+  20 lines per 30 s at most. A server installs only CloakBrowser builds pinned with their SHA-256, and
+  fails closed where none is, as on linux-arm64. Its files are private to its user (umask 077, data
+  directory 0700), `server.lock` holds a hash of the command line, not the line, and tokens are refused
+  once `tokens.json` stays unreadable for 5 s. On import, an archive's `downloads/` and `uploads/` are
+  ignored. A `.mzar` is still code: its extensions load. Compose sets `pids_limit` 4096, and rotates
+  its log. `MULTIZEN_LOG_LEVEL` sets what is logged: the default, `info`, hides browsers' stderr.
 - **`stdio --connect` keeps its session.** It pings the server every `--keepalive-ms` (30000), so
   an idle relay outlasts `--session-idle-ttl-ms`. When the session is gone anyway, because the server
   restarted or the token was revoked, it says so on stderr and exits 1, instead of answering 404s.
@@ -141,6 +159,10 @@ per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
 
 ### Changed
 
+- `navigate`'s errors name the origin only, on the desktop too, since messages get logged and a URL can
+  carry a token. `details.url` keeps the full URL.
+- MCP refuses a proxy host that couldn't connect as written, such as `169.254.169.254:80/#`. A
+  server's policy also wants a Unicode name in punycode.
 - `multizen-mcp` runs its mock driver only with `--mock`. Without it, it says how to run the real
   server, and exits.
 - `launch_profile` reports a Camoufox browser's real `pid`, found from its command line, instead
@@ -225,8 +247,18 @@ per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
 
 ### Known limitations
 
+- **On detection, a server is no worse than the desktop on Windows, and is worse on Linux, on both
+  engines, in every mode:** fonts, emoji, audio, devices, WebGL, and on one persona a CreepJS "like
+  headless" of 50 %. Numbers and which persona to use:
+  [`docs/detection-baselines/README.md`](docs/detection-baselines/README.md).
+- CloakBrowser gathers no WebRTC candidates at all, in any mode. That leaks no address, and is itself a
+  sign, since Chrome gives at least an mDNS one. Camoufox makes up most of its fingerprint afresh at
+  each launch, so one profile looks like a new device at each sign-in. Both are open, and neither is
+  new here.
+- A server has no CloakBrowser on linux-arm64: that release has no such asset to pin.
 - Camoufox has no CDP. This is intended: `cdp_send` and `cdp_send_no_safety` return
-  `UNSUPPORTED_ON_ENGINE` there, and `request_human` cannot bring the window forward.
+  `UNSUPPORTED_ON_ENGINE` there. `request_human` restores a minimized window there, and Windows
+  may not let it take the foreground.
 - On Windows, a Camoufox window that is fully covered takes no input: page tools time
   out until it is raised. The same condition on CloakBrowser gives
   `INPUT_NOT_DELIVERED`.

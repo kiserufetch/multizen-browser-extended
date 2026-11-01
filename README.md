@@ -212,7 +212,7 @@ http_headers = { Authorization = "Bearer <token>" }
 }
 ```
 
-Restart your client. The agent now has the full tool set, 44 tools:
+Restart your client. The agent now has the full tool set, 45 tools:
 
 - **Profiles:** `list_profiles`, `create_profile`, `update_profile`, `delete_profile`, `launch_profile`, `close_profile`, `list_fingerprint_options`
 - **Reading a page:** `extract`, `screenshot`
@@ -220,7 +220,7 @@ Restart your client. The agent now has the full tool set, 44 tools:
 - **Tabs:** `list_tabs`, `new_tab`, `activate_tab`, `close_tab`
 - **Cookies:** `get_cookies`, `set_cookies`
 - **Waits:** `wait_for_load`, `wait_for_navigation`, `wait_for_selector`
-- **Files:** `upload_file`, `list_downloads`, `get_download`
+- **Files:** `upload_file`, `list_downloads`, `get_download`, `delete_download`
 - **JavaScript dialogs:** `set_dialog_policy`, `list_dialogs`, `handle_dialog`
 - **Human handoff:** `request_human`, `get_human_status`, `wait_for_human`, `resume_human`
 - **Exclusive use:** `acquire_profile`, `renew_profile`, `release_profile`
@@ -247,16 +247,19 @@ From source (Node 22+, Corepack):
 corepack yarn install
 corepack yarn workspace @multizen/server build
 node apps/server/bin/multizen-server.js serve --headless
+node apps/server/bin/multizen-server.js token create --name agent    # in another shell
 ```
 
 Or in Docker, where browsers run under Xvfb by default, as a non-root user with the Chromium sandbox on and no way to turn it off:
 
 ```sh
 docker compose up -d
-docker compose exec multizen cat /data/owner-token
+docker compose exec multizen node /app/dist/cli.js token create --name agent
 ```
 
-The first start downloads the engine, into the data directory or the volume: the image holds none, because CloakBrowser's licence forbids redistributing it. Then connect any MCP client to `http://127.0.0.1:7777/mcp` as above, with the token from `owner-token`.
+The first start downloads the engine, into the data directory or the volume: the image holds none, because CloakBrowser's licence forbids redistributing it. Then connect any MCP client to `http://127.0.0.1:7777/mcp` as above, with the token that printed. That token uses profiles but can't create them: `--tools read,act,profile-admin` adds that. `owner-token` in the data directory can do everything, raw CDP included, and is for you, not for an agent.
+
+**On detection: a server is no worse than the desktop on Windows. On Linux it is worse, on both engines, in every mode:** fonts, audio, devices and WebGL give it away. Run Windows personas on a Windows host, and let a Linux server pick its own Linux personas. The measurements are in [`docs/detection-baselines/README.md`](docs/detection-baselines/README.md).
 
 What a server adds to the desktop's tool set:
 
