@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
-import type { BrowserDriver } from "@multizen/mcp-server";
+import type { BrowserDriver } from "@multizen/types";
 import { deviceMemoryApiValue, type ProfileManager } from "@multizen/profile-manager";
 import type {
   ChromiumStatus,
@@ -26,6 +26,7 @@ import { resolveLoadDir } from "./extensions/extensionStore.ts";
 import { killProcessTree, gracefulShutdown } from "./processTree";
 import { waitForCdpSessionReady } from "./cdpReadiness";
 import { sanitizeStartUrl } from "./startPage";
+import type { RuntimeHost } from "./host.ts";
 
 function readSysctl(path: string): string | null {
   try {
@@ -84,6 +85,7 @@ interface RunningProcess {
 }
 
 export interface ChromiumBrowserDriverOptions {
+  host: RuntimeHost;
   profileManager: ProfileManager;
   /** Registry that owns the per-engine bootstraps. The driver resolves each
    *  profile's engine at launch and pulls that engine's binary from here. */
@@ -144,6 +146,7 @@ interface DriverEvents {
 export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver {
   private readonly running = new Map<ProfileId, RunningProcess>();
   private nextPort = 9222;
+  private readonly host: RuntimeHost;
   private readonly profileManager: ProfileManager;
   private readonly engineRegistry: EngineRegistry;
   private readonly getDefaultEngine: () => BrowserEngine;
@@ -157,6 +160,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     super();
+    this.host = opts.host;
     this.profileManager = opts.profileManager;
     this.engineRegistry = opts.engineRegistry;
     this.getDefaultEngine = opts.getDefaultEngine;
@@ -437,7 +441,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // user-data-dir we already use. Extensions live under the profile dir
     // (shared across engines), so we pass absolute paths.
     const extensionDirs: string[] = [];
-    const companion = companionDir();
+    const companion = companionDir(this.host);
     if (companion) extensionDirs.push(companion);
     for (const ext of profile.extensions ?? []) {
       if (!ext.enabled) continue;

@@ -1,4 +1,3 @@
-import { app, net } from "electron";
 import { EventEmitter } from "node:events";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -45,10 +44,12 @@ async function extractZipPreservingAttrs(zipPath: string, destDir: string): Prom
 }
 import type { BrowserEngine } from "@multizen/types";
 import type { ChromiumStatus } from "@multizen/types";
+import type { RuntimeHost } from "./host.ts";
 
 const execFileP = promisify(execFile);
 
 interface BootstrapOptions {
+  host: RuntimeHost;
   /** Override the cache directory (default: userData/chromium/<engine>). */
   cacheDir?: string;
   /**
@@ -130,13 +131,15 @@ export class ChromiumBootstrap extends EventEmitter {
   private ensureInFlight: Promise<ChromiumStatus> | null = null;
   private readonly cacheDir: string;
   private readonly engine: BrowserEngine;
+  private readonly host: RuntimeHost;
 
-  constructor(opts: BootstrapOptions = {}) {
+  constructor(opts: BootstrapOptions) {
     super();
+    this.host = opts.host;
     this.engine = opts.engine ?? "cloakbrowser";
     // Per-engine subdir so switching doesn't trip on cross-engine cached
     // metadata. Each engine gets its own current.json.
-    this.cacheDir = opts.cacheDir ?? join(app.getPath("userData"), "chromium", this.engine);
+    this.cacheDir = opts.cacheDir ?? join(opts.host.userDataDir(), "chromium", this.engine);
   }
 
   override on<K extends keyof BootstrapEvents>(event: K, listener: BootstrapEvents[K]): this {
@@ -599,7 +602,7 @@ export class ChromiumBootstrap extends EventEmitter {
 
       // `net.request` follows redirects (GitHub → release-assets CDN) by
       // default and runs on Chromium's stack — see download()'s rationale.
-      const request = net.request({ method: "GET", url: manifest.url, redirect: "follow" });
+      const request = this.host.request({ method: "GET", url: manifest.url, redirect: "follow" });
       if (have > 0) request.setHeader("Range", `bytes=${have}-`);
 
       request.on("error", fail);

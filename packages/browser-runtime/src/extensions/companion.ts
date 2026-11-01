@@ -1,7 +1,6 @@
-import { app } from "electron";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import type { RuntimeHost } from "../host.ts";
 
 /**
  * Absolute path to the bundled first-party "companion" extension (the one that
@@ -14,16 +13,8 @@ import { fileURLToPath } from "node:url";
  *
  * Returns null if it can't be located (loading just proceeds without it).
  */
-export function companionDir(): string | null {
-  const candidates = app.isPackaged
-    ? [join(process.resourcesPath, "companion")]
-    : [
-        // import.meta.url resolves to out/main/index.js at runtime → up to
-        // apps/desktop, then resources/companion.
-        join(fileURLToPath(new URL(".", import.meta.url)), "../../resources/companion"),
-      ];
-  for (const c of candidates) {
-    if (existsSync(join(c, "manifest.json"))) return c;
-  }
+export function companionDir(host: RuntimeHost): string | null {
+  const dir = host.resourceDir("companion");
+  if (dir && existsSync(join(dir, "manifest.json"))) return dir;
   return null;
 }

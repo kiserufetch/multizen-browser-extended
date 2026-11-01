@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import type { BrowserEngine, ChromiumStatus } from "@multizen/types";
 import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
 import { CamoufoxBootstrap } from "./CamoufoxBootstrap.ts";
+import type { RuntimeHost } from "./host.ts";
 
 /** Engines that run on the Chromium/CDP stack, served by {@link ChromiumBootstrap}. */
 const CHROMIUM_ENGINES: readonly BrowserEngine[] = ["cloakbrowser"];
@@ -40,6 +41,12 @@ interface EngineRegistryEvents {
  */
 export class EngineRegistry extends EventEmitter {
   private readonly bootstraps = new Map<BrowserEngine, EngineBootstrap>();
+  private readonly host: RuntimeHost;
+
+  constructor(host: RuntimeHost) {
+    super();
+    this.host = host;
+  }
 
   override on<K extends keyof EngineRegistryEvents>(
     event: K,
@@ -70,8 +77,8 @@ export class EngineRegistry extends EventEmitter {
   }
 
   private create(engine: BrowserEngine): EngineBootstrap {
-    if (isChromiumEngine(engine)) return new ChromiumBootstrap({ engine });
-    if (engine === "camoufox") return new CamoufoxBootstrap();
+    if (isChromiumEngine(engine)) return new ChromiumBootstrap({ engine, host: this.host });
+    if (engine === "camoufox") return new CamoufoxBootstrap(this.host);
     throw new Error(`No bootstrap available for engine "${engine}"`);
   }
 

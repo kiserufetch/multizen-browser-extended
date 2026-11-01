@@ -22,7 +22,21 @@ import {
   type PendingHandoff,
 } from "@multizen/mcp-server";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
-import { LinuxSandboxManager, describeSandboxReason } from "./linuxSandbox";
+import {
+  ChromiumBrowserDriver,
+  EngineRegistry,
+  EngineRouter,
+  ExtensionsService,
+  LinuxSandboxManager,
+  describeSandboxReason,
+  probeProxyGeo,
+  readManifestIcon,
+  resolveLoadDir,
+  storeEntryDir,
+  sweepOrphans,
+  type ProxyGeoResult,
+} from "@multizen/browser-runtime";
+import { electronHost } from "./electronHost.ts";
 import type {
   EngineUpdateStatus,
   ExtensionConfig,
@@ -31,21 +45,10 @@ import type {
   UpdateStatus,
 } from "@multizen/types";
 import { isBrowserEngine, resolveEngine } from "@multizen/types";
-import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
-import { EngineRegistry } from "./engineRegistry.ts";
-import { EngineRouter } from "./engineRouter.ts";
 import { UpdaterService } from "./UpdaterService.ts";
 import { EngineUpdateService } from "./EngineUpdateService.ts";
 import { UsageReporting } from "./UsageReporting.ts";
 import { loadOrCreateMcpToken } from "./mcpToken.ts";
-import { ExtensionsService } from "./extensions/ExtensionsService.ts";
-import {
-  sweepOrphans,
-  storeEntryDir,
-  resolveLoadDir,
-  readManifestIcon,
-} from "./extensions/extensionStore.ts";
-import { probeProxyGeo, type ProxyGeoResult } from "./proxyGeo.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -199,7 +202,7 @@ app.whenReady().then(async () => {
   // use and re-emits its download/verify status tagged with the engine.
   // CloakBrowser is the only Chromium engine in this phase; Camoufox arrives
   // with its own bootstrap later.
-  engineRegistry = new EngineRegistry();
+  engineRegistry = new EngineRegistry(electronHost);
   engineRegistry.on("status", (engine, status) => {
     // The renderer's chromium:status channel drives the CloakBrowser first-run
     // bootstrap UI (single-engine), so keep forwarding that stream.
@@ -254,6 +257,7 @@ app.whenReady().then(async () => {
   // endpoint's prodversion (falls back to a sane default before the runtime is
   // ready).
   extensionsService = new ExtensionsService({
+    host: electronHost,
     profileManager,
     extensionStoreRoot,
     engineVersion: () => {
@@ -268,6 +272,7 @@ app.whenReady().then(async () => {
   // flow; the driver calls resolveForLaunch per launch. Prompting + persistence
   // are injected here so the module stays UI-free. All no-ops off Linux.
   const linuxSandbox = new LinuxSandboxManager({
+    host: electronHost,
     getState: () => cachedSettings?.linuxSandboxState ?? "unset",
     setState: async (s) => {
       cachedSettings = await settingsStore.update({ linuxSandboxState: s });
@@ -299,6 +304,7 @@ app.whenReady().then(async () => {
   });
 
   const chromiumDriver = new ChromiumBrowserDriver({
+    host: electronHost,
     profileManager,
     engineRegistry,
     getDefaultEngine: () => cachedSettings?.browserEngine ?? "cloakbrowser",

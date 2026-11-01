@@ -1,6 +1,6 @@
-import { net } from "electron";
 import { createWriteStream } from "node:fs";
 import { rm } from "node:fs/promises";
+import type { RuntimeHost } from "../host.ts";
 import { tempCrxPath } from "./crxPipeline.ts";
 
 /**
@@ -36,7 +36,11 @@ export function parseExtensionId(urlOrId: string): string {
  * install). It's a grey area in Google's ToS; the file-upload path is the
  * always-available alternative.
  */
-export async function downloadCrxById(id: string, prodversion: string): Promise<string> {
+export async function downloadCrxById(
+  id: string,
+  prodversion: string,
+  host: RuntimeHost,
+): Promise<string> {
   const url =
     `https://clients2.google.com/service/update2/crx?response=redirect` +
     `&acceptformat=crx2,crx3&prodversion=${encodeURIComponent(prodversion)}` +
@@ -54,7 +58,7 @@ export async function downloadCrxById(id: string, prodversion: string): Promise<
       reject(err);
     };
 
-    const request = net.request({ method: "GET", url, redirect: "follow" });
+    const request = host.request({ method: "GET", url, redirect: "follow" });
     request.on("error", fail);
     request.on("response", (response) => {
       const status = response.statusCode;

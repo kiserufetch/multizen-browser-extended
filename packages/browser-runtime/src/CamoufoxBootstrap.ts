@@ -6,10 +6,10 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { once } from "node:events";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { app, net } from "electron";
 import extract from "extract-zip";
 import type { ChromiumStatus } from "@multizen/types";
 import type { EngineBootstrap } from "./engineRegistry.ts";
+import type { RuntimeHost } from "./host.ts";
 
 const execFileP = promisify(execFile);
 
@@ -84,6 +84,12 @@ export class CamoufoxBootstrap extends EventEmitter implements EngineBootstrap {
   /** Non-null while an ensure() install is running, to collapse concurrent
    *  callers onto one download (see ensure()). */
   private ensureInFlight: Promise<ChromiumStatus> | null = null;
+  private readonly host: RuntimeHost;
+
+  constructor(host: RuntimeHost) {
+    super();
+    this.host = host;
+  }
 
   override on<K extends keyof CamoufoxBootstrapEvents>(
     event: K,
@@ -128,7 +134,7 @@ export class CamoufoxBootstrap extends EventEmitter implements EngineBootstrap {
   }
 
   private async doEnsure(): Promise<ChromiumStatus> {
-    const installDir = join(app.getPath("userData"), "camoufox");
+    const installDir = join(this.host.userDataDir(), "camoufox");
     // Always app-controlled. We deliberately OVERRIDE any inherited
     // CAMOUFOX_INSTALL_DIR: honoring it would let anyone able to influence the
     // app's environment (launchd user env, a poisoned shell profile, a wrapper
@@ -173,7 +179,7 @@ export class CamoufoxBootstrap extends EventEmitter implements EngineBootstrap {
       await mkdir(installDir, { recursive: true });
 
       const zipPath = join(installDir, `${assetName}.partial`);
-      await downloadAndVerify(url, zipPath, expectedSha, (received, total) =>
+      await downloadAndVerify((u) => this.host.fetch(u), url, zipPath, expectedSha, (received, total) =>
         this.setStatus({
           kind: "downloading",
           bytesReceived: received,
@@ -239,6 +245,7 @@ function pinnedVersion(): string {
  * throw rather than execute them. Bounded retry for flaky links.
  */
 async function downloadAndVerify(
+  fetch: (url: string) => Promise<Response>,
   url: string,
   outPath: string,
   expectedSha: string,
@@ -250,7 +257,7 @@ async function downloadAndVerify(
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       await rm(outPath, { force: true });
-      const res = await net.fetch(url);
+      const res = await fetch(url);
       if (!res.ok || !res.body) {
         throw new Error(`HTTP ${res.status} fetching Camoufox archive`);
       }

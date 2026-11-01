@@ -1,10 +1,9 @@
-import { app } from "electron";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { LinuxSandboxState } from "@multizen/settings-store";
 import type { SandboxStatus, SandboxUiState } from "@multizen/types";
+import type { RuntimeHost } from "./host.ts";
 
 export type { SandboxStatus, SandboxUiState };
 
@@ -85,6 +84,7 @@ export interface SandboxNotice {
 }
 
 export interface LinuxSandboxDeps {
+  host: RuntimeHost;
   /** Read the persisted state (from the settings store). */
   getState: () => LinuxSandboxState;
   /** Persist the state (into the settings store). */
@@ -140,8 +140,8 @@ export function hasExecutable(cmd: string): boolean {
 }
 
 /** The engine binary cache root: `<userData>/chromium/cloakbrowser`. */
-export function cacheDirForEngine(): string {
-  return join(app.getPath("userData"), "chromium", "cloakbrowser");
+export function cacheDirForEngine(host: RuntimeHost): string {
+  return join(host.userDataDir(), "chromium", "cloakbrowser");
 }
 
 /** The AppArmor attach path: a version-glob over the engine cache. */
@@ -221,19 +221,11 @@ export function verifyActive(binaryPath: string, cacheDir: string): boolean {
  * .deb/.rpm install; an extracted-then-run AppImage or dev tree is NOT a
  * trusted location for the elevated path. We ship AppImage only today.
  */
-function resolveScriptPath(): string | null {
-  const candidates = app.isPackaged
-    ? [join(process.resourcesPath, "linux-sandbox", "install-apparmor-profile.sh")]
-    : [
-        // import.meta.url -> out/main/index.js at runtime -> up to apps/desktop,
-        // then resources/linux. (The packaged dir is named linux-sandbox, the
-        // dev dir resources/linux: asymmetric on purpose, see builder config.)
-        join(
-          fileURLToPath(new URL(".", import.meta.url)),
-          "../../resources/linux/install-apparmor-profile.sh",
-        ),
-      ];
-  return candidates.find((c) => existsSync(c)) ?? null;
+function resolveScriptPath(host: RuntimeHost): string | null {
+  const dir = host.resourceDir("linux-sandbox");
+  if (!dir) return null;
+  const script = join(dir, "install-apparmor-profile.sh");
+  return existsSync(script) ? script : null;
 }
 
 /** Whether `apparmor_parser -Q -K` accepts the rule (no root, no kernel load). */
@@ -285,8 +277,8 @@ async function runUsabilityGate(profileText: string): Promise<SetupResult> {
  * passing the profile text on stdin. The usability gate is assumed to have
  * passed already (launch flow) or is re-run by the caller (Settings entry).
  */
-export async function runInstall(attachPath: string): Promise<SetupResult> {
-  const scriptPath = resolveScriptPath();
+export async function runInstall(attachPath: string, host: RuntimeHost): Promise<SetupResult> {
+  const scriptPath = resolveScriptPath(host);
   if (!scriptPath) return { ok: false, reason: "no-script" };
   const profileText = buildProfileText(attachPath);
   return new Promise((resolve) => {
@@ -369,7 +361,7 @@ export class LinuxSandboxManager {
     // The clone lever can't be fixed with an AppArmor profile.
     if (mechanism === "clone") return { noSandbox: true };
 
-    const cacheDir = cacheDirForEngine();
+    const cacheDir = cacheDirForEngine(this.deps.host);
 
     // Already active in the live OS -> launch sandboxed, no prompt. Skip this
     // optimistic path if the sandbox already failed for this binary this session
@@ -419,7 +411,7 @@ export class LinuxSandboxManager {
       return { noSandbox: true };
     }
 
-    const result = await runInstall(attachPath);
+    const result = await runInstall(attachPath, this.deps.host);
     if (result.ok) {
       // Completion supersedes any prior decline (R7/AC8a) and clears a prior
       // this-session "broken" mark for this binary.
@@ -452,7 +444,7 @@ export class LinuxSandboxManager {
    * path does not go through resolveForLaunch). Returns the resulting status.
    */
   async setupFromSettings(binaryPath: string): Promise<SandboxStatus> {
-    const cacheDir = cacheDirForEngine();
+    const cacheDir = cacheDirForEngine(this.deps.host);
     const attachPath = attachPathForCache(cacheDir);
     if (!binaryPath.startsWith(cacheDir + "/")) {
       await this.deps.setState("unsupported");
@@ -464,7 +456,7 @@ export class LinuxSandboxManager {
       await this.deps.setState("unsupported");
       return this.failureStatus(gate.reason ?? "unsupported", attachPath);
     }
-    const result = await runInstall(attachPath);
+    const result = await runInstall(attachPath, this.deps.host);
     if (result.ok) {
       this.brokenThisSession.delete(binaryPath);
       await this.deps.setState("unset");
@@ -500,7 +492,7 @@ export class LinuxSandboxManager {
     if (detectMechanism() !== "apparmor") {
       return { state: process.platform === "linux" ? "not-restricted" : "n/a" };
     }
-    const cacheDir = cacheDirForEngine();
+    const cacheDir = cacheDirForEngine(this.deps.host);
     // Never claim "active" when the sandboxed launch already failed this session
     // (the crash backstop fired): verifyActive only checks the profile file, not
     // the real runtime confinement, so trusting it here would report a sandbox

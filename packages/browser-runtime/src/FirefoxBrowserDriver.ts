@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { firefox, type BrowserContext, type Page } from "playwright-core";
 import { launchOptions } from "camoufox-js";
-import type { BrowserDriver } from "@multizen/mcp-server";
+import type { BrowserDriver } from "@multizen/types";
 import type { LaunchedProfile, Profile, ProfileId } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
 import { resolveProxyLaunchGeo } from "./launchGeo";

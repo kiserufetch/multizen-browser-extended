@@ -401,3 +401,6 @@ export interface SandboxStatus {
   /** Manual `sudo` command the user can run instead of the one-click setup. */
   manualCommand?: string;
 }
+
+export * from "./driver.js";
+export * from "./errors.js";

@@ -2,6 +2,7 @@ import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { ProfileManager } from "@multizen/profile-manager";
 import type { ExtensionConfig, Profile } from "@multizen/types";
+import type { RuntimeHost } from "../host.ts";
 import { unpackToStore } from "./crxPipeline.ts";
 import { gcEntry } from "./extensionStore.ts";
 import { downloadCrxById, parseExtensionId } from "./webstoreDownload.ts";
@@ -25,6 +26,7 @@ function compareVersions(a: string, b: string): number {
 }
 
 interface ExtensionsServiceDeps {
+  host: RuntimeHost;
   profileManager: ProfileManager;
   /** Root of the shared extension store, e.g. `<userData>/data/extension-store`. */
   extensionStoreRoot: string;
@@ -46,8 +48,10 @@ export class ExtensionsService {
   private readonly pm: ProfileManager;
   private readonly storeRoot: string;
   private readonly engineVersion: () => string;
+  private readonly host: RuntimeHost;
 
   constructor(deps: ExtensionsServiceDeps) {
+    this.host = deps.host;
     this.pm = deps.profileManager;
     this.storeRoot = deps.extensionStoreRoot;
     this.engineVersion = deps.engineVersion;
@@ -99,7 +103,7 @@ export class ExtensionsService {
    */
   async prepareFromWebStore(urlOrId: string): Promise<ExtensionConfig> {
     const id = parseExtensionId(urlOrId);
-    const crxPath = await downloadCrxById(id, this.engineVersion());
+    const crxPath = await downloadCrxById(id, this.engineVersion(), this.host);
     try {
       return await unpackToStore({
         source: crxPath,
