@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { ProfileId } from "@multizen/types";
 
 /**
@@ -30,6 +31,13 @@ export const FULL_PRINCIPAL: Principal = createPrincipal({
   tools: { groups: [...TOOL_GROUPS], names: [] },
   profiles: "*",
 });
+
+/** Compares a token in constant time. Its length isn't the secret. */
+export function sameSecret(given: string, expected: string): boolean {
+  const left = Buffer.from(given);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
 
 /** The part of the SDK's request `extra` that carries HttpTransport's `req.auth`. */
 export interface PrincipalCarrier {

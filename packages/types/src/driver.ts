@@ -124,6 +124,8 @@ export interface OpenFileChooser {
   multiple: boolean;
   targetId: string;
   openedAt: string;
+  /** Of the frame that asked, once known. */
+  url?: string;
 }
 
 export interface RunningInfo {
@@ -186,6 +188,8 @@ export interface BrowserDriver {
   listDownloads(profileId: ProfileId): Promise<DownloadRecord[]>;
   /** Null for an id this profile never saw. */
   getDownload(profileId: ProfileId, downloadId: string): Promise<DownloadFile | null>;
+  /** Removes it from disk and stops counting it. False for an id this profile never had. */
+  deleteDownload(profileId: ProfileId, downloadId: string): Promise<boolean>;
   setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }>;
   listDialogs(profileId: ProfileId): Promise<OpenDialog[]>;
   handleDialog(profileId: ProfileId, response: DialogResponse): Promise<{ ok: true }>;

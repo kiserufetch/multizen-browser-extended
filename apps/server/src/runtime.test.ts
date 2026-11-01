@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pinnedCloakBrowserManifest } from "@multizen/browser-runtime";
 import { ProfileManager } from "@multizen/profile-manager";
 import type { ExtensionConfig } from "@multizen/types";
 import { dataPaths } from "./config.ts";
@@ -17,6 +18,7 @@ import {
   serverDisabledFeatures,
   serverFirefoxPrefs,
   type ServerRuntime,
+  SERVER_TOOL_LIMITS,
 } from "./runtime.ts";
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
@@ -34,11 +36,12 @@ const CONFIG = {
 function dataDirWithEngine(): string {
   const dir = mkdtempSync(join(tmpdir(), "mz-rt-"));
   const cache = join(dir, "chromium", "cloakbrowser");
-  mkdirSync(join(cache, "146.0.0.0"), { recursive: true });
-  writeFileSync(join(cache, "146.0.0.0", "chrome.exe"), "");
+  const pin = pinnedCloakBrowserManifest();
+  mkdirSync(join(cache, pin.version), { recursive: true });
+  writeFileSync(join(cache, pin.version, "chrome.exe"), "");
   writeFileSync(
     join(cache, "current.json"),
-    JSON.stringify({ version: "146.0.0.0", binaryRelative: "chrome.exe" }),
+    JSON.stringify({ version: pin.version, binaryRelative: "chrome.exe", sha256: pin.sha256 }),
   );
   return dir;
 }
@@ -500,4 +503,8 @@ test("display: without --headless nothing is forced, and a bad setting is simply
     await runtime.close();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
+});
+
+test("a server holds tool calls to a URL length and a wait", () => {
+  assert.deepEqual(SERVER_TOOL_LIMITS, { maxUrlChars: 8192, maxWaitMs: 120_000 });
 });

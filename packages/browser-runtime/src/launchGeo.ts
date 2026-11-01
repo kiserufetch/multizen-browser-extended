@@ -1,5 +1,6 @@
 import { localeCatalog } from "@multizen/profile-manager";
 import type { FingerprintConfig, Profile, ProfileId } from "@multizen/types";
+import type { EgressDecision } from "./egressPolicy.ts";
 import { resolveLaunchTimezone, StrictGeoCoherenceError } from "./launchTimezone";
 import { probeProxyGeo } from "./proxyGeo";
 
@@ -13,6 +14,8 @@ export interface ProxyLaunchGeoDeps {
   /** Cache the egress country on the profile so the GUI flag chip matches it. */
   setProxyCountry: (profileId: ProfileId, country: string) => void;
   probe?: typeof probeProxyGeo;
+  /** What an egress policy just said about this proxy. Without a policy, nothing. */
+  upstream?: EgressDecision;
 }
 
 /**
@@ -30,13 +33,21 @@ export async function resolveProxyLaunchGeo(
   deps: ProxyLaunchGeoDeps,
 ): Promise<ProxyLaunchGeo> {
   if (!profile.proxy) return { fingerprint, coords: null };
+  // A name that didn't resolve for the policy would be looked up by the probe, past the policy.
+  if (deps.upstream?.unresolved) {
+    console.warn("[multizen] the proxy's name doesn't resolve; geolocation/timezone alignment skipped");
+    return { fingerprint, coords: null };
+  }
 
   let fp = fingerprint;
   let coords: ProxyLaunchGeo["coords"] = null;
   const localeEntry = localeCatalog().find((l) => l.locale === fp.locale || l.id === fp.locale);
   const localeTimezones = localeEntry?.timezones ?? [fp.timezone];
   try {
-    const geo = await (deps.probe ?? probeProxyGeo)(profile.proxy, { timeoutMs: 4000 });
+    const geo = await (deps.probe ?? probeProxyGeo)(profile.proxy, {
+      timeoutMs: 4000,
+      ...(deps.upstream?.connectTo ? { connectTo: deps.upstream.connectTo } : {}),
+    });
     if (typeof geo.latitude === "number" && typeof geo.longitude === "number") {
       coords = { latitude: geo.latitude, longitude: geo.longitude };
     }

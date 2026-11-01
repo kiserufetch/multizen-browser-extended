@@ -23,6 +23,8 @@ export interface ToolContext {
   handoffGate?: boolean;
   /** Where a download too large to send inline can be fetched from, without a trailing slash. */
   downloadsBaseUrl?: string;
+  /** What one profile's upload inbox may hold. */
+  maxInboxBytes?: number;
 }
 
 /** A tool defined outside the `dispatch` switch, so upstream edits there don't collide. */

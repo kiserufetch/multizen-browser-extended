@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sandboxInstructions } from "@multizen/browser-runtime";
 import type { BrowserEngine } from "@multizen/types";
@@ -19,6 +19,8 @@ export interface PreflightDeps {
   ) => { status: number | null; error?: Error; stderr?: unknown };
   warn: (message: string, fields?: Record<string, unknown>) => void;
   instructions: () => string;
+  /** The directory's permission bits. */
+  modeOf: (path: string) => number;
 }
 
 const defaultDeps: PreflightDeps = {
@@ -28,6 +30,7 @@ const defaultDeps: PreflightDeps = {
   spawnSync: (command, args) => spawnSync(command, args, { encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] }),
   warn: (message, fields) => log.warn(message, fields),
   instructions: () => sandboxInstructions(),
+  modeOf: (path) => statSync(path).mode & 0o777,
 };
 
 /** The same steps Chromium's namespace sandbox takes when it starts. */
@@ -42,7 +45,16 @@ const EXEC_PROBE_SCRIPT = "#!/bin/sh\nexit 0\n";
 function checkDataVolume(dataDir: string, deps: PreflightDeps): void {
   const probe = join(dataDir, `.mz-preflight-${deps.pid}`);
   try {
-    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    // Left as it is: a directory someone made open on purpose may have a reason. It gets said.
+    const mode = deps.modeOf(dataDir);
+    if ((mode & 0o077) !== 0) {
+      deps.warn(
+        `The data directory ${dataDir} can be read by other users (mode ${mode.toString(8)}), and it ` +
+          "holds tokens, keys and browser sessions. Run chmod 700 on it, or keep this host to one tenant.",
+        { dataDir },
+      );
+    }
     writeFileSync(probe, EXEC_PROBE_SCRIPT);
     chmodSync(probe, 0o755);
   } catch (e) {

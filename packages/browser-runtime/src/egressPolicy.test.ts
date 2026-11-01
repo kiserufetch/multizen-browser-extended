@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { MultizenError } from "@multizen/types";
-import { EgressPolicy, parseEgressAllowEntry, type EgressLookup } from "./egressPolicy.ts";
+import {
+  boundedLookup,
+  EgressPolicy,
+  MAX_URL_CHARS,
+  parseEgressAllowEntry,
+  type EgressLookup,
+} from "./egressPolicy.ts";
 
 const noLookup: EgressLookup = () => {
   throw new Error("this path must not look anything up");
@@ -411,4 +417,175 @@ test("allow-all: everything passes with no lookup, and nothing is pinned", async
 
 test("block-private enforces", () => {
   assert.equal(enforcing().enforced, true);
+});
+
+/** Reviewer's measure of the old regex: 6 s at 80,000 characters, and quadratic. */
+const LONG_INPUT_BUDGET_MS = 500;
+
+async function withinBudget(check: () => Promise<unknown>): Promise<void> {
+  const started = performance.now();
+  await check().catch(() => {});
+  const took = performance.now() - started;
+  assert.ok(took < LONG_INPUT_BUDGET_MS, `took ${took} ms`);
+}
+
+test("a long host or URL is refused in next to no time, before any lookup", async () => {
+  const policy = enforcing();
+  const dots = `x${".".repeat(80_000)}y`;
+  await withinBudget(() => policy.assertUrlAllowed(`http://${dots}/`, { proxied: false }));
+  await withinBudget(() => policy.assertUrlAllowed(`http://${dots}/`, { proxied: true }));
+  await withinBudget(() => policy.assertProxyAllowed({ host: dots, port: 80 }));
+  await withinBudget(() => policy.assertProxyAllowed({ host: ".".repeat(80_000), port: 80 }));
+  await withinBudget(() => policy.checkDirect(`${".".repeat(80_000)}`, 80));
+  assert.equal(policy.checkProxied(dots, 80).allowed, false);
+  await assert.rejects(
+    policy.assertProxyAllowed({ host: dots, port: 80 }),
+    (e: MultizenError) => e.code === "EGRESS_BLOCKED" && e.message.length < 300,
+    "the error, which gets logged, doesn't carry the input",
+  );
+});
+
+test("a URL over the limit is INVALID_INPUT, one at the limit goes on", async () => {
+  const policy = enforcing([], resolvesTo("93.184.216.34"));
+  const url = (chars: number): string => `http://example.test/${"a".repeat(chars - "http://example.test/".length)}`;
+  await policy.assertUrlAllowed(url(MAX_URL_CHARS), { proxied: false });
+  await assert.rejects(
+    policy.assertUrlAllowed(url(MAX_URL_CHARS + 1), { proxied: false }),
+    (e: MultizenError) => e.code === "INVALID_INPUT",
+  );
+  await new EgressPolicy({ mode: "allow-all" }).assertUrlAllowed(url(MAX_URL_CHARS + 1), { proxied: false });
+});
+
+const NOT_A_HOST = [
+  "169.254.169.254:80/#",
+  "127.0.0.1:9222/#",
+  "127.0.0.1/",
+  "[::1]/",
+  "localhost/",
+  "metadata.google.internal/",
+  "a@127.0.0.1/",
+  "127.0.0.1?",
+  "127.0.0.1#",
+  "127.0.0.1\\",
+  "1.2.3.4:80",
+  "evil.test:80",
+  "1.1.1.1%/#@169.254.169.254",
+  "1.1.1.1%25",
+  "::1%/#",
+  "a b.test",
+  "a\u0000b.test",
+];
+
+test("what isn't an address or a plain name is refused, not taken for a name that won't resolve", async () => {
+  const policy = enforcing();
+  for (const host of NOT_A_HOST) {
+    const direct = await policy.checkDirect(host, 80);
+    assert.equal(direct.allowed, false, host);
+    assert.equal(direct.unresolved, undefined, `${host} must not pass for unresolved`);
+    assert.equal(policy.checkProxied(host, 80).allowed, false, host);
+    await assert.rejects(
+      policy.assertProxyAllowed({ host, port: 8080 }),
+      (e: MultizenError) => e.code === "EGRESS_BLOCKED",
+      host,
+    );
+  }
+});
+
+test("real names and addresses still pass, in the forms a browser writes them", async () => {
+  const policy = enforcing([], resolvesTo("93.184.216.34"));
+  for (const host of ["example.test", "EXAMPLE.test", "example.test.", "under_score.example.test", "xn--e1afmkfd.test", "a-b.test"]) {
+    assert.deepEqual(await policy.checkDirect(host, 80), { allowed: true, connectTo: ["93.184.216.34"] }, host);
+  }
+  assert.equal((await policy.checkDirect("[2606:4700:4700::1111]", 443)).allowed, true);
+  assert.equal((await policy.checkDirect("1.1.1.1", 443)).allowed, true);
+  assert.equal((await policy.checkDirect("fe80::1%eth0", 80)).allowed, false);
+});
+
+test("a name that doesn't resolve still comes back unresolved, and gives no one an address to dial", async () => {
+  const policy = enforcing([], async () => {
+    throw new Error("ENOTFOUND");
+  });
+  const decision = await policy.assertProxyAllowed({ host: "gone.test", port: 8080 });
+  assert.equal(decision.unresolved, true);
+  assert.equal(decision.connectTo, undefined);
+});
+
+test("assertProxyAllowed gives what was checked, for whoever dials next to keep to", async () => {
+  const decision = await enforcing([], resolvesTo("93.184.216.34")).assertProxyAllowed({ host: "p.test", port: 8080 });
+  assert.deepEqual(decision.connectTo, ["93.184.216.34"]);
+  assert.deepEqual(await new EgressPolicy({ mode: "allow-all" }).assertProxyAllowed({ host: "x", port: 1 }), { allowed: true });
+});
+
+function hangingLookup(): { lookup: EgressLookup; started: string[]; finish: () => void } {
+  const started: string[] = [];
+  const waiting: Array<() => void> = [];
+  return {
+    started,
+    lookup: (host) =>
+      new Promise((resolve) => {
+        started.push(host);
+        waiting.push(() => resolve([{ address: "93.184.216.34" }]));
+      }),
+    finish: () => {
+      for (const done of waiting.splice(0)) done();
+    },
+  };
+}
+
+test("boundedLookup runs its limit at once, and each call answers within its time, queued or not", async () => {
+  const { lookup, started, finish } = hangingLookup();
+  const bounded = boundedLookup(lookup, 2, 50);
+  const calls = ["a", "b", "c", "d"].map((host) => bounded(host).catch((e: Error) => e.message));
+  assert.deepEqual(started, ["a", "b"]);
+  const answers = await Promise.all(calls);
+  for (const answer of answers) assert.match(String(answer), /no answer within 50 ms/);
+  assert.deepEqual(started, ["a", "b"], "gave up waiting, and never started");
+
+  // Those two threads are still taken, however long ago their callers gave up.
+  const next = bounded("e");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, ["a", "b"]);
+  finish();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, ["a", "b", "e"]);
+  finish();
+  assert.deepEqual(await next, [{ address: "93.184.216.34" }]);
+});
+
+test("each bridge has its own lookups: one that hangs leaves the next one's alone", async () => {
+  const hanging = new Set(["hang.test"]);
+  const policy = new EgressPolicy({
+    mode: "block-private",
+    lookupTimeoutMs: 500,
+    lookup: (host) =>
+      hanging.has(host) ? new Promise(() => {}) : Promise.resolve([{ address: "93.184.216.34" }]),
+  });
+  const hostile = policy.bridgeLookup();
+  const other = policy.bridgeLookup();
+  const flood = Array.from({ length: 50 }, () => policy.checkDirect("hang.test", 80, hostile));
+  const started = performance.now();
+  assert.deepEqual(await policy.checkDirect("fine.test", 80, other), { allowed: true, connectTo: ["93.184.216.34"] });
+  assert.ok(performance.now() - started < 400, "the other bridge didn't wait");
+  for (const decision of await Promise.all(flood)) assert.equal(decision.unresolved, true);
+});
+
+test("tools and launches share a limit of their own, past which they stop waiting", async () => {
+  const { lookup, started } = hangingLookup();
+  const policy = new EgressPolicy({ mode: "block-private", lookup, lookupTimeoutMs: 30 });
+  const decisions = await Promise.all(Array.from({ length: 40 }, () => policy.checkDirect("hang.test", 80)));
+  for (const decision of decisions) assert.equal(decision.unresolved, true);
+  assert.ok(started.length <= 16, `${started.length} threads taken`);
+});
+
+test("a loopback exception with no port is one to warn about", () => {
+  const open = (...allow: string[]): string[] =>
+    new EgressPolicy({ mode: "block-private", allow }).loopbackAllowedOnAnyPort();
+  assert.deepEqual(open("127.0.0.1"), ["127.0.0.1"]);
+  assert.deepEqual(open("127.0.0.0/8"), ["127.0.0.0/8"]);
+  assert.deepEqual(open("0.0.0.0/0"), ["0.0.0.0/0"]);
+  assert.deepEqual(open("[::1]"), ["::1"]);
+  assert.deepEqual(open("localhost"), ["localhost"]);
+  assert.deepEqual(open("*.localhost"), ["*.localhost"]);
+  assert.deepEqual(open("127.0.0.1:8080", "localhost:3000", "[::1]:80"), []);
+  assert.deepEqual(open("10.0.0.0/8", "example.test", "1.2.3.4"), []);
 });

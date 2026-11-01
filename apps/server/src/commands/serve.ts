@@ -19,6 +19,7 @@ import {
   buildRuntime,
   enginesInUse,
   RUNTIME_CLOSE_BUDGET_MS,
+  SERVER_TOOL_LIMITS,
   SERVER_VERSION,
   takeOverFromPreviousRun,
 } from "../runtime.ts";
@@ -28,6 +29,12 @@ import type { ShutdownManager } from "../shutdown.ts";
 
 /** HTTP stop closes sessions and sockets; it has no slow path of its own. */
 const HTTP_STOP_BUDGET_MS = 3_000;
+
+/** Room for about six of the largest uploads at once. Past it, RATE_LIMITED. */
+const MAX_BODY_BYTES_IN_FLIGHT = 128 * 1024 * 1024;
+/** A session holds a stream and a POST or two. Past this, sockets are dropped: file descriptors aren't free. */
+const CONNECTIONS_PER_SESSION = 4;
+const MIN_MAX_CONNECTIONS = 256;
 
 /** No usable token and no `--no-auth`: the server must not start. */
 export class NoOwnerTokenError extends Error {}
@@ -115,6 +122,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     secureCookie: config.tls !== undefined || reachableAt.startsWith("https:"),
     noLogin: config.noAuth,
     activityLog: runtime.activityLog,
+    maxInboxBytes: config.uploadInboxQuotaBytes,
     onError: (route, code) => log.warn("panel request failed", { route, code }),
   });
   if (config.handoffWebhook) {
@@ -138,7 +146,13 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     ...(config.tls
       ? { tls: { cert: readFileSync(config.tls.certPath), key: readFileSync(config.tls.keyPath) } }
       : {}),
-    sessionPolicy: { idleTtlMs: config.sessionIdleTtlMs, maxSessions: config.maxSessions },
+    sessionPolicy: {
+      idleTtlMs: config.sessionIdleTtlMs,
+      maxSessions: config.maxSessions,
+      maxSessionsPerPrincipal: config.maxSessionsPerToken,
+    },
+    maxBodyBytesInFlight: MAX_BODY_BYTES_IN_FLIGHT,
+    maxConnections: Math.max(MIN_MAX_CONNECTIONS, config.maxSessions * CONNECTIONS_PER_SESSION),
     ...(config.leaseOnSessionClose === "release"
       ? { onSessionClosed: (sessionId: string) => runtime.shared.leases.dropSession(sessionId) }
       : {}),
@@ -169,6 +183,8 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
         egress: runtime.egress,
         handoffGate: true,
         downloadsBaseUrl: reachableAt,
+        limits: SERVER_TOOL_LIMITS,
+        maxInboxBytes: config.uploadInboxQuotaBytes,
       }).server,
   });
   await http.start();

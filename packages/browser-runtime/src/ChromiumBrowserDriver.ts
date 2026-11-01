@@ -389,7 +389,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
 
     // First of all: the geo probe below connects to this proxy from this process.
-    if (profile.proxy) await this.egress?.assertProxyAllowed(profile.proxy);
+    const upstream = profile.proxy ? await this.egress?.assertProxyAllowed(profile.proxy) : undefined;
 
     // Update `last_opened_at` for every launch, regardless of trigger
     // (UI button, MCP tool, command palette). Done early so even a
@@ -439,6 +439,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // is set at spawn time and reads fp.timezone at that moment.
     const launchGeo = await resolveProxyLaunchGeo(profile, fp, {
       setProxyCountry: (id, country) => this.profileManager.setProxyCountry(id, country),
+      ...(upstream ? { upstream } : {}),
     });
     fp = launchGeo.fingerprint;
     const geoCoords = launchGeo.coords;
@@ -1225,7 +1226,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private armDownloads(profileId: ProfileId, r: RunningProcess): Promise<void> {
     r.downloadsArmed ??= (async () => {
       const tracker = await this.downloadTracker(profileId);
-      if (this.downloadQuotaBytes !== undefined) tracker.quotaBytes = this.downloadQuotaBytes;
+      if (this.downloadQuotaBytes !== undefined) tracker.limitTo(this.downloadQuotaBytes);
       tracker.stopDownload = (guid) => {
         void r.session.cdpSend("Browser.cancelDownload", { guid }).catch(() => {});
       };
@@ -1250,6 +1251,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
 
   async getDownload(profileId: ProfileId, downloadId: string): Promise<DownloadFile | null> {
     return (await this.downloadsOf(profileId)).get(downloadId);
+  }
+
+  async deleteDownload(profileId: ProfileId, downloadId: string): Promise<boolean> {
+    return (await this.downloadsOf(profileId)).delete(downloadId);
   }
 
   async setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }> {

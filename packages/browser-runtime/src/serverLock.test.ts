@@ -7,11 +7,14 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  holderIsAlive,
   acquireServerLock,
   liveServerLockHolder,
   processIdentity,
@@ -23,6 +26,8 @@ import {
 
 const SELF_PID = 1000;
 const HOLDER_PID = 2000;
+const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
+
 const SELF: ProcessIdentity = { startTime: "self-start", cmdline: "node cli.js serve" };
 const HOLDER: ProcessIdentity = { startTime: "holder-start", cmdline: "node cli.js serve" };
 
@@ -48,7 +53,7 @@ function record(overrides: Partial<ServerLockRecord> = {}): ServerLockRecord {
     hostname: "box",
     pid: HOLDER_PID,
     startTime: HOLDER.startTime,
-    cmdline: HOLDER.cmdline,
+    cmdlineSha256: sha256(HOLDER.cmdline!),
     mode: "serve",
     acquiredAt: "2026-10-31T00:00:00.000Z",
     ...overrides,
@@ -86,7 +91,7 @@ test("acquire writes hostname, pid and start time, and release removes the file"
     assert.equal(written.hostname, "box");
     assert.equal(written.pid, SELF_PID);
     assert.equal(written.startTime, SELF.startTime);
-    assert.equal(written.cmdline, SELF.cmdline);
+    assert.equal(written.cmdlineSha256, sha256(SELF.cmdline!));
     assert.equal(written.mode, "serve");
     assert.equal(written.url, "http://127.0.0.1:1/mcp");
     assert.equal(written.tokenFile, "t");
@@ -124,7 +129,7 @@ const staleCases: Array<[string, ServerLockRecord | string, Record<number, Proce
     ["our own pid, as after a container restart", record({ pid: SELF_PID })],
     ["a dead pid", record(), { [HOLDER_PID]: null }],
     ["a pid reused later (start time differs)", record({ startTime: "older" })],
-    ["a pid reused by another program", record({ cmdline: "/usr/bin/other" })],
+    ["a pid reused by another program", record({ cmdlineSha256: sha256("/usr/bin/other") })],
     ["a file that is not JSON", "not json"],
     ["JSON without the fields", JSON.stringify({ pid: "x" })],
     ["a half-written empty file", ""],
@@ -258,4 +263,42 @@ test("processIdentity reads the real current process, stably", async () => {
 test("processIdentity: null for a pid that does not exist", async () => {
   // Above any pid the OS hands out by default.
   assert.equal(await processIdentity(2 ** 30), null);
+});
+
+test("the lock holds no command line, only its hash, so no secret passed on one stays on disk", async () => {
+  await withDir(async (dir) => {
+    const secretLine = "node cli.js serve --handoff-webhook-secret hunter2";
+    const lock = await acquireServerLock(
+      dir,
+      { mode: "serve" },
+      { ...deps(), processIdentity: async () => ({ startTime: "s", cmdline: secretLine }) },
+    );
+    const raw = readFileSync(lock.path, "utf8");
+    assert.equal(raw.includes("hunter2"), false);
+    assert.equal(raw.includes("handoff-webhook-secret"), false);
+    assert.equal((JSON.parse(raw) as ServerLockRecord).cmdlineSha256, sha256(secretLine));
+    lock.release();
+  });
+});
+
+test("the lock file is its owner's alone", async () => {
+  if (process.platform === "win32") return;
+  await withDir(async (dir) => {
+    const lock = await acquireServerLock(dir, { mode: "serve" }, deps());
+    assert.equal(statSync(lock.path).mode & 0o777, 0o600);
+    lock.release();
+  });
+});
+
+test("the holder's hash is what tells it from a program that reused its pid", async () => {
+  const live = await holderIsAlive(record(), deps());
+  assert.equal(live, true);
+  assert.equal(await holderIsAlive(record({ cmdlineSha256: sha256("other") }), deps()), false);
+  assert.equal(await holderIsAlive(record({ cmdlineSha256: null }), deps()), true, "unreadable when written");
+});
+
+test("a desktop's lock, which keeps its line in the clear, is still understood", async () => {
+  const { cmdlineSha256: _hash, ...plain } = record();
+  assert.equal(await holderIsAlive({ ...plain, cmdline: HOLDER.cmdline }, deps()), true);
+  assert.equal(await holderIsAlive({ ...plain, cmdline: "other" }, deps()), false);
 });

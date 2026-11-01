@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HostHttpRequest, RuntimeHost } from "./host.ts";
-import { ChromiumBootstrap, windowsTarPath } from "./ChromiumBootstrap.ts";
+import { ChromiumBootstrap, pinnedCloakBrowserManifest, windowsTarPath } from "./ChromiumBootstrap.ts";
 import { CamoufoxBootstrap } from "./CamoufoxBootstrap.ts";
 import { EngineRegistry } from "./engineRegistry.ts";
 import { companionDir } from "./extensions/companion.ts";
@@ -197,4 +197,117 @@ test("downloadCrxById surfaces a non-2xx from host.request", async () => {
 test("the engine zip on Windows goes to Windows' own tar, by path: PATH may find Git's first", () => {
   assert.equal(windowsTarPath({ SystemRoot: "D:\\Win" }), "D:\\Win\\System32\\tar.exe");
   assert.equal(windowsTarPath({}), "C:\\Windows\\System32\\tar.exe");
+});
+
+const PIN = pinnedCloakBrowserManifest();
+
+test("every hash a server trusts is a whole sha-256, of a pin that is known", () => {
+  for (const asset of [
+    "cloakbrowser-windows-x64.zip",
+    "cloakbrowser-linux-x64.tar.gz",
+    "cloakbrowser-darwin-arm64.tar.gz",
+    "cloakbrowser-darwin-x64.tar.gz",
+  ]) {
+    const manifest = pinnedCloakBrowserManifest(asset);
+    assert.match(manifest.sha256, /^[0-9a-f]{64}$/, asset);
+    assert.match(manifest.url, new RegExp(`^https://github\\.com/CloakHQ/CloakBrowser/releases/download/chromium-v${manifest.version.replaceAll(".", "\\.")}/${asset}$`));
+  }
+});
+
+test("a pinned install fails closed on a platform with no verified build", () => {
+  // That release has no such asset, so nothing could be checked against it.
+  assert.throws(() => pinnedCloakBrowserManifest("cloakbrowser-linux-arm64.tar.gz"), /no pinned, verified/);
+  assert.throws(() => pinnedCloakBrowserManifest("cloakbrowser-plan9.zip"), /no pinned, verified/);
+});
+
+function pinnedBootstrap(dir: string, reply: { statusCode: number; body?: Buffer }): {
+  bootstrap: ChromiumBootstrap;
+  calls: Array<{ opts: unknown; headers: Record<string, string> }>;
+} {
+  const { request, calls } = scriptedRequest(reply);
+  return {
+    calls,
+    bootstrap: new ChromiumBootstrap({
+      engine: "cloakbrowser",
+      host: fakeHost({ userDataDir: () => dir, request }),
+      pinned: true,
+      retryDelayMs: 0,
+    }),
+  };
+}
+
+test("a pinned install asks for the pin, and a download that doesn't match leaves nothing installed", async () => {
+  await withTempDir(async (dir) => {
+    const fetched: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((url: string) => {
+      fetched.push(String(url));
+      throw new Error("a pinned install asks nobody what is newest");
+    }) as typeof fetch;
+    try {
+      const { bootstrap, calls } = pinnedBootstrap(dir, { statusCode: 200, body: Buffer.from("not the engine") });
+      await assert.rejects(bootstrap.ensure(), /checksum mismatch.*expected 4a12bcde95fa|checksum mismatch.*expected b213795cb32c|checksum mismatch/);
+      assert.deepEqual(fetched, []);
+      assert.equal((calls[0]!.opts as { url: string }).url, PIN.url);
+      assert.equal(calls.length, 5, "retried, as any download is");
+      const status = bootstrap.getStatus();
+      assert.equal(status.kind, "error");
+      assert.match((status as { message: string }).message, /checksum mismatch/);
+      assert.equal(existsSync(join(dir, "chromium", "cloakbrowser", "current.json")), false);
+      assert.equal(existsSync(join(dir, "chromium", "cloakbrowser", PIN.version)), false);
+      assert.throws(() => bootstrap.resolveBinaryPath());
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+function plantInstall(dir: string, fields: { version: string; sha256?: string }): string {
+  const cache = join(dir, "chromium", "cloakbrowser");
+  mkdirSync(join(cache, fields.version), { recursive: true });
+  writeFileSync(join(cache, fields.version, "chrome"), "");
+  writeFileSync(join(cache, "current.json"), JSON.stringify({ ...fields, binaryRelative: "chrome" }));
+  return join(cache, fields.version, "chrome");
+}
+
+test("an install of the pin, with its hash on record, is taken as it is", async () => {
+  await withTempDir(async (dir) => {
+    const binaryPath = plantInstall(dir, { version: PIN.version, sha256: PIN.sha256 });
+    const { bootstrap, calls } = pinnedBootstrap(dir, { statusCode: 500 });
+    assert.deepEqual(await bootstrap.ensure(), { kind: "ready", version: PIN.version, binaryPath });
+    assert.deepEqual(calls, []);
+  });
+});
+
+for (const [name, fields] of [
+  ["another version", { version: "999.0.0.0", sha256: PIN.sha256 }],
+  ["no hash on record", { version: PIN.version }],
+  ["another hash", { version: PIN.version, sha256: "0".repeat(64) }],
+] as const) {
+  test(`a pinned install doesn't run what an earlier one left: ${name}`, async () => {
+    await withTempDir(async (dir) => {
+      plantInstall(dir, fields);
+      const { bootstrap, calls } = pinnedBootstrap(dir, { statusCode: 404 });
+      await assert.rejects(bootstrap.ensure(), /HTTP 404/);
+      assert.equal((calls[0]!.opts as { url: string }).url, PIN.url);
+    });
+  });
+}
+
+test("an unpinned bootstrap, a desktop's, still takes whatever it has installed", async () => {
+  await withTempDir(async (dir) => {
+    const binaryPath = plantInstall(dir, { version: "1.2.3" });
+    const bootstrap = new ChromiumBootstrap({ engine: "cloakbrowser", host: fakeHost({ userDataDir: () => dir }) });
+    assert.deepEqual(await bootstrap.ensure(), { kind: "ready", version: "1.2.3", binaryPath });
+  });
+});
+
+test("EngineRegistry hands `pinned` to the Chromium bootstrap", async () => {
+  await withTempDir(async (dir) => {
+    plantInstall(dir, { version: "1.2.3" });
+    const { request } = scriptedRequest({ statusCode: 404 });
+    const registry = new EngineRegistry(fakeHost({ userDataDir: () => dir, request }), { pinned: true });
+    (registry.getChromiumBootstrap("cloakbrowser") as unknown as { retryDelayMs: number }).retryDelayMs = 0;
+    await assert.rejects(registry.ensure("cloakbrowser"), /HTTP 404/);
+  });
 });

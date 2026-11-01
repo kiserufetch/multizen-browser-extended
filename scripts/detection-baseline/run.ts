@@ -45,6 +45,7 @@ import {
   isEgressMode,
   systemProcReader,
   type EgressMode,
+  pinnedCloakBrowserManifest,
 } from "@multizen/browser-runtime";
 import { generateFingerprint, reconcileFingerprint } from "@multizen/profile-manager";
 import { buildRuntime, takeOverFromPreviousRun, type MeasurementOverrides } from "@multizen/server/runtime";
@@ -162,9 +163,16 @@ function prepareDataDir(): void {
   const cache = join(dataDir, "chromium", "cloakbrowser");
   mkdirSync(cache, { recursive: true });
   link(join(cache, version), resolve(versionDir));
+  // Says it is the pinned build: only the operator of this script knows. A server takes nothing else.
+  const pin = pinnedCloakBrowserManifest();
+  if (version !== pin.version) throw new Error(`The engine is ${version}, and the server only runs ${pin.version}`);
   writeFileSync(
     join(cache, "current.json"),
-    JSON.stringify({ version, binaryRelative: process.platform === "win32" ? "chrome.exe" : "chrome" }),
+    JSON.stringify({
+      version,
+      binaryRelative: process.platform === "win32" ? "chrome.exe" : "chrome",
+      sha256: pin.sha256,
+    }),
   );
 }
 

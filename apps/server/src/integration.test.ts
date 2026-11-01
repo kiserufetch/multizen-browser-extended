@@ -17,6 +17,7 @@ import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pinnedCloakBrowserManifest } from "@multizen/browser-runtime";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -49,12 +50,13 @@ after(() => {
 function newDataDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "mz-it-"));
   const cache = join(dir, "chromium", "cloakbrowser");
-  mkdirSync(join(cache, "146.0.0.0"), { recursive: true });
+  const pin = pinnedCloakBrowserManifest();
+  mkdirSync(join(cache, pin.version), { recursive: true });
   // Exists, so ensure() is satisfied; can't run, so a launch fails at spawn.
-  writeFileSync(join(cache, "146.0.0.0", "chrome.exe"), "not an executable");
+  writeFileSync(join(cache, pin.version, "chrome.exe"), "not an executable");
   writeFileSync(
     join(cache, "current.json"),
-    JSON.stringify({ version: "146.0.0.0", binaryRelative: "chrome.exe" }),
+    JSON.stringify({ version: pin.version, binaryRelative: "chrome.exe", sha256: pin.sha256 }),
   );
   return dir;
 }
@@ -365,7 +367,8 @@ test("the lock: a second serve and a plain stdio refuse, the relay works", async
     assert.match(stdio.stderr, /in use by another MultiZen server/);
     assert.match(stdio.stderr, /stdio --connect/);
     assert.ok(stdio.stderr.includes(serve.url));
-    assert.ok(stdio.stderr.includes("owner-token"));
+    assert.match(stdio.stderr, /token create/);
+    assert.equal(stdio.stderr.includes("owner-token"), false, "not a token for an agent");
 
     const profile = runCli(
       ["profile", "export", "any", "--data-dir", dir, "--passphrase-file", join(dir, "owner-token")],

@@ -82,6 +82,7 @@ import { networkInterfaces } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { pinnedCloakBrowserManifest } from "@multizen/browser-runtime";
 import { ProfileManager } from "@multizen/profile-manager";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -154,9 +155,12 @@ function prepareDataDir(): void {
   const cache = join(DATA_DIR, "chromium", "cloakbrowser");
   mkdirSync(cache, { recursive: true });
   junction(join(cache, version), versionDir);
+  // Says it is the pinned build: only the operator of this script knows. A server takes nothing else.
+  const pin = pinnedCloakBrowserManifest();
+  expect(version === pin.version, `--engine-version-dir is ${version}, and the server only runs ${pin.version}`);
   writeFileSync(
     join(cache, "current.json"),
-    JSON.stringify({ version, binaryRelative: IS_WINDOWS ? "chrome.exe" : "chrome" }),
+    JSON.stringify({ version, binaryRelative: IS_WINDOWS ? "chrome.exe" : "chrome", sha256: pin.sha256 }),
   );
 }
 

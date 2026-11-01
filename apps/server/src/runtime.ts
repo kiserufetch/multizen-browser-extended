@@ -7,13 +7,20 @@ import {
 } from "@multizen/mcp-server";
 import { ProfileManager } from "@multizen/profile-manager";
 import { defaultSettingsPath, SettingsStore } from "@multizen/settings-store";
-import { resolveEngine, type BrowserEngine, type ChromiumStatus, type ProfileId } from "@multizen/types";
+import {
+  resolveEngine,
+  withOriginsOnly,
+  type BrowserEngine,
+  type ChromiumStatus,
+  type ProfileId,
+} from "@multizen/types";
 import {
   ChromiumBrowserDriver,
   DOWNLOAD_QUOTA_BYTES,
   EgressPolicy,
   EngineRegistry,
   EngineRouter,
+  MAX_URL_CHARS,
   randomFreePort,
   reapPreviousRun,
   stopAllBridges,
@@ -28,6 +35,12 @@ import { SECRET_KEY_ENV, takeKeyFromEnv, unlockSecrets } from "./secretKey.ts";
 import { withinBudget } from "./shutdown.ts";
 
 export const SERVER_VERSION: string = pkg.version;
+
+/**
+ * What a server holds tool calls to. A desktop's calls come from its own user's agents, and
+ * take whatever they ask. A wait of 120 s is twice what an MCP client waits by default.
+ */
+export const SERVER_TOOL_LIMITS = { maxUrlChars: MAX_URL_CHARS, maxWaitMs: 120_000 } as const;
 
 /** Covers closeAll's own budget, the bridges and the database. */
 export const RUNTIME_CLOSE_BUDGET_MS = 12_000;
@@ -261,11 +274,24 @@ export async function buildRuntime(
   const host = companion
     ? { ...nodeHost, resourceDir: (name: "companion" | "linux-sandbox") => (name === "companion" ? companion : null) }
     : nodeHost;
-  const engineRegistry = new EngineRegistry(host);
+  const engineRegistry = new EngineRegistry(host, { pinned: true });
   engineRegistry.on("status", engineProgressLogger());
   const egress = new EgressPolicy({ mode: cfg.egressPolicy, allow: cfg.egressAllow });
   if (cfg.egressPolicy === "allow-all") {
     log.warn("egress policy allow-all: pages can reach private addresses, this machine's ports and cloud metadata");
+  }
+  if (egress.enforced && !process.env.UV_THREADPOOL_SIZE) {
+    log.warn(
+      "UV_THREADPOOL_SIZE isn't set, so browsers can only look up one name each at a time. " +
+        "bin/multizen-server.js and the image set it. On Windows it only works set before Node starts: set it to 64.",
+    );
+  }
+  const openLoopback = egress.enforced ? egress.loopbackAllowedOnAnyPort() : [];
+  if (openLoopback.length > 0) {
+    log.warn(
+      "--egress-allow lets pages reach every port on this machine, this server's own and each browser's debugging port among them: give it a :port",
+      { entries: openLoopback },
+    );
   }
 
   const chromiumDriver = new ChromiumBrowserDriver({
@@ -321,7 +347,8 @@ export async function buildRuntime(
       actor: e.actor,
       durationMs: e.durationMs,
       profileId: e.profileId,
-      ...(e.status === "error" ? { error: e.summary } : {}),
+      // A driver's message is meant not to hold a whole URL. One from anywhere else may.
+      ...(e.status === "error" ? { error: withOriginsOnly(e.summary ?? "") } : {}),
     });
   });
 

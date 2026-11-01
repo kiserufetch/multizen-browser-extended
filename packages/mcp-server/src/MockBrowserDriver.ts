@@ -201,6 +201,14 @@ export class MockBrowserDriver implements BrowserDriver {
     return this.downloads.get(profileId)?.find((d) => d.id === downloadId) ?? null;
   }
 
+  async deleteDownload(profileId: ProfileId, downloadId: string): Promise<boolean> {
+    const downloads = this.downloads.get(profileId) ?? [];
+    const at = downloads.findIndex((d) => d.id === downloadId);
+    if (at === -1) return false;
+    downloads.splice(at, 1);
+    return true;
+  }
+
   async setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }> {
     this.dialogPolicies.set(profileId, policy);
     return { ok: true };

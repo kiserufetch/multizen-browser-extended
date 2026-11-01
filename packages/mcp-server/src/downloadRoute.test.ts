@@ -137,3 +137,41 @@ test("a wrong Host gets no file, whatever the token", async () => {
   const res = await get("/files/downloads/p/d1", { authorization: "Bearer agent", host: "evil.test" });
   assert.notEqual(res.status, 200);
 });
+
+test("a name with half a pair in it is served, not a crash in the header", async () => {
+  const name = `a${"😀".slice(0, 1)}b.txt`;
+  assert.throws(() => encodeURIComponent(name), URIError);
+  const driver = new MockBrowserDriver();
+  driver.downloads.set("p", [record({ fileName: name })]);
+  const route = createDownloadRoute({
+    driver,
+    profiles: { get: () => ({ id: "p" }) } as unknown as ProfileManager,
+  });
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const free = (probe.address() as AddressInfo).port;
+  await new Promise((resolve) => probe.close(resolve));
+  const served = new HttpTransport({
+    port: free,
+    authenticate: () => TOKENS.agent!,
+    createServer: () => new Server({ name: "t", version: "0" }, { capabilities: {} }),
+    authedRoutes: [route],
+  });
+  await served.start();
+  try {
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request(
+        { host: "127.0.0.1", port: free, path: "/files/downloads/p/d1" },
+        (res) => {
+          res.resume();
+          res.on("end", () => resolve(res.statusCode ?? 0));
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    assert.equal(status, 200);
+  } finally {
+    await served.stop();
+  }
+});

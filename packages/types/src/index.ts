@@ -433,3 +433,4 @@ export interface SandboxStatus {
 
 export * from "./driver.js";
 export * from "./errors.js";
+export * from "./text.js";

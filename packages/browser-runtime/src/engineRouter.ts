@@ -466,6 +466,11 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
     if (driver) return driver.getDownload(profileId, downloadId);
     return (await this.unloadedDriverDownloads(profileId))?.get(downloadId) ?? null;
   }
+  async deleteDownload(profileId: ProfileId, downloadId: string): Promise<boolean> {
+    const driver = this.downloadsDriver(profileId);
+    if (driver) return driver.deleteDownload(profileId, downloadId);
+    return (await this.unloadedDriverDownloads(profileId))?.delete(downloadId) ?? false;
+  }
   setDialogPolicy(profileId: ProfileId, policy: DialogPolicy): Promise<{ ok: true }> {
     return this.require(profileId).setDialogPolicy(profileId, policy);
   }

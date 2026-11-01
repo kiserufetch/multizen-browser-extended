@@ -18,6 +18,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { ProfileManager } from "@multizen/profile-manager";
 import type { Profile } from "@multizen/types";
 
+import { connect as netConnect, type Socket } from "node:net";
 import { ActivityLog } from "./ActivityLog.js";
 import { AuthFailureLimiter } from "./auth/AuthFailureLimiter.js";
 import { createPrincipal, type Principal } from "./auth/principal.js";
@@ -1194,5 +1195,205 @@ test("desktop: ten bad tokens stay 401, as no limiter is configured", async () =
     for (let i = 0; i < 12; i++) {
       assert.equal((await rawRequest(port, { headers: bearer("wrong") })).status, 401);
     }
+  });
+});
+
+// ── per-token limits ─────────────────────────────────────────────────────────
+
+const READER = principal("reader");
+const OWNER = principal("owner");
+/** Opening one at a time, each older than the next. */
+async function sessionsOf(port: number, token: string, count: number): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < count; i++) {
+    ids.push(await openSession(port, token));
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  return ids;
+}
+
+function sessionAlive(port: number, id: string, token: string): Promise<boolean> {
+  return rawRequest(port, {
+    method: "POST",
+    headers: { ...MCP_HEADERS, ...bearer(token), "mcp-session-id": id },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list" }),
+  }).then((reply) => reply.status !== 404);
+}
+
+test("past its cap a token loses its own oldest idle session, and nobody else's", async () => {
+  await withTransport(
+    {
+      authenticate: tokensFor(READER, OWNER),
+      sessionPolicy: { maxSessions: 8, maxSessionsPerPrincipal: 3 },
+    },
+    async (port, t) => {
+      const owners = await sessionsOf(port, "owner", 2);
+      const [oldest, second, third] = await sessionsOf(port, "reader", 3);
+      assert.equal(t.status().streamable, 5);
+
+      const newest = await openSession(port, "reader");
+      assert.equal(t.status().streamable, 5, "one in, one out");
+      assert.equal(await sessionAlive(port, oldest!, "reader"), false);
+      for (const id of [second!, third!, newest]) assert.equal(await sessionAlive(port, id, "reader"), true);
+      for (const id of owners) assert.equal(await sessionAlive(port, id, "owner"), true);
+
+      for (let i = 0; i < 20; i++) await openSession(port, "reader");
+      assert.equal(t.status().streamable, 5, "however many it opens");
+      await openSession(port, "owner");
+      assert.equal(t.status().streamable, 6, "the owner still gets in");
+    },
+  );
+});
+
+test("a session with a call in flight isn't evicted; with none idle the new one gets SESSION_LIMIT", async () => {
+  const gate = barrier();
+  await withTransport(
+    {
+      authenticate: tokensFor(READER, OWNER),
+      sessionPolicy: { maxSessionsPerPrincipal: 1 },
+      createServer: serverWithTool(gate.wait),
+    },
+    async (port, t) => {
+      const busy = await connectStreamable(port, "reader");
+      const call = busy.callTool({ name: "slow" });
+      await until(() => t.status().streamable === 1, "the session");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const refused = await rawRequest(port, {
+        method: "POST",
+        headers: { ...MCP_HEADERS, ...bearer("reader") },
+        body: INITIALIZE,
+      });
+      assert.equal(refused.status, 503);
+      const { error } = JSON.parse(refused.text) as { error: { data: { code: string; retryable: boolean } } };
+      assert.equal(error.data.code, "SESSION_LIMIT");
+      assert.equal(error.data.retryable, true);
+      assert.equal(t.status().streamable, 1);
+      await openSession(port, "owner");
+
+      gate.open();
+      await call;
+      await busy.close();
+    },
+  );
+});
+
+test("legacy SSE counts against the same cap, and its oldest idle stream goes the same way", async () => {
+  await withTransport(
+    { authenticate: tokensFor(READER), sessionPolicy: { maxSessionsPerPrincipal: 2 } },
+    async (port, t) => {
+      const first = await connectSse(port, "reader");
+      await connectSse(port, "reader");
+      assert.equal(t.status().sse, 2);
+      await connectStreamable(port, "reader");
+      assert.equal(t.status().sse + t.status().streamable, 2);
+      void first;
+    },
+  );
+});
+
+/** A POST that declares its size and then stalls, as a slow client's would. */
+function stalledPost(port: number, bytes: number, token: string): { destroy: () => void } {
+  const req = httpRequest({
+    host: "127.0.0.1",
+    port,
+    method: "POST",
+    path: "/mcp",
+    headers: { ...MCP_HEADERS, ...bearer(token), "content-length": String(bytes) },
+  });
+  req.on("error", () => {});
+  req.write("{");
+  return { destroy: () => req.destroy() };
+}
+
+test("bodies in flight have a budget: past it a typed refusal, and it comes back when they end", async () => {
+  await withTransport(
+    { authenticate: tokensFor(READER, OWNER), maxBodyBytesInFlight: 1_000, maxRequestBytes: 800 },
+    async (port) => {
+      const holding = stalledPost(port, 700, "reader");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const refused = await rawRequest(port, {
+        method: "POST",
+        headers: { ...MCP_HEADERS, ...bearer("owner"), "content-length": "400" },
+        body: "x".repeat(400),
+      });
+      assert.equal(refused.status, 503);
+      assert.equal(refused.headers["retry-after"], "1");
+      const { error } = JSON.parse(refused.text) as {
+        error: { data: { code: string; retryable: boolean; details: { retry_after_ms: number } } };
+      };
+      assert.equal(error.data.code, "RATE_LIMITED");
+      assert.equal(error.data.retryable, true);
+      assert.equal(error.data.details.retry_after_ms, 1_000);
+
+      // A small one still fits, and its charge goes when it is answered.
+      for (let i = 0; i < 5; i++) {
+        const ok = await rawRequest(port, {
+          method: "POST",
+          headers: { ...MCP_HEADERS, ...bearer("owner") },
+          body: INITIALIZE.padEnd(280, " "),
+        });
+        assert.equal(ok.status, 200);
+      }
+
+      holding.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const after = await rawRequest(port, {
+        method: "POST",
+        headers: { ...MCP_HEADERS, ...bearer("owner"), "content-length": "400" },
+        body: INITIALIZE.padEnd(400, " "),
+      });
+      assert.equal(after.status, 200, "the stalled one gave its budget back");
+    },
+  );
+});
+
+test("a chunked body is charged as it arrives", async () => {
+  await withTransport(
+    { authenticate: tokensFor(OWNER), maxBodyBytesInFlight: 100 },
+    async (port) => {
+      const reply = await new Promise<RawReply>((resolve, reject) => {
+        const req = httpRequest(
+          { host: "127.0.0.1", port, method: "POST", path: "/mcp", headers: { ...MCP_HEADERS, ...bearer("owner") } },
+          (res) => {
+            let text = "";
+            res.setEncoding("utf8");
+            res.on("data", (chunk: string) => (text += chunk));
+            res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, text }));
+          },
+        );
+        req.on("error", reject);
+        req.write("x".repeat(60));
+        setTimeout(() => req.end("x".repeat(60)), 20);
+      });
+      assert.equal(reply.status, 503);
+      assert.match(reply.text, /RATE_LIMITED/);
+    },
+  );
+});
+
+test("sockets past maxConnections are dropped, and those within it work", async () => {
+  await withTransport({ maxConnections: 2, authenticate: tokensFor(OWNER) }, async (port) => {
+    const open: Socket[] = [];
+    for (let i = 0; i < 2; i++) {
+      const socket = netConnect(port, "127.0.0.1");
+      socket.on("error", () => {});
+      await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+      open.push(socket);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const extra = netConnect(port, "127.0.0.1");
+    extra.on("error", () => {});
+    await new Promise<void>((resolve) => extra.once("close", () => resolve()));
+    for (const socket of open) socket.destroy();
+  });
+});
+
+test("with none of these options, as on a desktop, one principal opens all it likes and nothing is charged", async () => {
+  await withTransport({ authenticate: tokensFor(OWNER), maxRequestBytes: 800 }, async (port, t) => {
+    for (let i = 0; i < 40; i++) await openSession(port, "owner");
+    assert.equal(t.status().streamable, 40);
+    assert.equal((t as unknown as { server: { maxConnections?: number } }).server.maxConnections, undefined);
   });
 });

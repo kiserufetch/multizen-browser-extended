@@ -57,6 +57,8 @@ export interface ServerConfig {
   /** A session with no call in flight and no request for this long is closed. */
   sessionIdleTtlMs: number;
   maxSessions: number;
+  /** One token's share of them: past it, its own oldest idle session is closed for the new one. */
+  maxSessionsPerToken: number;
   /** What a session's end does to its leases. `keep`: they run on, for a client coming back. */
   leaseOnSessionClose: LeaseOnSessionClose;
   /** The owner's endpoint, told about each new handoff, with the agent's reason. No token or page content. */
@@ -67,6 +69,8 @@ export interface ServerConfig {
   handoffTtlMs?: number;
   /** What one profile's downloads may take. */
   downloadQuotaBytes: number;
+  /** What one profile's base64 uploads may take until it closes. */
+  uploadInboxQuotaBytes: number;
 }
 
 export const LEASE_ON_SESSION_CLOSE = ["keep", "release"] as const;
@@ -430,12 +434,15 @@ function remoteFields(
 
 const DEFAULT_SESSION_IDLE_TTL_MS = 30 * 60_000;
 const DEFAULT_MAX_SESSIONS = 64;
+const DEFAULT_MAX_SESSIONS_PER_TOKEN = 32;
+const UPLOAD_INBOX_QUOTA_BYTES = 1024 ** 3;
 
 const HANDOFF_OPTIONS: NonNullable<ParseArgsConfig["options"]> = {
   "handoff-webhook": { type: "string" },
   "handoff-webhook-secret": { type: "string" },
   "handoff-ttl-ms": { type: "string" },
   "download-quota-bytes": { type: "string" },
+  "upload-inbox-quota-bytes": { type: "string" },
 };
 
 function handoffFields(
@@ -443,12 +450,13 @@ function handoffFields(
   env: Env,
 ): Pick<
   ServerConfig,
-  "handoffWebhook" | "handoffWebhookSecret" | "handoffTtlMs" | "downloadQuotaBytes"
+  "handoffWebhook" | "handoffWebhookSecret" | "handoffTtlMs" | "downloadQuotaBytes" | "uploadInboxQuotaBytes"
 > {
   const webhook = flags.flag("handoff-webhook") ?? env.MULTIZEN_HANDOFF_WEBHOOK;
   const secret = flags.flag("handoff-webhook-secret") ?? env.MULTIZEN_HANDOFF_WEBHOOK_SECRET;
   const ttl = flags.flag("handoff-ttl-ms") ?? env.MULTIZEN_HANDOFF_TTL_MS;
   const quota = flags.flag("download-quota-bytes") ?? env.MULTIZEN_DOWNLOAD_QUOTA_BYTES;
+  const inboxQuota = flags.flag("upload-inbox-quota-bytes") ?? env.MULTIZEN_UPLOAD_INBOX_QUOTA_BYTES;
   if (secret && !webhook) throw new UsageError("--handoff-webhook-secret needs --handoff-webhook");
   return {
     ...(webhook ? { handoffWebhook: parseHttpUrl("--handoff-webhook", webhook).href } : {}),
@@ -456,6 +464,10 @@ function handoffFields(
     ...(ttl !== undefined ? { handoffTtlMs: parsePositiveInt("--handoff-ttl-ms", ttl) } : {}),
     downloadQuotaBytes:
       quota === undefined ? DOWNLOAD_QUOTA_BYTES : parsePositiveInt("--download-quota-bytes", quota),
+    uploadInboxQuotaBytes:
+      inboxQuota === undefined
+        ? UPLOAD_INBOX_QUOTA_BYTES
+        : parsePositiveInt("--upload-inbox-quota-bytes", inboxQuota),
   };
 }
 
@@ -470,6 +482,7 @@ export function parseServeConfig(
     port: { type: "string" },
     "session-idle-ttl-ms": { type: "string" },
     "max-sessions": { type: "string" },
+    "max-sessions-per-token": { type: "string" },
     "lease-on-session-close": { type: "string" },
     "uploads-root": { type: "string" },
     ...BROWSER_LIMIT_OPTIONS,
@@ -480,6 +493,7 @@ export function parseServeConfig(
   rejectPositionals(flags.positionals);
   const idleTtl = flags.flag("session-idle-ttl-ms") ?? env.MULTIZEN_SESSION_IDLE_TTL_MS;
   const maxSessions = flags.flag("max-sessions") ?? env.MULTIZEN_MAX_SESSIONS;
+  const maxSessionsPerToken = flags.flag("max-sessions-per-token") ?? env.MULTIZEN_MAX_SESSIONS_PER_TOKEN;
   const leaseOnClose =
     flags.flag("lease-on-session-close") ?? env.MULTIZEN_LEASE_ON_SESSION_CLOSE ?? "keep";
   if (!(LEASE_ON_SESSION_CLOSE as readonly string[]).includes(leaseOnClose)) {
@@ -497,6 +511,10 @@ export function parseServeConfig(
         : parsePositiveInt("--session-idle-ttl-ms", idleTtl),
     maxSessions:
       maxSessions === undefined ? DEFAULT_MAX_SESSIONS : parsePositiveInt("--max-sessions", maxSessions),
+    maxSessionsPerToken:
+      maxSessionsPerToken === undefined
+        ? DEFAULT_MAX_SESSIONS_PER_TOKEN
+        : parsePositiveInt("--max-sessions-per-token", maxSessionsPerToken),
     leaseOnSessionClose: leaseOnClose as LeaseOnSessionClose,
     defaultEngine: resolveDefaultEngine(flags, env),
     ...uploadsRootField(flags, env),

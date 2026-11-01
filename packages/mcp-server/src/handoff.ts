@@ -60,6 +60,8 @@ export interface HandoffRequestOptions {
   kind?: HandoffKind;
   ttlMs?: number;
   requestedBy?: string;
+  /** Asking again leaves the reason as it was. */
+  keepReason?: boolean;
 }
 
 export interface HumanHandoff {
@@ -116,8 +118,10 @@ export class InMemoryHumanHandoff implements HumanHandoff {
     const cappedReason = reason.slice(0, MAX_REASON_CHARS);
     const existing = this.entries.get(profileId);
     if (existing) {
-      existing.record.reason = cappedReason;
-      this.notify();
+      if (!opts.keepReason) {
+        existing.record.reason = cappedReason;
+        this.notify();
+      }
       return { ...existing.record };
     }
     const now = Date.now();

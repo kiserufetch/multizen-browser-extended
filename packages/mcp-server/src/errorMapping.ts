@@ -46,6 +46,21 @@ export function toToolError(e: unknown, tool: string): ToolErrorFields {
   };
 }
 
+const QUOTED_HOST_PATH = /(['"])(?:[A-Za-z]:[\\/]|[\\/])[^'"]*\1/g;
+const BARE_HOST_PATH = /(?:\b[A-Za-z]:[\\/]|\\\\|(?<![\w:/.-])\/)[^\s'"]+/g;
+
+/**
+ * For a token that isn't the owner's: an unexpected error tends to name a file on this host,
+ * and where things live is no business of theirs. The operator's log keeps the original.
+ */
+export function withoutHostPaths(fields: ToolErrorFields): ToolErrorFields {
+  if (fields.code !== "INTERNAL_ERROR") return fields;
+  return {
+    ...fields,
+    message: fields.message.replace(QUOTED_HOST_PATH, "$1<path>$1").replace(BARE_HOST_PATH, "<path>"),
+  };
+}
+
 export function profileNotFound(id: string): MultizenError {
   return new MultizenError("PROFILE_NOT_FOUND", `Profile ${id} not found`);
 }

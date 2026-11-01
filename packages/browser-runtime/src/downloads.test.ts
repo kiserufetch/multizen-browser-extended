@@ -1,9 +1,12 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DownloadTracker, sanitizeFilename, sharedDownloadTracker } from "./downloads.ts";
+
+/** Reviewer's measure of the old regex: 6 s at 80,000 characters, and quadratic. */
+const LONG_INPUT_BUDGET_MS = 500;
 
 const DIRS: string[] = [];
 function tempDir(): string {
@@ -253,4 +256,183 @@ test("a canceled download doesn't count against the quota", async () => {
   await tracker.settled();
   await complete(tracker, "b", "b.bin", "x".repeat(90));
   assert.equal(tracker.list().find((d) => d.fileName === "b.bin")?.state, "completed");
+});
+
+test("a name that was quadratic costs next to nothing, and is stored capped", () => {
+  for (const hostile of [`x${".".repeat(80_000)}y`, `x${" ".repeat(80_000)}y`, ".".repeat(80_000), "a".repeat(5_000_000)]) {
+    const started = performance.now();
+    const name = sanitizeFilename(hostile);
+    assert.ok(performance.now() - started < LONG_INPUT_BUDGET_MS, `took ${performance.now() - started} ms`);
+    assert.ok(name.length <= 200, `${name.length} characters`);
+  }
+});
+
+test("the name is what follows the last separator, however long what comes first", () => {
+  assert.equal(sanitizeFilename(`${"a/".repeat(100_000)}report.pdf`), "report.pdf");
+});
+
+test("cut in the middle of a pair, a name is still text, and fit for a header", () => {
+  const name = sanitizeFilename(`${"a".repeat(180)}${"😀".repeat(30)}.bin`);
+  assert.doesNotThrow(() => encodeURIComponent(name));
+  assert.ok(name.endsWith(".bin"));
+});
+
+async function withIndex(entries: unknown): Promise<{ dir: string; victim: string; open: () => Promise<DownloadTracker> }> {
+  const root = tempDir();
+  const dir = join(root, "profiles", "p", "downloads");
+  mkdirSync(dir, { recursive: true });
+  const victim = join(root, "owner-token");
+  writeFileSync(victim, "the secret");
+  writeFileSync(join(dir, ".multizen-downloads.json"), JSON.stringify(entries));
+  return { dir, victim, open: () => DownloadTracker.open(dir) };
+}
+
+const stored = (overrides: Record<string, unknown>): Record<string, unknown> => ({
+  id: "d1",
+  guid: "guid-1",
+  fileName: "report.txt",
+  url: "http://t/x",
+  state: "completed",
+  bytesReceived: 5,
+  bytesTotal: 5,
+  startedAt: "2026-11-01T00:00:00.000Z",
+  ...overrides,
+});
+
+test("an index from an archive can't read a file outside its directory", async () => {
+  for (const escape of ["../../../owner-token", "..\\..\\..\\owner-token", "..", ".", "a/b", "C:evil", "name::$DATA", "x. "]) {
+    const { victim, open } = await withIndex([stored({ storedAs: escape })]);
+    const tracker = await open();
+    assert.equal(tracker.get("d1"), null, `storedAs ${escape}`);
+    assert.deepEqual(tracker.list(), []);
+    assert.equal(readFileSync(victim, "utf8"), "the secret");
+  }
+});
+
+test("an index from an archive can't delete a file outside its directory", async () => {
+  for (const escape of ["../../../owner-token", "..\\..\\..\\owner-token"]) {
+    const { victim, open } = await withIndex([stored({ guid: escape, state: "in_progress" })]);
+    await open();
+    assert.equal(readFileSync(victim, "utf8"), "the secret", `guid ${escape}`);
+  }
+});
+
+test("an index can't name itself, and a broken entry or index costs only itself", async () => {
+  const { open } = await withIndex([
+    stored({ id: "self", storedAs: ".multizen-downloads.json" }),
+    stored({ id: "negative", bytesReceived: -1e15 }),
+    stored({ id: "extra", storedAs: "report.txt", sneaked: "field" }),
+    "not an entry",
+    null,
+  ]);
+  const tracker = await open();
+  assert.deepEqual(tracker.list().map((d) => d.id), ["extra"]);
+  assert.equal("sneaked" in tracker.list()[0]!, false);
+  const notAList = await withIndex({ not: "a list" });
+  assert.deepEqual((await notAList.open()).list(), []);
+});
+
+test("what this file wrote still loads", async () => {
+  const dir = tempDir();
+  const first = await DownloadTracker.open(dir);
+  await complete(first, "guid-a", "a.txt");
+  const { id } = first.list()[0]!;
+  const again = await DownloadTracker.open(dir);
+  assert.equal(readFileSync(again.get(id)!.path!, "utf8"), "bytes");
+});
+
+test("under a server's terms a name loses what only a reader can be fooled by; a desktop's doesn't", async () => {
+  const hostile = "‮gpj.exe​x\u0085y z.txt";
+  const limited = await DownloadTracker.open(tempDir());
+  limited.limitTo(1_000_000);
+  limited.began({ guid: "g", url: "http://t/", suggestedFilename: hostile });
+  assert.equal(limited.list()[0]!.fileName, "gpj.exexyz.txt");
+
+  const desktop = await DownloadTracker.open(tempDir());
+  desktop.began({ guid: "g", url: "http://t/", suggestedFilename: "‮a​b.txt" });
+  assert.equal(desktop.list()[0]!.fileName, "‮a​b.txt");
+});
+
+test("delete removes the file, gives its bytes back to the quota, and is on disk when it resolves", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  tracker.limitTo(10);
+  await complete(tracker, "g1", "a.bin", "12345678");
+  const { id } = tracker.list()[0]!;
+  const path = tracker.get(id)!.path!;
+
+  // No room for this one.
+  tracker.began({ guid: "g2", url: "http://t/", suggestedFilename: "b.bin" });
+  tracker.progress({ guid: "g2", totalBytes: 8, receivedBytes: 1, state: "inProgress" });
+  assert.equal(tracker.list()[1]!.canceledBy, "quota");
+
+  assert.equal(await tracker.delete(id), true);
+  assert.equal(existsSync(path), false);
+  assert.equal(tracker.get(id), null);
+  assert.equal(await tracker.delete(id), false);
+  assert.equal(await tracker.delete("never"), false);
+
+  // And now there is.
+  await complete(tracker, "g3", "c.bin", "12345678");
+  assert.equal(tracker.list().at(-1)!.state, "completed");
+  const reopened = await DownloadTracker.open(tracker.dir);
+  assert.equal(reopened.get(id), null);
+});
+
+test("delete stops a download under way, and what the browser finishes anyway doesn't stay", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  tracker.limitTo(1_000);
+  const stopped: string[] = [];
+  tracker.stopDownload = (guid) => stopped.push(guid);
+  tracker.began({ guid: "g1", url: "http://t/", suggestedFilename: "a.bin" });
+  const { id } = tracker.list()[0]!;
+  assert.equal(await tracker.delete(id), true);
+  assert.deepEqual(stopped, ["g1"]);
+
+  writeFileSync(join(tracker.dir, "g1"), "late");
+  tracker.progress({ guid: "g1", totalBytes: 4, receivedBytes: 4, state: "completed" });
+  await tracker.settled();
+  assert.equal(existsSync(join(tracker.dir, "g1")), false);
+});
+
+test("under a server's terms a URL is capped, and entries stop at their limit", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  tracker.limitTo(1e12);
+  const stopped: string[] = [];
+  tracker.stopDownload = (guid) => stopped.push(guid);
+
+  tracker.began({ guid: "first", url: `http://t/${"x".repeat(5_000)}`, suggestedFilename: "a" });
+  assert.equal(tracker.list()[0]!.url.length, 2_048);
+  const { id: canceledId } = tracker.list()[0]!;
+  tracker.progress({ guid: "first", totalBytes: 0, receivedBytes: 0, state: "canceled" });
+
+  for (let i = 0; i < 999; i++) {
+    assert.equal(tracker.began({ guid: `g${i}`, url: "http://t/", suggestedFilename: "a" }), true);
+  }
+  assert.equal(tracker.list().length, 1_000);
+  // Full: the canceled one makes way, then there is nothing left to forget.
+  assert.equal(tracker.began({ guid: "one-more", url: "http://t/", suggestedFilename: "a" }), true);
+  assert.equal(tracker.get(canceledId), null);
+  assert.equal(tracker.began({ guid: "too-many", url: "http://t/", suggestedFilename: "a" }), false);
+  assert.deepEqual(stopped, ["too-many"]);
+  assert.equal(tracker.list().length, 1_000);
+  await tracker.settled();
+});
+
+test("a desktop's tracker keeps every entry and the whole URL", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  const url = `http://t/${"x".repeat(5_000)}`;
+  for (let i = 0; i < 1_001; i++) tracker.began({ guid: `g${i}`, url, suggestedFilename: "a" });
+  assert.equal(tracker.list().length, 1_001);
+  assert.equal(tracker.list()[0]!.url, url);
+  await tracker.settled();
+});
+
+test("a burst of downloads doesn't queue a write of the whole index for each", async () => {
+  const tracker = await DownloadTracker.open(tempDir());
+  for (let i = 0; i < 2_000; i++) tracker.began({ guid: `g${i}`, url: "http://t/", suggestedFilename: "a" });
+  const started = performance.now();
+  await tracker.settled();
+  assert.ok(performance.now() - started < 5_000);
+  const index = JSON.parse(readFileSync(join(tracker.dir, ".multizen-downloads.json"), "utf8")) as unknown[];
+  assert.equal(index.length, 2_000);
 });

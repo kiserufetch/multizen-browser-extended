@@ -1,5 +1,9 @@
 import { errorFields, installLogging, log } from "./log.ts";
 
+// Everything under a data dir is private to this user, browsers' files included: tokens, keys,
+// cookies. Before anything can create a file. A no-op on Windows, which has the directory's ACL.
+process.umask(0o077);
+
 const USAGE = `multizen-server: MultiZen's MCP server with real browsers, no desktop app.
 
 Usage:
@@ -10,11 +14,11 @@ Usage:
                         [--allow-remote] [--allow-insecure-remote] [--tls-cert <file> --tls-key <file>]
                         [--allowed-hosts <name[:port],...>] [--allowed-origins <origin,...>]
                         [--public-url <url>] [--trust-proxy]
-                        [--session-idle-ttl-ms <ms>] [--max-sessions <n>]
+                        [--session-idle-ttl-ms <ms>] [--max-sessions <n>] [--max-sessions-per-token <n>]
                         [--lease-on-session-close keep|release]
                         [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
                         [--handoff-webhook <url>] [--handoff-webhook-secret <secret>]
-                        [--handoff-ttl-ms <ms>] [--download-quota-bytes <n>]
+                        [--handoff-ttl-ms <ms>] [--download-quota-bytes <n>] [--upload-inbox-quota-bytes <n>]
   multizen-server stdio [--data-dir <dir>] [--default-engine cloakbrowser|camoufox]
                         [--uploads-root <dir>] [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
                         [--display-mode auto|headed|xvfb|headless] [--headless]
@@ -35,7 +39,8 @@ MULTIZEN_BROWSER_QUEUE_TIMEOUT_MS, MULTIZEN_DISPLAY_MODE, MULTIZEN_HEADLESS=1,
 MULTIZEN_ARCHIVE_PASSPHRASE, MULTIZEN_ALLOW_REMOTE=1,
 MULTIZEN_ALLOW_INSECURE_REMOTE=1, MULTIZEN_TLS_CERT, MULTIZEN_TLS_KEY, MULTIZEN_ALLOWED_HOSTS,
 MULTIZEN_ALLOWED_ORIGINS, MULTIZEN_PUBLIC_URL, MULTIZEN_TRUST_PROXY=1,
-MULTIZEN_SESSION_IDLE_TTL_MS, MULTIZEN_MAX_SESSIONS, MULTIZEN_LEASE_ON_SESSION_CLOSE,
+MULTIZEN_SESSION_IDLE_TTL_MS, MULTIZEN_MAX_SESSIONS, MULTIZEN_MAX_SESSIONS_PER_TOKEN,
+MULTIZEN_LEASE_ON_SESSION_CLOSE, MULTIZEN_UPLOAD_INBOX_QUOTA_BYTES,
 MULTIZEN_LOG_LEVEL (debug, info, warn, error; default info), MULTIZEN_SECRET_KEY,
 MULTIZEN_SECRET_KEY_NEW (secrets rotate only), MULTIZEN_EGRESS_POLICY, MULTIZEN_EGRESS_ALLOW,
 MULTIZEN_HANDOFF_WEBHOOK, MULTIZEN_HANDOFF_WEBHOOK_SECRET, MULTIZEN_HANDOFF_TTL_MS,
@@ -56,10 +61,14 @@ stdio --connect pings the server every --keepalive-ms (30000), which keeps its s
 out. Below a server's --session-idle-ttl-ms is what it takes. When the session is gone anyway, because
 the server restarted or the token was revoked, it says so on stderr and exits 1: restart it.
 
+--max-sessions-per-token (32) keeps one token from taking all of --max-sessions (64): past it, that
+token's own oldest idle session is closed for the new one.
+
 --host beyond loopback needs --allow-remote, and TLS or --allow-insecure-remote. Behind a
 reverse proxy, stay on loopback and name the proxy's host with --allowed-hosts or --public-url.
 Without --no-auth (loopback only) serve needs a token: the first start creates the owner's in
-<data-dir>/owner-token. token create's default tools are read and act, and --panel adds operator.
+<data-dir>/owner-token, which can do everything, so it isn't for agents: connect those with one from
+token create, whose default tools are read and act, and --panel adds operator.
 
 --egress-policy block-private, the default, keeps browsers off private, loopback, link-local and
 metadata addresses, at their network level and with EGRESS_BLOCKED from navigate, new_tab and a proxy
@@ -74,8 +83,9 @@ Resume or Abort. Until then the agent's page actions get HUMAN_IN_CONTROL. A han
 POST of JSON, with an HMAC of the body in X-MultiZen-Signature if a secret is set (prefer
 MULTIZEN_HANDOFF_WEBHOOK_SECRET: the command line is readable by others). A failure only costs a log
 line. A profile's downloads may take 2 GB unless --download-quota-bytes says otherwise; past that the
-download is stopped and deleted. One too large for get_download is at the path its error names, with
-the same token.
+download is stopped and deleted, and delete_download gives back what one took. One too large for
+get_download is at the path its error names, with the same token. Base64 uploads stay until the
+profile closes and may take 1 GB unless --upload-inbox-quota-bytes says otherwise.
 
 Proxy passwords are encrypted with MULTIZEN_SECRET_KEY (hex or base64, 32 bytes) or
 <data-dir>/secret.key, which is created if neither exists.

@@ -26,6 +26,7 @@ import {
   FULL_PRINCIPAL,
   InMemoryHumanHandoff,
   PanelSessions,
+  sameSecret,
   type ActivityEvent,
   type PendingHandoff,
 } from "@multizen/mcp-server";
@@ -549,7 +550,7 @@ app.whenReady().then(async () => {
             mutex: sharedMcpState.mutex,
             profiles: profileManager,
             sessions,
-            authenticateToken: (given) => (given === token ? FULL_PRINCIPAL : null),
+            authenticateToken: (given) => (sameSecret(given, token) ? FULL_PRINCIPAL : null),
             principalById: (id) => (id === FULL_PRINCIPAL.id ? FULL_PRINCIPAL : null),
             limiter,
             secureCookie: false,

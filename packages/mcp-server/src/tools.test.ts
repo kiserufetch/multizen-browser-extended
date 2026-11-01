@@ -21,7 +21,13 @@ import type { DownloadFile, Profile } from "@multizen/types";
 import { InMemoryHumanHandoff } from "./handoff.js";
 import { MockBrowserDriver } from "./MockBrowserDriver.js";
 import { createMultizenMcpServer } from "./server.js";
-import { resolveAllowedFile, safeUploadName, windowsPathProblem } from "./tools/interaction.js";
+import type { ToolLimits } from "./toolGate.js";
+import {
+  planUploads,
+  resolveAllowedFile,
+  safeUploadName,
+  windowsPathProblem,
+} from "./tools/interaction.js";
 
 const DIRS: string[] = [];
 function tempDir(): string {
@@ -42,7 +48,14 @@ interface Harness {
 }
 
 async function connect(
-  opts: { uploadsRoot?: string; maxInlineFileBytes?: number; running?: boolean } = {},
+  opts: {
+    uploadsRoot?: string;
+    maxInlineFileBytes?: number;
+    running?: boolean;
+    maxInboxBytes?: number;
+    limits?: ToolLimits;
+    handoffGate?: boolean;
+  } = {},
 ): Promise<Harness> {
   const dataDir = tempDir();
   const driver = new MockBrowserDriver();
@@ -56,6 +69,9 @@ async function connect(
     handoff,
     uploadsRoot: opts.uploadsRoot,
     maxInlineFileBytes: opts.maxInlineFileBytes,
+    ...(opts.maxInboxBytes !== undefined ? { maxInboxBytes: opts.maxInboxBytes } : {}),
+    ...(opts.limits ? { limits: opts.limits } : {}),
+    ...(opts.handoffGate !== undefined ? { handoffGate: opts.handoffGate } : {}),
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "0.0.0" });
@@ -592,4 +608,121 @@ test("the mock implements the frame and input surface of the driver", async () =
   assert.ok(driver.runningInfo("p")!.pid > 0);
   assert.equal(driver.runningInfo("nope"), null);
   assert.equal(driver.hasOpenDialog("p"), false);
+});
+
+// ── limits ───────────────────────────────────────────────────────────────────
+
+/** Reviewer's measure of the old regex: 6.6 s at 80,000 characters, and quadratic. */
+const LONG_INPUT_BUDGET_MS = 500;
+
+test("base64 that was quadratic to check is refused in next to no time", async () => {
+  for (const hostile of [`${"=".repeat(80_000)}A`, "=".repeat(80_000), `A${"=".repeat(80_000)}`]) {
+    const started = performance.now();
+    await planUploads([{ file_name: "a", data_base64: hostile }], [], 16 * 1024 * 1024).catch(() => {});
+    assert.ok(performance.now() - started < LONG_INPUT_BUDGET_MS, `took ${performance.now() - started} ms`);
+  }
+  const [good] = await planUploads([{ file_name: "a", data_base64: b64("hello") }], [], 1024);
+  assert.equal(good!.bytes!.toString(), "hello");
+});
+
+test("the inbox has a limit of its own, counted across calls, and a refusal writes nothing", async () => {
+  const { client, dataDir } = await connect({ maxInboxBytes: 10 });
+  const upload = (text: string): Record<string, unknown> => ({
+    profile_id: "p",
+    selector: "input",
+    files: [{ file_name: "a.bin", data_base64: b64(text) }],
+  });
+  assert.equal((await call(client, "upload_file", upload("12345678"))).isError, false);
+  const error = await assertCode(client, "upload_file", upload("123"), "FILE_TOO_LARGE");
+  assert.equal(error.details.held_bytes, 8);
+  assert.equal(error.details.max_bytes, 10);
+  assert.equal(readdirSync(join(dataDir, "uploads", ".inbox")).length, 1);
+  assert.equal((await call(client, "upload_file", upload("12"))).isError, false);
+  await client.close();
+});
+
+test("with no inbox limit given, as on a desktop, uploads pile up as they always did", async () => {
+  const { client, dataDir } = await connect();
+  for (let i = 0; i < 3; i++) {
+    const res = await call(client, "upload_file", {
+      profile_id: "p",
+      selector: "input",
+      files: [{ file_name: "a.bin", data_base64: b64("12345678") }],
+    });
+    assert.equal(res.isError, false);
+  }
+  assert.equal(readdirSync(join(dataDir, "uploads", ".inbox")).length, 3);
+  await client.close();
+});
+
+test("a device's name gets its _ where it means a device, and only there", () => {
+  for (const [name, expected] of [
+    ["con.txt", "_con.txt"],
+    ["CON", "_CON"],
+    ["nul.tar.gz", "_nul.tar.gz"],
+    ["LPT1 .txt", "_LPT1 .txt"],
+    ["COM\u00B9.txt", "_COM\u00B9.txt"],
+    ["console.txt", "console.txt"],
+    ["report.pdf", "report.pdf"],
+  ] as const) {
+    assert.equal(safeUploadName(name, "win32"), expected);
+  }
+  assert.equal(safeUploadName("aux.c", "linux"), "aux.c");
+  assert.equal(safeUploadName("con.txt", "darwin"), "con.txt");
+});
+
+test("a name cut in half of a pair is still text", () => {
+  const name = safeUploadName(`${"😀".repeat(100)}.txt`);
+  assert.doesNotThrow(() => encodeURIComponent(name));
+});
+
+test("delete_download reaches the driver, on a stopped profile too; an unknown id is INVALID_INPUT", async () => {
+  const { client, driver } = await connect({ running: false });
+  driver.downloads.set("p", [
+    { id: "d1", fileName: "a", url: "u", state: "completed", bytesReceived: 1, bytesTotal: 1, startedAt: "t", path: "/x" },
+  ]);
+  const { isError, parsed } = await call(client, "delete_download", { profile_id: "p", download_id: "d1" });
+  assert.equal(isError, false);
+  assert.deepEqual(parsed, { deleted: "d1" });
+  assert.deepEqual(driver.downloads.get("p"), []);
+  await assertCode(client, "delete_download", { profile_id: "p", download_id: "d1" }, "INVALID_INPUT");
+  await assertCode(client, "delete_download", { profile_id: "nope", download_id: "d1" }, "PROFILE_NOT_FOUND");
+  await client.close();
+});
+
+test("under a server's limits a long URL is refused and a long wait is cut down", async () => {
+  const { client, driver } = await connect({ limits: { maxUrlChars: 100, maxWaitMs: 20 } });
+  const long = `http://example.test/${"a".repeat(100)}`;
+  await assertCode(client, "navigate", { profile_id: "p", url: long }, "INVALID_INPUT");
+  await assertCode(client, "new_tab", { profile_id: "p", url: long }, "INVALID_INPUT");
+  driver.evaluateJs = async () => ({ result: { value: false } });
+  const started = performance.now();
+  const { parsed } = await call(client, "wait_for_selector", { profile_id: "p", selector: "#never", timeout_ms: 600_000 });
+  assert.equal(parsed.found, false);
+  assert.ok(performance.now() - started < 5_000, "the wait was not cut down");
+  await client.close();
+});
+
+test("with no limits, as on a desktop, a long URL goes through", async () => {
+  const { client, driver } = await connect();
+  const long = `http://example.test/${"a".repeat(20_000)}`;
+  const { isError } = await call(client, "navigate", { profile_id: "p", url: long });
+  assert.equal(isError, false);
+  void driver;
+  await client.close();
+});
+
+test("a repeated request_human keeps its reason where a person acts on it, and takes the new one elsewhere", async () => {
+  const gated = await connect({ handoffGate: true });
+  await call(gated.client, "request_human", { profile_id: "p", reason: "solve the captcha" });
+  const again = await call(gated.client, "request_human", { profile_id: "p", reason: "type the admin password" });
+  assert.equal(again.parsed.reason, "solve the captcha");
+  assert.equal(gated.handoff.activeForProfile("p")!.reason, "solve the captcha");
+  await gated.client.close();
+
+  const desktop = await connect();
+  await call(desktop.client, "request_human", { profile_id: "p", reason: "first" });
+  await call(desktop.client, "request_human", { profile_id: "p", reason: "second" });
+  assert.equal(desktop.handoff.activeForProfile("p")!.reason, "second");
+  await desktop.client.close();
 });

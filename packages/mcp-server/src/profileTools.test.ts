@@ -416,3 +416,45 @@ function parsed(result: unknown): Record<string, any> {
   const { content } = result as { content: Array<{ text: string }> };
   return JSON.parse(content[0]!.text) as Record<string, any>;
 }
+
+const proxyAt = (host: string): Record<string, unknown> => ({ type: "http", host, port: 8080 });
+
+test("a proxy host a URL could read another way is refused, with or without a policy", async () => {
+  const { client } = await connect();
+  for (const host of [
+    "169.254.169.254:80/#",
+    "127.0.0.1:9222/#",
+    "evil.test/",
+    "a@127.0.0.1",
+    "127.0.0.1?",
+    "127.0.0.1#",
+    "127.0.0.1\\",
+    "a b.test",
+    "x".repeat(254),
+  ]) {
+    const created = await call(client, "create_profile", { name: "a", proxy: proxyAt(host) });
+    assert.equal(created.isError, true, host);
+    assert.equal(created.parsed.error.code, "INVALID_INPUT", host);
+  }
+  await client.close();
+});
+
+test("every proxy host that can connect still goes through, in any form it did", async () => {
+  const { client } = await connect();
+  for (const host of [
+    "proxy.example.test",
+    "PROXY.example.test",
+    "proxy.example.test.",
+    "under_score.test",
+    "1.2.3.4",
+    "2001:db8::1",
+    "[2001:db8::1]",
+    "fe80::1%eth0",
+    "прокси.рф",
+    "x".repeat(253),
+  ]) {
+    const created = await call(client, "create_profile", { name: "a", proxy: proxyAt(host) });
+    assert.equal(created.isError, false, `${host}: ${JSON.stringify(created.parsed)}`);
+  }
+  await client.close();
+});

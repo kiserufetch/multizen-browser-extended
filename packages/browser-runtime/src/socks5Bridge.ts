@@ -2,7 +2,7 @@ import { createServer, isIP, type LookupFunction, type Socket, type AddressInfo 
 import { connect as netConnect } from "node:net";
 import { SocksClient } from "socks";
 import { MultizenError, type ProfileId, type ProxyConfig } from "@multizen/types";
-import { egressBlocked, type EgressDecision, type EgressPolicy } from "./egressPolicy.ts";
+import { egressBlocked, type EgressDecision, type EgressLookup, type EgressPolicy } from "./egressPolicy.ts";
 
 /**
  * Local SOCKS5 → upstream-proxy bridge, per profile.
@@ -50,13 +50,35 @@ const byProfile = new Map<ProfileId, BridgeHandle>();
 const bridgeWarnAt = new Map<string, number>();
 /** Under an egress policy a message names a target, which a page chooses. */
 const BRIDGE_WARN_KEPT = 1_024;
+const BRIDGE_WARN_WINDOW_MS = 30_000;
+/** So one page can't fill a log either, naming a new host each time. */
+const BRIDGE_WARN_PER_WINDOW = 20;
+let bridgeWarnWindowAt = 0;
+let bridgeWarnsInWindow = 0;
+let bridgeWarnsDropped = 0;
 function warnBridgeThrottled(msg: string): void {
   const now = Date.now();
-  if (now - (bridgeWarnAt.get(msg) ?? 0) < 30_000) return;
+  if (now - bridgeWarnWindowAt >= BRIDGE_WARN_WINDOW_MS) {
+    if (bridgeWarnsDropped > 0) {
+      console.warn(`[multizen] socks5 bridge: ${bridgeWarnsDropped} more messages in the last 30s not shown`);
+    }
+    bridgeWarnWindowAt = now;
+    bridgeWarnsInWindow = 0;
+    bridgeWarnsDropped = 0;
+  }
+  if (now - (bridgeWarnAt.get(msg) ?? 0) < BRIDGE_WARN_WINDOW_MS) return;
+  if (bridgeWarnsInWindow >= BRIDGE_WARN_PER_WINDOW) {
+    bridgeWarnsDropped++;
+    return;
+  }
+  bridgeWarnsInWindow++;
   if (bridgeWarnAt.size >= BRIDGE_WARN_KEPT) bridgeWarnAt.clear();
   bridgeWarnAt.set(msg, now);
   console.warn("[multizen] socks5 bridge:", msg);
 }
+
+/** How long a server's bridge tries to reach anything. Without a policy, as long as the OS does. */
+const CONNECT_TIMEOUT_MS = 30_000;
 
 /** How long a navigation's failure can still be put down to one the bridge recorded. */
 const FAILURE_WINDOW_MS = 2_000;
@@ -107,7 +129,8 @@ export async function startBridgeForProfile(
   profileId: ProfileId,
   upstream: ProxyConfig | null,
   policy?: EgressPolicy,
-  opts: { refuseByClosing?: boolean } = {},
+  /** `connectTimeoutMs` only applies under an enforced policy: a desktop's bridge waits on the OS. */
+  opts: { refuseByClosing?: boolean; connectTimeoutMs?: number } = {},
 ): Promise<string> {
   const existing = byProfile.get(profileId);
   if (existing) return `socks5://127.0.0.1:${existing.port}`;
@@ -117,6 +140,8 @@ export async function startBridgeForProfile(
     policy?.enforced
       ? {
           policy,
+          lookup: policy.bridgeLookup(),
+          connectTimeoutMs: opts.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
           refuseByClosing: opts.refuseByClosing ?? false,
           onFailure: (blocked, target, reason) => {
             lastFailure.set(profileId, { blocked, target, reason, at: Date.now() });
@@ -144,6 +169,9 @@ export async function stopAllBridges(): Promise<void> {
 
 interface BridgeEgress {
   policy: EgressPolicy;
+  /** This bridge's own lookups, so a page that exhausts them holds up only itself. */
+  lookup: EgressLookup;
+  connectTimeoutMs: number;
   /** How this browser has to be told: see {@link refuseConnect}. */
   refuseByClosing: boolean;
   onFailure: (blocked: boolean, target: string, reason: string) => void;
@@ -254,7 +282,7 @@ async function handleSocksClient(
 
   // 3. The policy's word on this CONNECT, before anything is dialed.
   const decision = egress
-    ? await checkConnect(egress.policy, targetHost, targetPort, upstream)
+    ? await checkConnect(egress.policy, targetHost, targetPort, upstream, egress.lookup)
     : undefined;
   if (decision && !decision.allowed) {
     egress?.onFailure(!decision.unresolved, `${targetHost}:${targetPort}`, decision.reason ?? "");
@@ -265,13 +293,14 @@ async function handleSocksClient(
   const pinned = decision?.connectTo && pinnedLookup(decision.connectTo);
 
   // 4. Open the upstream tunnel, or for a direct profile the connection itself.
+  const timeoutMs = egress?.connectTimeoutMs;
   let upstreamSock: Socket;
   try {
     upstreamSock = !upstream
-      ? await openTcp(targetHost, targetPort, pinned)
+      ? await openTcp(targetHost, targetPort, pinned, timeoutMs)
       : upstream.type === "socks5"
         ? await connectViaSocks5(targetHost, targetPort, upstream, pinned)
-        : await connectViaHttpConnect(targetHost, targetPort, upstream, pinned);
+        : await connectViaHttpConnect(targetHost, targetPort, upstream, pinned, timeoutMs);
   } catch (e) {
     egress?.onFailure(false, `${targetHost}:${targetPort}`, (e as Error).message);
     refuseConnect(client, 0x05, egress); // connection refused
@@ -330,10 +359,11 @@ async function checkConnect(
   host: string,
   port: number,
   upstream: ProxyConfig | null,
+  lookup: EgressLookup,
 ): Promise<EgressDecision> {
-  if (!upstream) return policy.checkDirect(host, port);
+  if (!upstream) return policy.checkDirect(host, port, lookup);
   const target = policy.checkProxied(host, port);
-  return target.allowed ? policy.checkUpstream(upstream) : target;
+  return target.allowed ? policy.checkUpstream(upstream, lookup) : target;
 }
 
 /**
@@ -341,7 +371,7 @@ async function checkConnect(
  * them in turn, as for any name, and the OS resolver isn't asked again: its second answer
  * is the whole of a DNS rebinding attack. A literal host never reaches a lookup.
  */
-function pinnedLookup(addresses: readonly string[]): LookupFunction {
+export function pinnedLookup(addresses: readonly string[]): LookupFunction {
   const all = addresses.map((address) => ({ address, family: isIP(address) }));
   return (_host, options, callback) => {
     if (options.all) callback(null, all);
@@ -369,8 +399,15 @@ async function connectViaHttpConnect(
   targetPort: number,
   upstream: ProxyConfig,
   pinned?: LookupFunction,
+  timeoutMs?: number,
 ): Promise<Socket> {
-  const sock = await openTcp(upstream.host, upstream.port, pinned);
+  const sock = await openTcp(upstream.host, upstream.port, pinned, timeoutMs);
+  // A proxy that accepts and then says nothing would hold this forever.
+  const giveUp =
+    timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => sock.destroy(new Error(`the proxy gave no answer within ${timeoutMs} ms`)), timeoutMs);
+  sock.once("close", () => clearTimeout(giveUp));
   const reader = new BufferedReader(sock);
   const authority = isIP(targetHost) === 6 ? `[${targetHost}]` : targetHost;
   const lines: string[] = [
@@ -399,6 +436,7 @@ async function connectViaHttpConnect(
     const line = await readLine(reader);
     if (line === "") break;
   }
+  clearTimeout(giveUp);
   // Push any bytes the upstream may have sent past the CONNECT response
   // (rare with HTTP/1.1 CONNECT, but possible with some proxies).
   reader.detach((leftover) => {
@@ -428,14 +466,23 @@ async function connectViaSocks5(
   return info.socket as Socket;
 }
 
-function openTcp(host: string, port: number, pinned?: LookupFunction): Promise<Socket> {
+function openTcp(host: string, port: number, pinned?: LookupFunction, timeoutMs?: number): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const sock = netConnect({ host, port, ...(pinned ? { lookup: pinned } : {}) });
+    const giveUp =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => sock.destroy(new Error(`connecting to ${host}:${port} took over ${timeoutMs} ms`)), timeoutMs);
+    const onError = (e: Error): void => {
+      clearTimeout(giveUp);
+      reject(e);
+    };
     sock.once("connect", () => {
-      sock.off("error", reject);
+      clearTimeout(giveUp);
+      sock.off("error", onError);
       resolve(sock);
     });
-    sock.once("error", reject);
+    sock.once("error", onError);
   });
 }
 

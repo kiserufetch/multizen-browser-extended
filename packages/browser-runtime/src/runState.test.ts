@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ProcessTreeDeps } from "./processTree.ts";
 import {
   findPidsByDataDir,
@@ -34,6 +34,8 @@ const ROOT = "/data/profiles";
 const DIR = `${ROOT}/a/engines/cloakbrowser`;
 const FOX = `${ROOT}/b/engines/camoufox`;
 const AUTH = "/data/run/xvfb/mz-xvfb-x/Xauthority";
+const ROOTS = { profilesRoot: ROOT, xvfbRunDir: "/data/run/xvfb" };
+const ROOTS_WIN = { profilesRoot: String.raw`C:\Users\A\mzs\profiles` };
 
 const browser = (pid: number, dir = DIR): RunEntry => ({
   kind: "browser",
@@ -315,43 +317,53 @@ test("macOS ps: pid, parent, uid, and a line that can't be split", () => {
 // ── proof ────────────────────────────────────────────────────────────────────
 
 test("ownership: the whole argument, exactly, for each kind of process", () => {
-  assert.ok(provesOwnership(browser(1), chrome(1), "linux"));
-  assert.ok(!provesOwnership(browser(1), chrome(1, `${DIR}2`), "linux"), "a longer path");
-  assert.ok(!provesOwnership(browser(1), chrome(1, "/data/profiles/a/engines"), "linux"), "a parent dir");
-  assert.ok(!provesOwnership(browser(1), proc(1, ["node", DIR]), "linux"), "only mentions it");
-  assert.ok(!provesOwnership(browser(1), proc(1, ["vim", `x--user-data-dir=${DIR}`]), "linux"), "inside a word");
-  assert.ok(!provesOwnership(browser(1), camoufox(1, DIR), "linux"), "the other engine's flag");
+  assert.ok(provesOwnership(browser(1), chrome(1), "linux", ROOTS));
+  assert.ok(!provesOwnership(browser(1), chrome(1, `${DIR}2`), "linux", ROOTS), "a longer path");
+  assert.ok(!provesOwnership(browser(1), chrome(1, "/data/profiles/a/engines"), "linux", ROOTS), "a parent dir");
+  assert.ok(!provesOwnership(browser(1), proc(1, ["node", DIR]), "linux", ROOTS), "only mentions it");
+  assert.ok(!provesOwnership(browser(1), proc(1, ["vim", `x--user-data-dir=${DIR}`]), "linux", ROOTS), "inside a word");
+  assert.ok(!provesOwnership(browser(1), camoufox(1, DIR), "linux", ROOTS), "the other engine's flag");
 
-  assert.ok(provesOwnership(firefox(1), camoufox(1), "linux"));
-  assert.ok(!provesOwnership(firefox(1), proc(1, ["x", "-profile"]), "linux"), "no value");
-  assert.ok(!provesOwnership(firefox(1), proc(1, ["x", "-profile", "/other", FOX]), "linux"), "another value");
-  assert.ok(!provesOwnership(firefox(1), chrome(1, FOX), "linux"));
+  assert.ok(provesOwnership(firefox(1), camoufox(1), "linux", ROOTS));
+  assert.ok(!provesOwnership(firefox(1), proc(1, ["x", "-profile"]), "linux", ROOTS), "no value");
+  assert.ok(!provesOwnership(firefox(1), proc(1, ["x", "-profile", "/other", FOX]), "linux", ROOTS), "another value");
+  assert.ok(!provesOwnership(firefox(1), chrome(1, FOX), "linux", ROOTS));
 
-  assert.ok(provesOwnership(xvfb(1), xserver(1), "linux"));
-  assert.ok(provesOwnership(xvfb(1), proc(1, ["/usr/bin/Xvfb", "-auth", AUTH]), "linux"));
-  assert.ok(!provesOwnership(xvfb(1), xserver(1, `${AUTH}2`), "linux"));
-  assert.ok(!provesOwnership(xvfb(1), proc(1, ["sleep", "-auth", AUTH]), "linux"), "not Xvfb");
+  assert.ok(provesOwnership(xvfb(1), xserver(1), "linux", ROOTS));
+  assert.ok(provesOwnership(xvfb(1), proc(1, ["/usr/bin/Xvfb", "-auth", AUTH]), "linux", ROOTS));
+  assert.ok(!provesOwnership(xvfb(1), xserver(1, `${AUTH}2`), "linux", ROOTS));
+  assert.ok(!provesOwnership(xvfb(1), proc(1, ["sleep", "-auth", AUTH]), "linux", ROOTS), "not Xvfb");
 });
 
 test("ownership on Windows: any case, either slash", () => {
   const dir = String.raw`C:\Users\A\mzs\profiles\p\engines\cloakbrowser`;
   const entry = browser(1, dir);
-  assert.ok(provesOwnership(entry, proc(1, ["c.exe", `--user-data-dir=${dir.toUpperCase()}`]), "win32"));
-  assert.ok(provesOwnership(entry, proc(1, ["c.exe", `--user-data-dir=${dir.replaceAll("\\", "/")}`]), "win32"));
-  assert.ok(!provesOwnership(entry, proc(1, ["c.exe", `--user-data-dir=${dir}2`]), "win32"));
-  assert.ok(!provesOwnership(entry, proc(1, ["c.exe", `--user-data-dir=${dir.toUpperCase()}`]), "linux"), "Linux is exact");
-  assert.ok(provesOwnership(firefox(1, dir), proc(1, ["c.exe", "-profile", dir.toLowerCase()]), "win32"));
+  assert.ok(provesOwnership(entry, proc(1, ["c.exe", `--user-data-dir=${dir.toUpperCase()}`]), "win32", ROOTS_WIN));
+  assert.ok(provesOwnership(entry, proc(1, ["c.exe", `--user-data-dir=${dir.replaceAll("\\", "/")}`]), "win32", ROOTS_WIN));
+  assert.ok(!provesOwnership(entry, proc(1, ["c.exe", `--user-data-dir=${dir}2`]), "win32", ROOTS_WIN));
+  assert.ok(!provesOwnership(entry, proc(1, ["c.exe", `--user-data-dir=${dir.toUpperCase()}`]), "linux", ROOTS), "Linux is exact");
+  assert.ok(provesOwnership(firefox(1, dir), proc(1, ["c.exe", "-profile", dir.toLowerCase()]), "win32", ROOTS_WIN));
 });
 
 test("ownership in a line that can't be split: whole words only", () => {
   const line = (text: string): ProcInfo => proc(1, [text]);
-  assert.ok(provesOwnership(browser(1), line(`/x/chrome --type=zygote --user-data-dir=${DIR} --y`), "linux"));
-  assert.ok(provesOwnership(browser(1), line(`/x/chrome --user-data-dir=${DIR}`), "darwin"));
-  assert.ok(!provesOwnership(browser(1), line(`/x/chrome --user-data-dir=${DIR}2 --y`), "linux"));
-  assert.ok(!provesOwnership(browser(1), line(`/x/chrome x--user-data-dir=${DIR} --y`), "linux"));
-  assert.ok(provesOwnership(firefox(1), line(`/x/fox -profile ${FOX} -juggler-pipe`), "darwin"));
-  assert.ok(provesOwnership(xvfb(1), line(`/usr/bin/Xvfb -auth ${AUTH} -noreset`), "darwin"));
-  assert.ok(!provesOwnership(xvfb(1), line(`/usr/bin/other -auth ${AUTH} -noreset`), "darwin"));
+  assert.ok(provesOwnership(browser(1), line(`/x/chrome --type=zygote --user-data-dir=${DIR} --y`), "linux", ROOTS));
+  assert.ok(provesOwnership(browser(1), line(`/x/chrome --user-data-dir=${DIR}`), "darwin", ROOTS));
+  assert.ok(!provesOwnership(browser(1), line(`/x/chrome --user-data-dir=${DIR}2 --y`), "linux", ROOTS));
+  assert.ok(!provesOwnership(browser(1), line(`/x/chrome x--user-data-dir=${DIR} --y`), "linux", ROOTS));
+  assert.ok(provesOwnership(firefox(1), line(`/x/fox -profile ${FOX} -juggler-pipe`), "darwin", ROOTS));
+  assert.ok(provesOwnership(xvfb(1), line(`/usr/bin/Xvfb -auth ${AUTH} -noreset`), "darwin", ROOTS));
+  assert.ok(!provesOwnership(xvfb(1), line(`/usr/bin/other -auth ${AUTH} -noreset`), "darwin", ROOTS));
+});
+
+test("a journal entry naming a path outside this data dir proves nothing", () => {
+  const other = "/home/someone/.config/app/profile";
+  assert.ok(!provesOwnership(browser(1, other), chrome(1, other), "linux", ROOTS));
+  assert.ok(!provesOwnership(firefox(1, other), camoufox(1, other), "linux", ROOTS));
+  assert.ok(!provesOwnership(browser(1, `${ROOT}2/a`), chrome(1, `${ROOT}2/a`), "linux", ROOTS), "a sibling");
+  assert.ok(!provesOwnership(browser(1, ROOT), chrome(1, ROOT), "linux", ROOTS), "the root itself");
+  assert.ok(!provesOwnership(xvfb(1, "/tmp/x"), xserver(1, "/tmp/x"), "linux", ROOTS));
+  assert.ok(!provesOwnership(xvfb(1), xserver(1), "linux", { profilesRoot: ROOT }), "nowhere for an auth file to be");
 });
 
 // ── the reaper ───────────────────────────────────────────────────────────────
@@ -481,7 +493,7 @@ test("one that won't die stays on the journal, and its locks stay too", async (t
   writeFileSync(join(engineDir, "SingletonCookie"), "");
   const entry = browser(50, engineDir);
   writeJournal(paths.stateFile, [entry]);
-  const m = machine([chrome(50, engineDir)], { unkillable: [50] });
+  const m = machine([chrome(50, engineDir)], { unkillable: [50], platform: process.platform });
   const log = logs();
   const result = await reapPreviousRun({
     stateFile: paths.stateFile,
@@ -538,7 +550,7 @@ test("a listing that fails still leaves the recorded ones dealt with, and no swe
   mkdirSync(engineDir, { recursive: true });
   writeFileSync(join(engineDir, "SingletonCookie"), "");
   writeJournal(paths.stateFile, [browser(50, engineDir)]);
-  const m = machine([chrome(50, engineDir)]);
+  const m = machine([chrome(50, engineDir)], { platform: process.platform });
   const result = await reapPreviousRun({
     stateFile: paths.stateFile,
     profilesRoot: paths.profilesRoot,
@@ -668,4 +680,27 @@ test("the real listing finds a real process by its arguments", async (t) => {
     found = await findPidsByDataDir(profile);
   }
   assert.deepEqual(found, [child.pid]);
+});
+
+test("a tampered journal can't have a stranger's browser killed; it is left alone and logged", async (t) => {
+  const stranger = "/home/someone/.config/app/profile";
+  const m = machine([chrome(60, stranger)]);
+  const { result, log } = await reap(t, [browser(60, stranger)], m);
+  assert.deepEqual(result.killed, []);
+  assert.deepEqual(result.notOwned, [60]);
+  assert.deepEqual(m.signals, []);
+  assert.ok(log.lines.some((line) => line.message.includes("not ours")));
+});
+
+test("what a crash left in an upload inbox goes at the next start, and nothing else of a profile", async (t) => {
+  const { stateFile } = dataDir(t);
+  const profilesRoot = join(dirname(stateFile), "profiles");
+  const inbox = join(profilesRoot, "a", "uploads", ".inbox", "uuid");
+  mkdirSync(inbox, { recursive: true });
+  writeFileSync(join(inbox, "secret.pdf"), "left behind");
+  writeFileSync(join(profilesRoot, "a", "uploads", "kept.pdf"), "the agent's");
+  const m = machine([]);
+  await reap(t, [], m, { profilesRoot });
+  assert.equal(existsSync(join(profilesRoot, "a", "uploads", ".inbox")), false);
+  assert.equal(readFileSync(join(profilesRoot, "a", "uploads", "kept.pdf"), "utf8"), "the agent's");
 });

@@ -848,7 +848,8 @@ test("a file goes to the inbox under a safe name, by upload_file's rules, and to
   driver.fileChoosers.set("p", [chooser]);
   assert.deepEqual(
     (await send("GET", `/panel/api/handoffs/${id}/state`, { cookie })).json().fileChoosers,
-    [chooser],
+    [{ ...chooser, origin: "http://site" }],
+    "who asks is the page, until its frame is known",
   );
   const path = `/panel/api/handoffs/${id}/file-chooser`;
   const data = Buffer.from("file body").toString("base64");
@@ -887,6 +888,21 @@ test("a file goes to the inbox under a safe name, by upload_file's rules, and to
     (await send("POST", path, { cookie, body: { chooser_id: "nope", files: [{ file_name: "x", data_base64: data }] } })).status,
     400,
   );
+  handoff.abortById(id);
+});
+
+test("who asks for a file is shown: the frame that did, by origin alone", async () => {
+  const cookie = await login();
+  const { id } = handoff.request("p", "x");
+  driver.fileChoosers.set("p", [
+    { id: "c1", multiple: false, targetId: "T1", openedAt: "now", url: "https://u:p@ads.test:8443/frame?token=1" },
+  ]);
+  const [shown] = (await send("GET", `/panel/api/handoffs/${id}/state`, { cookie })).json().fileChoosers as Array<
+    Record<string, unknown>
+  >;
+  assert.equal(shown!.origin, "https://ads.test:8443");
+  assert.equal("url" in shown!, false);
+  driver.fileChoosers.set("p", []);
   handoff.abortById(id);
 });
 

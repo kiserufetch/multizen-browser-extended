@@ -714,6 +714,7 @@ export const PANEL_JS = String.raw`"use strict";
       "section",
       { class: "ask", role: "dialog", "aria-label": "The page asks for a file" },
       h("h2", { text: chooser.multiple ? "The page asks for files" : "The page asks for a file" }),
+      chooser.origin ? h("div", { class: "ask-origin", text: "Asked by " + chooser.origin }) : null,
       picker,
       note,
       h(

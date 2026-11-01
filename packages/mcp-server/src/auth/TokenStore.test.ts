@@ -21,7 +21,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { HttpTransport } from "../HttpTransport.js";
-import { TOOL_GROUPS } from "./principal.js";
+import { sameSecret, TOOL_GROUPS } from "./principal.js";
 import { TokenStore } from "./TokenStore.js";
 
 const dirs: string[] = [];
@@ -431,4 +431,58 @@ test("expiry mid-session: the token stops working and its stream closes, with no
     assert.ok(closedAt > 0);
     assert.equal(await statusWith(port, token), 401);
   });
+});
+
+function denied(): never {
+  throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+}
+
+test("a file this process can't see fails closed after a few seconds, and opens again when it can", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mz-tokens-denied-"));
+  try {
+    const path = join(dir, "tokens.json");
+    let clock = 1_000_000;
+    let readable = true;
+    const warnings: string[] = [];
+    const ended: string[] = [];
+    const store = new TokenStore(path, {
+      now: () => clock,
+      warn: (message) => warnings.push(message),
+      stat: (p) => (readable ? statSync(p) : denied()),
+    });
+    const { token, record } = store.create({ name: "agent", groups: ["read"] });
+    store.onInvalidated((id) => ended.push(id));
+    assert.ok(store.authenticate(token));
+
+    readable = false;
+    assert.ok(store.authenticate(token), "a moment's lock changes nothing");
+    clock += 4_000;
+    assert.ok(store.authenticate(token), "nor do four seconds");
+    assert.deepEqual(ended, []);
+    clock += 2_000;
+    assert.equal(store.authenticate(token), null);
+    assert.deepEqual(ended, [record.id], "its sessions end with it");
+    assert.equal(warnings.filter((w) => /Refusing every token/.test(w)).length, 1);
+    assert.equal(store.authenticate(token), null);
+
+    readable = true;
+    assert.ok(store.authenticate(token), "readable again, valid again");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sameSecret takes a match and nothing else, whatever the length", () => {
+  assert.equal(sameSecret("token-value", "token-value"), true);
+  assert.equal(sameSecret("token-valuE", "token-value"), false);
+  assert.equal(sameSecret("token", "token-value"), false);
+  assert.equal(sameSecret("", "token-value"), false);
+  assert.equal(sameSecret("тoken", "token"), false);
+});
+
+test("the desktop's panel login compares its token in constant time", () => {
+  const source = readFileSync(new URL("../../../../apps/desktop/src/main/index.ts", import.meta.url), "utf8");
+  assert.match(source, /authenticateToken: \(given\) => \(sameSecret\(given, token\)/);
+  assert.doesNotMatch(source, /given === token/);
 });

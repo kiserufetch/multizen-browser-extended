@@ -161,6 +161,7 @@ export const LOGGED_ARGS: ReadonlyMap<string, readonly string[]> = new Map<strin
   ["upload_file", [...PROFILE, ...SELECTORS, "files"]],
   ["list_downloads", PROFILE],
   ["get_download", ["profile_id", "download_id"]],
+  ["delete_download", ["profile_id", "download_id"]],
   ["set_dialog_policy", [...PROFILE, ...DIALOG_MODE_FIELDS]],
   ["list_dialogs", PROFILE],
   ["handle_dialog", ["profile_id", "action", "dialog_id"]],

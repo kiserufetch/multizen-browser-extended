@@ -82,6 +82,8 @@ export const HUMAN_HANDLERS: ReadonlyMap<string, ExtensionTool["handler"]> = new
       const record = ctx.handoff.request(id, reason, {
         ...(kind ? { kind } : {}),
         requestedBy: ctx.caller.principal.name,
+        // Where a person is told to act on it, an agent can't reword it while they read.
+        ...(ctx.handoffGate ? { keepReason: true } : {}),
       });
       // Surface the window to the operator (best-effort; don't fail the call). A verb, not
       // cdp_send: Camoufox has no CDP.

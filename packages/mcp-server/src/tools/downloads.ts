@@ -71,4 +71,24 @@ export const DOWNLOAD_TOOLS: ExtensionTool[] = [
       return { ...record, data_base64: (await readFile(path)).toString("base64") };
     },
   },
+  {
+    definition: {
+      name: "delete_download",
+      description:
+        "Delete a download by the id list_downloads gave it: stops it if it is under way, removes its file, and gives back what it took of this profile's download quota. Works on a stopped profile too.",
+      inputSchema: {
+        type: "object",
+        required: ["profile_id", "download_id"],
+        properties: { profile_id: { type: "string" }, download_id: { type: "string" } },
+      },
+    },
+    handler: async (args, ctx) => {
+      const { profile_id: id, download_id: downloadId } = GetDownloadSchema.parse(args);
+      assertProfileExists(ctx.profileManager, id);
+      if (!(await ctx.browserDriver.deleteDownload(id, downloadId))) {
+        throw new MultizenError("INVALID_INPUT", `No download ${downloadId} on profile ${id}`);
+      }
+      return { deleted: downloadId };
+    },
+  },
 ];

@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -29,11 +30,12 @@ import {
   assertProfileRunning,
   profileNotFound,
   toToolError,
+  withoutHostPaths,
   type ToolErrorFields,
 } from "./errorMapping.js";
 import type { HumanHandoff } from "./handoff.js";
 import { createSharedMcpState, type SharedMcpState } from "./sharedState.js";
-import { runGated, visibleTools, type EgressGate } from "./toolGate.js";
+import { limitedArgs, runGated, visibleTools, type EgressGate, type ToolLimits } from "./toolGate.js";
 import { EXTENSION_DEFS, EXTENSION_HANDLERS, type ToolContext } from "./tools/index.js";
 
 export type { BrowserDriver };
@@ -73,6 +75,10 @@ export interface MultizenMcpServerOptions {
   handoffGate?: boolean;
   /** Where a download too large to send inline can be fetched from, without a trailing slash. */
   downloadsBaseUrl?: string;
+  /** Off, as on a desktop: nothing is limited. */
+  limits?: ToolLimits;
+  /** What one profile's upload inbox may hold. Off, as on a desktop: no limit. */
+  maxInboxBytes?: number;
 }
 
 export interface MultizenMcpServer {
@@ -189,9 +195,17 @@ const DEVICE_FAMILIES = [
   "linux-desktop-nvidia",
 ] as const;
 
+/**
+ * An address or a plain name, nothing a URL built from it could read otherwise: this host goes
+ * in a proxy URL, and `169.254.169.254:80/#` would make that URL's host the part before the `:`.
+ */
+function isProxyHost(host: string): boolean {
+  return isIP(host.replace(/^\[(.*)\]$/, "$1")) !== 0 || /^[\p{L}\p{M}\p{N}._-]+$/u.test(host);
+}
+
 const ProxySchema = z.object({
   type: z.enum(["http", "socks5"]),
-  host: z.string().min(1),
+  host: z.string().min(1).max(253).refine(isProxyHost, { message: "Not an address or a host name" }),
   port: z.number().int().min(1).max(65535),
   username: z.string().optional(),
   password: z.string().optional(),
@@ -322,7 +336,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const name = req.params.name;
-    const args = req.params.arguments ?? {};
+    const args = limitedArgs(req.params.arguments ?? {}, opts.limits);
     const principal = principalFrom(extra, opts.principal);
     const event = activityLog.startCall(name, args, principal.name);
     const startedAt = Date.now();
@@ -342,6 +356,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
           egress: opts.egress,
           profiles: profileManager,
           handoffGate: opts.handoffGate ?? false,
+          ...(opts.limits ? { limits: opts.limits } : {}),
         },
         (driver) =>
           dispatch(name, args, {
@@ -355,6 +370,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
             maxInlineFileBytes: opts.maxInlineFileBytes,
             handoffGate: opts.handoffGate ?? false,
             downloadsBaseUrl: opts.downloadsBaseUrl,
+            maxInboxBytes: opts.maxInboxBytes,
           }),
       );
       const image = asImageResult(result);
@@ -367,7 +383,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
     } catch (e) {
       const fields = toToolError(e, name);
       activityLog.finish(event, "error", fields.message, startedAt);
-      return err(fields);
+      return err(principal.full ? fields : withoutHostPaths(fields));
     }
   });
 

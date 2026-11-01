@@ -36,7 +36,13 @@ import type {
   Profile,
   ProfileId,
 } from "@multizen/types";
-import { DEFAULT_DIALOG_ANSWERS, MultizenError, PROFILE_DOWNLOADS_DIR } from "@multizen/types";
+import {
+  DEFAULT_DIALOG_ANSWERS,
+  MultizenError,
+  originOf,
+  PROFILE_DOWNLOADS_DIR,
+  withOriginsOnly,
+} from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
 import { displayEnv } from "./displayMode.ts";
 import { sharedDownloadTracker, type DownloadTracker } from "./downloads.ts";
@@ -553,7 +559,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     const profile = this.profileManager.get(profileId);
     if (!profile) throw new MultizenError("PROFILE_NOT_FOUND", `Profile ${profileId} not found`);
     // First of all: the geo probe below connects to this proxy from this process.
-    if (profile.proxy) await this.egress?.assertProxyAllowed(profile.proxy);
+    const upstream = profile.proxy ? await this.egress?.assertProxyAllowed(profile.proxy) : undefined;
     this.profileManager.markOpened(profileId);
 
     const userDataDir = this.browserDataDir(profile);
@@ -563,6 +569,7 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     // strict rejection leaves nothing to clean up.
     const { fingerprint } = await resolveProxyLaunchGeo(profile, profile.fingerprint, {
       setProxyCountry: (id, country) => this.profileManager.setProxyCountry(id, country),
+      ...(upstream ? { upstream } : {}),
     });
 
     // Route a configured proxy through the local SOCKS5 bridge (handles upstream
@@ -1126,13 +1133,21 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
         if (open.targetId === pageId) r.fileChoosers.delete(open.id);
       }
       const id = `c${++r.chooserSeq}`;
-      r.fileChoosers.set(id, {
+      const open: OpenFirefoxChooser = {
         id,
         multiple: chooser.isMultiple(),
         targetId: pageId,
         openedAt: new Date().toISOString(),
         chooser,
-      });
+      };
+      r.fileChoosers.set(id, open);
+      // The person answering has to see who asks: a frame in a page can be anyone.
+      void Promise.resolve()
+        .then(() => chooser.element().ownerFrame())
+        .then((frame) => {
+          if (frame) open.url = frame.url();
+        })
+        .catch(() => {});
     };
     r.chooserListeners.set(page, listener);
     page.on("filechooser", listener);
@@ -1205,8 +1220,13 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
 
   private async saveDownload(profileId: ProfileId, download: Download): Promise<void> {
     const tracker = await this.downloadTracker(profileId);
+    if (this.downloadQuotaBytes !== undefined) tracker.limitTo(this.downloadQuotaBytes);
     const guid = randomUUID();
-    tracker.began({ guid, url: download.url(), suggestedFilename: download.suggestedFilename() });
+    if (!tracker.began({ guid, url: download.url(), suggestedFilename: download.suggestedFilename() })) {
+      await download.cancel().catch(() => {});
+      await download.delete().catch(() => {});
+      return;
+    }
     const path = join(tracker.dir, guid);
     const stopWatching = this.watchQuota(tracker, guid, download);
     try {
@@ -1227,7 +1247,6 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   /** Playwright says nothing until a download ends, so its working directory is what tells. */
   private watchQuota(tracker: DownloadTracker, guid: string, download: Download): () => void {
     if (this.downloadQuotaBytes === undefined) return () => {};
-    tracker.quotaBytes = this.downloadQuotaBytes;
     tracker.stopDownload = (id) => {
       void this.activeDownloads.get(id)?.cancel().catch(() => {});
     };
@@ -1255,6 +1274,10 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
 
   async getDownload(profileId: ProfileId, downloadId: string): Promise<DownloadFile | null> {
     return (await this.downloadTracker(profileId)).get(downloadId);
+  }
+
+  async deleteDownload(profileId: ProfileId, downloadId: string): Promise<boolean> {
+    return (await this.downloadTracker(profileId)).delete(downloadId);
   }
 
   // ── Elements ────────────────────────────────────────────────────────────────
@@ -1924,12 +1947,16 @@ function lastLogLine(e: unknown): string {
 
 /** A load that fails. A URL that serves a file ends this way too, having started a download. */
 function navigationError(url: string, e: unknown): unknown {
+  // The message gets logged, and a URL can carry a password or a token. Playwright quotes it too.
+  const origin = originOf(url);
   if ((e as Error | undefined)?.name === "TimeoutError") {
-    return new MultizenError("TIMEOUT", `Navigation to ${url} timed out: ${briefly(e)}`);
+    return new MultizenError("TIMEOUT", `Navigation to ${origin} timed out: ${withOriginsOnly(briefly(e))}`, {
+      details: { url },
+    });
   }
   const text = briefly(e);
-  return new MultizenError("NAVIGATION_FAILED", `Navigation to ${url} failed: ${text}`, {
-    details: { error_text: text },
+  return new MultizenError("NAVIGATION_FAILED", `Navigation to ${origin} failed: ${withOriginsOnly(text)}`, {
+    details: { url, error_text: text },
     ...(/Download is starting/.test(text)
       ? { hint: "If this URL serves a file, list_downloads shows it." }
       : {}),

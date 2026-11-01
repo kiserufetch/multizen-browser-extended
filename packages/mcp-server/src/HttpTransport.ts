@@ -90,9 +90,21 @@ export interface HttpTransportOptions {
     idleTtlMs?: number;
     /** Past this, a new session gets SESSION_LIMIT. */
     maxSessions?: number;
+    /**
+     * One token's share. Past it, its own oldest idle session is closed for the new one, so one
+     * client leaking sessions costs nobody else. With none idle, the new one gets SESSION_LIMIT.
+     */
+    maxSessionsPerPrincipal?: number;
   };
   /** POST bodies above this get 413 FILE_TOO_LARGE. Default {@link DEFAULT_MAX_REQUEST_BYTES}. */
   maxRequestBytes?: number;
+  /**
+   * What all POST bodies still being read or handled may add up to. Past it a request gets 503
+   * RATE_LIMITED: the per-request limit alone lets a few clients hold the whole heap. Off unless given.
+   */
+  maxBodyBytesInFlight?: number;
+  /** Sockets beyond this are dropped by the OS-level accept. Off unless given. */
+  maxConnections?: number;
   /** /healthz answers only `{ok:true}`, to anyone. Default: as any other route, behind auth. */
   publicHealthz?: boolean;
   /** Tried before authentication, for a request with an allowed Host. */
@@ -207,6 +219,8 @@ export class HttpTransport {
   private readonly streamableSessions = new Map<string, StreamableSession>();
   /** Initializing, so not in the map yet: a burst must not pass the limit between the two. */
   private openingSessions = 0;
+  private readonly openingByPrincipal = new Map<string, number>();
+  private bodyBytesInFlight = 0;
   private sweep: ReturnType<typeof setInterval> | undefined;
   private stopping = false;
 
@@ -245,6 +259,7 @@ export class HttpTransport {
     this.server = opts.tls
       ? createHttpsServer({ cert: opts.tls.cert, key: opts.tls.key }, listener)
       : createHttpServer(listener);
+    if (opts.maxConnections !== undefined) this.server.maxConnections = opts.maxConnections;
   }
 
   async start(): Promise<void> {
@@ -331,8 +346,31 @@ export class HttpTransport {
     }
   }
 
-  /** True when it answered: a new session would go past `sessionPolicy.maxSessions`. */
-  private refusedBySessionLimit(res: ServerResponse): boolean {
+  /** True if this principal can have one more: closes its oldest idle sessions when it has to. */
+  private madeRoomFor(principalId: string, cap: number): boolean {
+    const own = [...this.sseSessions.values(), ...this.streamableSessions.values()].filter(
+      (session) => session.principalId === principalId,
+    );
+    const excess = own.length + (this.openingByPrincipal.get(principalId) ?? 0) + 1 - cap;
+    if (excess <= 0) return true;
+    const idle = own
+      .filter((session) => session.inFlight.size === 0)
+      .sort((a, b) => a.lastActivityAt - b.lastActivityAt);
+    if (idle.length < excess) return false;
+    for (const session of idle.slice(0, excess)) void session.transport.close().catch(() => {});
+    return true;
+  }
+
+  /** True when it answered: a new session would go past `sessionPolicy`'s limits. */
+  private refusedBySessionLimit(res: ServerResponse, principalId: string): boolean {
+    const perPrincipal = this.opts.sessionPolicy?.maxSessionsPerPrincipal;
+    if (perPrincipal !== undefined && !this.madeRoomFor(principalId, perPrincipal)) {
+      jsonRpcError(res, 503, -32000, `SESSION_LIMIT: this token has ${perPrincipal} sessions, all busy.`, {
+        code: "SESSION_LIMIT",
+        retryable: true,
+      });
+      return true;
+    }
     const max = this.opts.sessionPolicy?.maxSessions;
     const open = this.sseSessions.size + this.streamableSessions.size + this.openingSessions;
     if (max === undefined || open < max) return false;
@@ -544,11 +582,19 @@ export class HttpTransport {
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<{ body: unknown } | undefined> {
+    const account = this.bodyAccount(res);
     let raw: Buffer;
     try {
-      raw = await readRequestBody(req, this.maxRequestBytes);
+      raw = await readRequestBody(req, this.maxRequestBytes, account);
     } catch (e) {
-      if (e instanceof RequestTooLargeError) {
+      if (e instanceof BodyBudgetError) {
+        res.setHeader("retry-after", String(BODY_BUDGET_RETRY_AFTER_S));
+        jsonRpcError(res, 503, -32000, `RATE_LIMITED: ${e.message}`, {
+          code: "RATE_LIMITED",
+          retryable: true,
+          details: { retry_after_ms: BODY_BUDGET_RETRY_AFTER_S * 1000 },
+        });
+      } else if (e instanceof RequestTooLargeError) {
         jsonRpcError(res, 413, -32000, `FILE_TOO_LARGE: ${e.message}`, {
           code: "FILE_TOO_LARGE",
           retryable: false,
@@ -565,6 +611,28 @@ export class HttpTransport {
       jsonRpcError(res, 400, -32700, `Parse error: ${(e as Error).message}`);
       return undefined;
     }
+  }
+
+  /**
+   * Charges a body to the budget as it arrives, the size it declares up front. It stays charged
+   * until its response ends, as its parsed form lives as long as the call does.
+   */
+  private bodyAccount(res: ServerResponse): ((bytes: number) => void) | undefined {
+    const budget = this.opts.maxBodyBytesInFlight;
+    if (budget === undefined) return undefined;
+    let charged = 0;
+    res.once("close", () => {
+      this.bodyBytesInFlight -= charged;
+      charged = 0;
+    });
+    return (bytes) => {
+      if (bytes <= charged) return;
+      if (this.bodyBytesInFlight + bytes - charged > budget) {
+        throw new BodyBudgetError(`Requests in flight hold this server's ${budget} bytes for bodies.`);
+      }
+      this.bodyBytesInFlight += bytes - charged;
+      charged = bytes;
+    };
   }
 
   /**
@@ -623,7 +691,7 @@ export class HttpTransport {
       jsonRpcError(res, 400, -32000, "Bad Request: no valid session ID provided");
       return;
     }
-    if (this.refusedBySessionLimit(res)) return;
+    if (this.refusedBySessionLimit(res, principal.id)) return;
 
     const server = this.opts.createServer();
     const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
@@ -655,6 +723,7 @@ export class HttpTransport {
     };
 
     this.openingSessions += 1;
+    this.openingByPrincipal.set(principal.id, (this.openingByPrincipal.get(principal.id) ?? 0) + 1);
     try {
       await server.connect(transport);
       trackActivity(transport, session);
@@ -667,12 +736,15 @@ export class HttpTransport {
       process.stderr.write(`[mcp-http] streamable init failed: ${String(e)}\n`);
     } finally {
       this.openingSessions -= 1;
+      const opening = (this.openingByPrincipal.get(principal.id) ?? 1) - 1;
+      if (opening > 0) this.openingByPrincipal.set(principal.id, opening);
+      else this.openingByPrincipal.delete(principal.id);
     }
   }
 
   // ── Legacy HTTP+SSE ──────────────────────────────────────────────────────
   private async handleSseConnect(res: ServerResponse, principal: Principal): Promise<void> {
-    if (this.refusedBySessionLimit(res)) return;
+    if (this.refusedBySessionLimit(res, principal.id)) return;
 
     const server = this.opts.createServer();
     const transport = new SSEServerTransport("/messages", res);
@@ -786,19 +858,35 @@ function jsonRpcError(
 }
 
 export class RequestTooLargeError extends Error {}
+class BodyBudgetError extends Error {}
+
+const BODY_BUDGET_RETRY_AFTER_S = 1;
 
 /**
  * The whole body, up to a limit. Past it the rest is still read and thrown away rather
  * than the socket being cut: a client still sending would otherwise lose the answer to
- * a reset. Node's own request timeout bounds a client that never stops.
+ * a reset. Node's own request timeout bounds a client that never stops. `account` hears of
+ * the size so far, the declared size first, and throws to refuse the request the same way.
  */
-export function readRequestBody(req: IncomingMessage, limitBytes: number): Promise<Buffer> {
+export function readRequestBody(
+  req: IncomingMessage,
+  limitBytes: number,
+  account?: (bytes: number) => void,
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const tooLarge = (): RequestTooLargeError =>
       new RequestTooLargeError(`The request is over the ${limitBytes} byte limit.`);
-    if (Number(req.headers["content-length"]) > limitBytes) {
+    const declared = Number(req.headers["content-length"]);
+    if (declared > limitBytes) {
       req.resume();
       reject(tooLarge());
+      return;
+    }
+    try {
+      if (declared > 0) account?.(declared);
+    } catch (e) {
+      req.resume();
+      reject(e as Error);
       return;
     }
     let chunks: Buffer[] | null = [];
@@ -809,6 +897,13 @@ export function readRequestBody(req: IncomingMessage, limitBytes: number): Promi
       if (size > limitBytes) {
         chunks = null;
         reject(tooLarge());
+        return;
+      }
+      try {
+        account?.(size);
+      } catch (e) {
+        chunks = null;
+        reject(e as Error);
         return;
       }
       chunks.push(chunk);

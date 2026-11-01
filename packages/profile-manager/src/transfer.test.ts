@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createCipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserEngine, CreateProfileInput, ExtensionConfig } from "@multizen/types";
@@ -205,5 +206,84 @@ test("a wrong passphrase rejects and inserts nothing", async () => {
       /Wrong passphrase/,
     );
     assert.equal(to.pm.list().length, 0);
+  });
+});
+
+/** An archive as export writes one, but with whatever files its maker wants in it. */
+async function craftArchive(
+  path: string,
+  profile: Record<string, unknown>,
+  files: Array<{ path: string; content: string }>,
+): Promise<void> {
+  const manifest = {
+    magic: "MZAR",
+    version: 2,
+    profile,
+    files: files.map((f) => ({
+      path: f.path,
+      size: Buffer.byteLength(f.content),
+      sha256: createHash("sha256").update(f.content).digest("hex"),
+    })),
+  };
+  const json = Buffer.from(JSON.stringify(manifest));
+  const parts: Buffer[] = [uint32(json.length), json];
+  for (const file of files) {
+    const content = Buffer.from(file.content);
+    parts.push(uint32(content.length), content);
+  }
+  const salt = randomBytes(16);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", scryptSync("pw", salt, 32), iv);
+  const ciphertext = Buffer.concat([cipher.update(Buffer.concat(parts)), cipher.final()]);
+  const header = Buffer.alloc(6);
+  header.write("MZAR", 0, 4, "ascii");
+  header.writeUInt16BE(2, 4);
+  writeFileSync(path, Buffer.concat([header, salt, iv, ciphertext, cipher.getAuthTag()]));
+}
+
+function uint32(value: number): Buffer {
+  const buffer = Buffer.alloc(4);
+  buffer.writeUInt32BE(value, 0);
+  return buffer;
+}
+
+test("an archive made by hand can't plant a download index or an upload", async () => {
+  await withSides(async (from, to, dir) => {
+    const template = from.pm.get(create(from).id)!;
+    const archive = join(dir, "hostile.mzar");
+    const index = JSON.stringify([
+      {
+        id: "d1",
+        guid: "g",
+        storedAs: "../../../owner-token",
+        fileName: "x",
+        url: "http://t/",
+        state: "completed",
+        bytesReceived: 1,
+        bytesTotal: 1,
+        startedAt: "2026-11-01T00:00:00.000Z",
+      },
+    ]);
+    await craftArchive(archive, { ...template }, [
+      { path: "downloads/.multizen-downloads.json", content: index },
+      { path: "Downloads/.multizen-downloads.json", content: index },
+      { path: "downloads./x", content: "x" },
+      { path: "downloads::$DATA/x", content: "x" },
+      { path: "./downloads/y", content: "y" },
+      { path: "a/../downloads/z", content: "z" },
+      { path: "downloads\\w", content: "w" },
+      { path: "uploads/.inbox/planted", content: "p" },
+      { path: "engines/cloakbrowser/Cookies", content: "kept" },
+      { path: "engines/cloakbrowser/downloads/state", content: "kept too" },
+    ]);
+    const { id } = await importProfileFromArchive(to.pm, archive, "pw", {
+      profilesRoot: to.profilesRoot,
+      extensionStoreRoot: to.extensionStoreRoot,
+      defaultEngine: "cloakbrowser",
+    });
+    const restored = to.pm.get(id)!.dataDir;
+    assert.deepEqual(readdirSync(restored), ["engines"]);
+    assert.equal(readFileSync(join(restored, "engines", "cloakbrowser", "Cookies"), "utf8"), "kept");
+    assert.equal(readFileSync(join(restored, "engines", "cloakbrowser", "downloads", "state"), "utf8"), "kept too");
   });
 });

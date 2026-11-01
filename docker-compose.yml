@@ -2,10 +2,11 @@
 # browser engine into the volume; `docker compose logs -f` shows its progress.
 #
 #   docker compose up -d
-#   docker compose exec multizen cat /data/owner-token
+#   docker compose exec multizen node /app/dist/cli.js token create --name agent
 #
-# Then connect an MCP client to http://127.0.0.1:7777/mcp with that token as a Bearer token.
-# MULTIZEN_HOST_PORT publishes on another host port.
+# Connect an MCP client to http://127.0.0.1:7777/mcp with the printed token as a Bearer token. The
+# /data/owner-token that the first start wrote can do everything, raw CDP and the panel included:
+# it is for you, not for an agent. MULTIZEN_HOST_PORT publishes on another host port.
 services:
   multizen:
     build:
@@ -18,6 +19,8 @@ services:
     # Above the server's own shutdown watchdog.
     stop_grace_period: 30s
     shm_size: 1gb
+    # Threads count. A browser takes a few hundred, and something gone wrong in one shouldn't take the host.
+    pids_limit: 4096
     logging:
       driver: json-file
       options:

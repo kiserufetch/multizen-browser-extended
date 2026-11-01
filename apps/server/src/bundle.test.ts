@@ -141,3 +141,11 @@ test("the built CLI starts: help, no command, an unknown command", () => {
   assert.equal(bad.status, 2, bad.stderr);
   assert.match(bad.stdout, /Unknown command/);
 });
+
+test("the start sizes libuv's pool before anything can use it, and the image does too", () => {
+  const bin = readFileSync(join(APP_ROOT, "bin", "multizen-server.js"), "utf8");
+  const set = bin.indexOf("UV_THREADPOOL_SIZE");
+  assert.ok(set !== -1 && set < bin.indexOf("import("), "set ahead of loading the server");
+  const image = readFileSync(join(APP_ROOT, "..", "..", "docker", "Dockerfile"), "utf8");
+  assert.match(image, /^ENV UV_THREADPOOL_SIZE=64$/m);
+});

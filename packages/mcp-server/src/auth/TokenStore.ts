@@ -24,6 +24,8 @@ const LOCK_STALE_MS = 10_000;
 const RETRY_DELAY_MS = 25;
 /** What Windows reports while something else has the file open for a moment. */
 const TRANSIENT_FS_ERRORS: ReadonlySet<string> = new Set(["EBUSY", "EPERM", "EACCES"]);
+/** A moment's lock ends well before this. After it, a revocation could be going unseen. */
+const UNREADABLE_FAIL_CLOSED_MS = 5_000;
 
 export interface TokenRecord {
   id: string;
@@ -52,6 +54,8 @@ export type TokenSummary = Omit<TokenRecord, "hash"> & { panel: boolean; status:
 export interface TokenStoreOptions {
   warn?: (message: string) => void;
   now?: () => number;
+  /** Tests stand in here for a file the OS won't let this process see. */
+  stat?: (path: string) => { ino: number; size: number; mtimeMs: number };
 }
 
 function errorCode(e: unknown): string | undefined {
@@ -113,6 +117,7 @@ export class TokenStore {
   private readonly path: string;
   private readonly warn: (message: string) => void;
   private readonly now: () => number;
+  private readonly stat: NonNullable<TokenStoreOptions["stat"]>;
   private readonly listeners = new Set<(principalId: string) => void>();
   private records: TokenRecord[] = [];
   /** What the loaded records came from. Null: nothing usable yet, read again. */
@@ -120,11 +125,13 @@ export class TokenStore {
   private live = new Set<string>();
   private poll: ReturnType<typeof setInterval> | undefined;
   private warnedAboutMode = false;
+  private unreadableSince: number | null = null;
 
   constructor(path: string, opts: TokenStoreOptions = {}) {
     this.path = path;
     this.warn = opts.warn ?? ((message) => process.stderr.write(`[multizen] ${message}\n`));
     this.now = opts.now ?? Date.now;
+    this.stat = opts.stat ?? statSync;
     this.refresh();
   }
 
@@ -245,10 +252,13 @@ export class TokenStore {
   private refresh(): void {
     let signature: string;
     try {
-      const stat = statSync(this.path);
+      const stat = this.stat(this.path);
       signature = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
     } catch (e) {
-      if (errorCode(e) !== "ENOENT") return;
+      if (errorCode(e) !== "ENOENT") {
+        this.onUnreadable(e);
+        return;
+      }
       signature = "absent";
     }
     if (signature !== this.signature) {
@@ -258,12 +268,27 @@ export class TokenStore {
       } catch (e) {
         // Writes are atomic, so this is a moment's lock or a hand edit gone wrong. Only
         // the second must fail closed: an unreadable file may hold a revocation.
-        if (TRANSIENT_FS_ERRORS.has(errorCode(e) ?? "")) return;
+        if (TRANSIENT_FS_ERRORS.has(errorCode(e) ?? "")) {
+          this.onUnreadable(e);
+          return;
+        }
         this.warn(`Refusing every token: ${(e as Error).message}`);
         this.records = [];
         this.signature = null;
       }
     }
+    this.unreadableSince = null;
+    this.notifyInvalidated();
+  }
+
+  /** A file this process can't see can't say what was revoked: past a moment, nothing is valid. */
+  private onUnreadable(e: unknown): void {
+    this.unreadableSince ??= this.now();
+    if (this.now() - this.unreadableSince < UNREADABLE_FAIL_CLOSED_MS) return;
+    if (this.signature === null && this.records.length === 0) return;
+    this.warn(`Refusing every token: ${this.path} stays unreadable: ${(e as Error).message}`);
+    this.records = [];
+    this.signature = null;
     this.notifyInvalidated();
   }
 

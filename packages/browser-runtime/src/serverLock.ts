@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   linkSync,
   mkdirSync,
@@ -26,8 +27,11 @@ export interface ServerLockRecord {
   pid: number;
   /** Platform-native process start time. Opaque, only compared for equality. */
   startTime: string;
-  /** The holder's command line as the OS reports it; null if it was unreadable. */
-  cmdline: string | null;
+  /**
+   * SHA-256 of the holder's command line as the OS reports it; null if it was unreadable.
+   * A hash, since that line can hold a secret (--handoff-webhook-secret) and this file outlives it.
+   */
+  cmdlineSha256: string | null;
   mode: ServerLockMode;
   /** `serve` only: where a `stdio --connect` proxy can reach the holder. */
   url?: string;
@@ -68,6 +72,10 @@ export interface ServerLock {
   readonly record: ServerLockRecord;
   /** Removes the file if it is still ours. Safe to call repeatedly. */
   release(): void;
+}
+
+function hashOfCmdline(cmdline: string): string {
+  return createHash("sha256").update(cmdline).digest("hex");
 }
 
 function parseLinuxIdentity(stat: string, cmdline: Buffer): ProcessIdentity | null {
@@ -172,7 +180,11 @@ function parseRecord(raw: string): ServerLockRecord | null {
  * counts as held: refusing is recoverable, two servers on one dir are not.
  */
 export async function holderIsAlive(
-  record: Pick<ServerLockRecord, "hostname" | "pid" | "startTime" | "cmdline">,
+  record: Pick<ServerLockRecord, "hostname" | "pid" | "startTime"> & {
+    cmdlineSha256?: string | null;
+    /** A desktop's lock has it in the clear, having no secret on its command line. */
+    cmdline?: string | null;
+  },
   deps: ServerLockDeps,
 ): Promise<boolean> {
   if (record.hostname !== deps.hostname()) return false;
@@ -184,7 +196,9 @@ export async function holderIsAlive(
     return true;
   }
   if (!identity || identity.startTime !== record.startTime) return false;
-  return identity.cmdline === null || record.cmdline === null || identity.cmdline === record.cmdline;
+  if (identity.cmdline === null) return true;
+  if (record.cmdlineSha256) return hashOfCmdline(identity.cmdline) === record.cmdlineSha256;
+  return record.cmdline === null || record.cmdline === undefined || identity.cmdline === record.cmdline;
 }
 
 /**
@@ -212,7 +226,7 @@ export async function liveServerLockHolder(
 /** Atomically creates the lock, whole: a reader never sees a half-written file. */
 function tryCreate(path: string, content: string, pid: number): boolean {
   const staged = `${path}.${pid}.new`;
-  writeFileSync(staged, content);
+  writeFileSync(staged, content, { mode: 0o600 });
   try {
     linkSync(staged, path);
     return true;
@@ -221,7 +235,7 @@ function tryCreate(path: string, content: string, pid: number): boolean {
     if (code === "EEXIST") return false;
     // A filesystem without hard links: exclusive create still excludes others.
     try {
-      writeFileSync(path, content, { flag: "wx" });
+      writeFileSync(path, content, { flag: "wx", mode: 0o600 });
       return true;
     } catch (e2) {
       if ((e2 as NodeJS.ErrnoException).code === "EEXIST") return false;
@@ -282,7 +296,7 @@ export async function acquireServerLock(
     hostname: deps.hostname(),
     pid: deps.pid,
     startTime: own.startTime,
-    cmdline: own.cmdline,
+    cmdlineSha256: own.cmdline === null ? null : hashOfCmdline(own.cmdline),
     mode: opts.mode,
     url: opts.url,
     tokenFile: opts.tokenFile,

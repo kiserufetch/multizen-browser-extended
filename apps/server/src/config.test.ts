@@ -629,3 +629,20 @@ test("a webhook must be http(s), and a secret needs a webhook", () => {
   assert.throws(() => parseServeConfig(["--handoff-ttl-ms", "0"], {}, LINUX), UsageError);
   assert.throws(() => parseServeConfig(["--download-quota-bytes", "x"], {}, LINUX), UsageError);
 });
+
+test("per-token sessions and the upload inbox have defaults, flags and variables", () => {
+  const base = parseServeConfig([], {}, LINUX);
+  assert.equal(base.maxSessionsPerToken, 32);
+  assert.equal(base.uploadInboxQuotaBytes, 1024 ** 3);
+  const flags = parseServeConfig(["--max-sessions-per-token", "5", "--upload-inbox-quota-bytes", "1000"], {}, LINUX);
+  assert.equal(flags.maxSessionsPerToken, 5);
+  assert.equal(flags.uploadInboxQuotaBytes, 1000);
+  const env = parseServeConfig(
+    [],
+    { MULTIZEN_MAX_SESSIONS_PER_TOKEN: "6", MULTIZEN_UPLOAD_INBOX_QUOTA_BYTES: "2000" },
+    LINUX,
+  );
+  assert.equal(env.maxSessionsPerToken, 6);
+  assert.equal(env.uploadInboxQuotaBytes, 2000);
+  assert.throws(() => parseServeConfig(["--max-sessions-per-token", "0"], {}, LINUX), UsageError);
+});

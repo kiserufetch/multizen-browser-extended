@@ -595,9 +595,12 @@ test("navigate: a failed load is NAVIGATION_FAILED, in its own words", async (t)
   assert.equal((failed as MultizenError).code, "NAVIGATION_FAILED");
   assert.equal(
     (failed as MultizenError).message,
-    "Navigation to http://127.0.0.1:1/ failed: NS_ERROR_CONNECTION_REFUSED",
+    "Navigation to http://127.0.0.1:1 failed: NS_ERROR_CONNECTION_REFUSED",
   );
-  assert.deepEqual((failed as MultizenError).details, { error_text: "NS_ERROR_CONNECTION_REFUSED" });
+  assert.deepEqual((failed as MultizenError).details, {
+    url: "http://127.0.0.1:1/",
+    error_text: "NS_ERROR_CONNECTION_REFUSED",
+  });
 });
 
 test("the egress prefs are the nine of the plan, and win over a caller's", () => {
@@ -1735,4 +1738,24 @@ test("keys after a click make sure the element has focus: a frame may only have 
   page.calls.length = 0;
   await driver.performAction(ID, { type: "press_key", key: "Enter", target: { ref: "p1.e1" } });
   assert.deepEqual(page.calls.slice(0, 2), ["click aria-ref=e1", "focus aria-ref=e1"]);
+});
+
+test("navigate: no message carries a URL's password, path or query, however the engine quotes it", async (t) => {
+  const { driver, page } = rig(t);
+  const secretUrl = "http://user:hunter2@x.test:81/path?token=abc123";
+  page.gotoImpl = () =>
+    Promise.reject(new Error(`page.goto: Navigation to "${secretUrl}" is interrupted by another navigation to "${secretUrl}&more=1"`));
+  const failed = (await driver.navigate(ID, secretUrl).catch((e: MultizenError) => e)) as MultizenError;
+  assert.equal(failed.code, "NAVIGATION_FAILED");
+  assert.doesNotMatch(failed.message, /hunter2|abc123|path|user/);
+  assert.match(failed.message, /http:\/\/x\.test:81/);
+  assert.equal(failed.details?.url, secretUrl);
+
+  const late = new Error(`page.goto: Timeout 30000ms exceeded navigating to "${secretUrl}"`);
+  late.name = "TimeoutError";
+  page.gotoImpl = () => Promise.reject(late);
+  const timedOut = (await driver.navigate(ID, secretUrl).catch((e: MultizenError) => e)) as MultizenError;
+  assert.equal(timedOut.code, "TIMEOUT");
+  assert.doesNotMatch(timedOut.message, /hunter2|abc123|path|user/);
+  assert.equal(timedOut.details?.url, secretUrl);
 });

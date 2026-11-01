@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, posix, win32 } from "node:path";
 import { promisify } from "node:util";
-import type { BrowserEngine, ProfileId } from "@multizen/types";
+import { PROFILE_UPLOADS_DIR, UPLOAD_INBOX_DIR, type BrowserEngine, type ProfileId } from "@multizen/types";
 import { killProcessTree, type ProcessTreeDeps } from "./processTree.ts";
 
 const execFileP = promisify(execFile);
@@ -413,14 +413,33 @@ function runsProgram(proc: ProcInfo, name: string, platform: NodeJS.Platform): b
   return lib.basename(program) === name;
 }
 
+/** What a recorded path has to lie inside, for the journal to be believed at all. */
+export interface OwnedRoots {
+  profilesRoot: string;
+  xvfbRunDir?: string;
+}
+
 /**
  * Proof that a process is the one this entry recorded: its own arguments name the directory
  * or auth file, whole. A PID is no proof: a restarted container hands the same low numbers out.
+ * Nor is the journal, which is a file: an entry naming a path outside this data dir proves nothing,
+ * or anyone able to write it could have any browser on the machine killed.
  */
-export function provesOwnership(entry: RunEntry, proc: ProcInfo, platform: NodeJS.Platform): boolean {
+export function provesOwnership(
+  entry: RunEntry,
+  proc: ProcInfo,
+  platform: NodeJS.Platform,
+  roots: OwnedRoots,
+): boolean {
   if (entry.kind === "xvfb") {
-    return runsProgram(proc, "Xvfb", platform) && hasFlagPair(proc, "-auth", entry.authFile, platform);
+    return (
+      roots.xvfbRunDir !== undefined &&
+      isInside(entry.authFile, roots.xvfbRunDir, platform) &&
+      runsProgram(proc, "Xvfb", platform) &&
+      hasFlagPair(proc, "-auth", entry.authFile, platform)
+    );
   }
+  if (!isInside(entry.userDataDir, roots.profilesRoot, platform)) return false;
   return entry.engine === "camoufox"
     ? hasFlagPair(proc, "-profile", entry.userDataDir, platform)
     : hasEqualsFlag(proc, "--user-data-dir", entry.userDataDir, platform);
@@ -531,6 +550,10 @@ export async function reapPreviousRun(opts: ReapPreviousRunOptions): Promise<Rea
   const selfPid = opts.selfPid ?? process.pid;
   const exitWaitMs = opts.exitWaitMs ?? EXIT_WAIT_MS;
   const pollMs = opts.pollMs ?? EXIT_POLL_MS;
+  const roots: OwnedRoots = {
+    profilesRoot: opts.profilesRoot,
+    ...(opts.xvfbRunDir !== undefined ? { xvfbRunDir: opts.xvfbRunDir } : {}),
+  };
   const kill = opts.treeDeps?.kill ?? ((pid: number, signal?: NodeJS.Signals | number) => process.kill(pid, signal));
 
   const { state, problem } = readRunState(opts.stateFile);
@@ -565,7 +588,7 @@ export async function reapPreviousRun(opts: ReapPreviousRunOptions): Promise<Rea
         result.gone.push(entry.pid);
         continue;
       }
-      if (entry.pid === selfPid || !sameUser(proc, reader) || !provesOwnership(entry, proc, platform)) {
+      if (entry.pid === selfPid || !sameUser(proc, reader) || !provesOwnership(entry, proc, platform, roots)) {
         result.notOwned.push(entry.pid);
         log.warn("a recorded PID is not ours any more, left alone", {
           pid: entry.pid,
@@ -574,7 +597,7 @@ export async function reapPreviousRun(opts: ReapPreviousRunOptions): Promise<Rea
         });
         continue;
       }
-      targets.set(entry.pid, (p) => provesOwnership(entry, p, platform));
+      targets.set(entry.pid, (p) => provesOwnership(entry, p, platform, roots));
       result.killed.push(entry.pid);
     }
   }
@@ -646,6 +669,7 @@ export async function reapPreviousRun(opts: ReapPreviousRunOptions): Promise<Rea
     const cleaned = await clearProfileLocks(opts.profilesRoot, log);
     if (cleaned > 0) log.info("stale profile locks removed", { files: cleaned });
     if (opts.xvfbRunDir) clearDirectory(opts.xvfbRunDir, log);
+    clearUploadInboxes(opts.profilesRoot, log);
   }
   clearStagedJournals(opts.stateFile);
 
@@ -700,6 +724,17 @@ async function clearProfileLocks(profilesRoot: string, log: ReapLog): Promise<nu
     }
   }
   return removed;
+}
+
+/** A crash skips the clearing a close does, and what an inbox holds lasts as long as a browser. */
+function clearUploadInboxes(profilesRoot: string, log: ReapLog): void {
+  for (const profile of subdirectories(profilesRoot)) {
+    try {
+      rmSync(join(profile, PROFILE_UPLOADS_DIR, UPLOAD_INBOX_DIR), { recursive: true, force: true });
+    } catch (e) {
+      log.warn("could not clear an upload inbox", { profile, error: (e as Error).message });
+    }
+  }
 }
 
 function clearDirectory(dir: string, log: ReapLog): void {

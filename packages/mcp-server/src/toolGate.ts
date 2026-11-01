@@ -65,7 +65,24 @@ export interface EgressGate {
   readonly enforced: boolean;
   /** `proxied`: this profile's names resolve at its proxy, and must not be looked up here. */
   assertUrlAllowed(url: string, ctx: { proxied: boolean }): Promise<void>;
-  assertProxyAllowed(proxy: { host: string; port: number }): Promise<void>;
+  assertProxyAllowed(proxy: { host: string; port: number }): Promise<unknown>;
+}
+
+/** What a server holds tool calls to. A desktop has always taken whatever it was given. */
+export interface ToolLimits {
+  /** Longer than this, a URL is refused. */
+  maxUrlChars: number;
+  /** A wait asking for longer gets this: a call in flight keeps its session from ever idling out. */
+  maxWaitMs: number;
+}
+
+/** Before a call's arguments reach anything, the log included. */
+export function limitedArgs(
+  args: Record<string, unknown>,
+  limits: ToolLimits | undefined,
+): Record<string, unknown> {
+  if (!limits || typeof args.timeout_ms !== "number" || args.timeout_ms <= limits.maxWaitMs) return args;
+  return { ...args, timeout_ms: limits.maxWaitMs };
 }
 
 export interface GateContext {
@@ -81,6 +98,7 @@ export interface GateContext {
   profiles?: Pick<ProfileManager, "get">;
   /** A pending handoff stops agents: see `handoffGate` in MultizenMcpServerOptions. */
   handoffGate?: boolean;
+  limits?: ToolLimits;
 }
 
 export function leaseHolder(principal: Principal, sessionId: string): LeaseHolder {
@@ -138,8 +156,14 @@ async function assertEgressAllowed(
   args: Record<string, unknown>,
   ctx: GateContext,
 ): Promise<void> {
-  if (!ctx.egress?.enforced) return;
   const url = policy.urlArg ? args[policy.urlArg] : undefined;
+  if (ctx.limits && typeof url === "string" && url.length > ctx.limits.maxUrlChars) {
+    throw new MultizenError(
+      "INVALID_INPUT",
+      `A URL of ${url.length} characters is over this server's limit of ${ctx.limits.maxUrlChars}.`,
+    );
+  }
+  if (!ctx.egress?.enforced) return;
   if (typeof url === "string") {
     const proxied = Boolean(ctx.profiles?.get(String(args.profile_id))?.proxy);
     await ctx.egress.assertUrlAllowed(url, { proxied });

@@ -897,3 +897,31 @@ test("during a launch: the same rules, against the mode that launch is bringing 
   assert.deepEqual(results.map((l) => l.displayMode), ["headless", "headless", "headless"]);
   assert.equal(driver.launches.length, 1, "one browser");
 });
+
+test("a stopped Camoufox profile's download can be deleted with its driver not loaded", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mz-router-"));
+  try {
+    const earlier = await DownloadTracker.open(join(dir, "downloads"));
+    earlier.began({ guid: "g1", url: "http://site/f", suggestedFilename: "report.txt" });
+    writeFileSync(join(dir, "downloads", "g1"), "bytes");
+    earlier.progress({ guid: "g1", totalBytes: 5, receivedBytes: 5, state: "completed" });
+    await earlier.settled();
+
+    const r = new EngineRouter({
+      profileManager: {
+        get: (id: ProfileId) => ({ id, engine: "camoufox", dataDir: dir }) as Profile,
+      } as unknown as ProfileManager,
+      engineRegistry: { get: () => new FakeBootstrap(true) } as unknown as EngineRegistry,
+      getDefaultEngine: (): BrowserEngine => "cloakbrowser",
+      chromiumDriver: new FakeDriver() as unknown as ChromiumBrowserDriver,
+    });
+    const [record] = await r.listDownloads("p");
+    assert.equal(await r.deleteDownload("p", "nope"), false);
+    assert.equal(await r.deleteDownload("p", record!.id), true);
+    assert.deepEqual(await r.listDownloads("p"), []);
+    assert.equal(existsSync(join(dir, "downloads", "report.txt")), false);
+    assert.equal((r as unknown as { firefoxDriver: unknown }).firefoxDriver, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

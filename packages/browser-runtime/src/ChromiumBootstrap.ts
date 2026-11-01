@@ -66,6 +66,14 @@ interface BootstrapOptions {
    * driver. (Camoufox, the Firefox-family engine, has its own bootstrap.)
    */
   engine?: BrowserEngine;
+  /**
+   * Install only the build pinned and hashed in this file, and refuse anything else, for a
+   * server: its UA can't change between restarts, and a release someone else published is not
+   * something it runs. Off, a desktop takes the newest release, verified if it publishes sums.
+   */
+  pinned?: boolean;
+  /** Between attempts at a download, times the attempt. */
+  retryDelayMs?: number;
 }
 
 interface BootstrapEvents {
@@ -99,6 +107,17 @@ const CLOAKBROWSER_PINS: Record<string, string> = {
   "cloakbrowser-linux-arm64.tar.gz": "chromium-v146.0.7680.177.5",
   "cloakbrowser-darwin-arm64.tar.gz": "chromium-v145.0.7632.109.2",
   "cloakbrowser-darwin-x64.tar.gz": "chromium-v145.0.7632.109.2",
+};
+
+// SHA-256 of each asset above, for a server, which installs only what is listed here. Each was
+// computed from the asset downloaded from its tag's release on 2026-11-01 and matched that
+// release's SHA256SUMS. chromium-v146.0.7680.177.5 has no linux-arm64 asset, so that platform
+// has no hash and a server there refuses to install. Bump with the pin, from real downloads.
+const CLOAKBROWSER_PIN_SHA256: Record<string, string> = {
+  "cloakbrowser-windows-x64.zip": "b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe",
+  "cloakbrowser-linux-x64.tar.gz": "4a12bcde95fa1bb1beef2b41ab5e5c27c36be78e3be3d0dac8c64d705216670e",
+  "cloakbrowser-darwin-arm64.tar.gz": "505582aa1bd3971c577f70e0cbbe016431702bdb693529abfd943b5bd9120c1c",
+  "cloakbrowser-darwin-x64.tar.gz": "a0a061b1945db55b3bbe95986a82b67803311c0fedabb3946e7ab0172273daac",
 };
 
 interface CloakBrowserAsset {
@@ -140,11 +159,15 @@ export class ChromiumBootstrap extends EventEmitter {
   private readonly cacheDir: string;
   private readonly engine: BrowserEngine;
   private readonly host: RuntimeHost;
+  private readonly pinned: boolean;
+  private readonly retryDelayMs: number;
 
   constructor(opts: BootstrapOptions) {
     super();
     this.host = opts.host;
     this.engine = opts.engine ?? "cloakbrowser";
+    this.pinned = opts.pinned ?? false;
+    this.retryDelayMs = opts.retryDelayMs ?? 2000;
     // Per-engine subdir so switching doesn't trip on cross-engine cached
     // metadata. Each engine gets its own current.json.
     this.cacheDir = opts.cacheDir ?? join(opts.host.userDataDir(), "chromium", this.engine);
@@ -412,7 +435,7 @@ export class ChromiumBootstrap extends EventEmitter {
     // Make executable on POSIX. Chrome for Testing usually preserves
     // perms in its zip but not always.
     if (process.platform !== "win32") {
-      await chmod(binaryPath, 0o755);
+      await chmod(binaryPath, 0o755 & ~process.umask());
     }
 
     // macOS: verify the bundle is signed by Apple Developer ID
@@ -472,7 +495,13 @@ export class ChromiumBootstrap extends EventEmitter {
       const cur = JSON.parse(raw) as {
         version: string;
         binaryRelative: string;
+        sha256?: string;
       };
+      if (this.pinned) {
+        // What an earlier, unpinned install left isn't what this one agreed to run.
+        const pin = pinnedCloakBrowserManifest();
+        if (cur.version !== pin.version || cur.sha256 !== pin.sha256) return null;
+      }
       const versionDir = join(this.cacheDir, cur.version);
       const candidate = join(versionDir, cur.binaryRelative);
       if (!existsSync(candidate)) return null;
@@ -488,7 +517,7 @@ export class ChromiumBootstrap extends EventEmitter {
   private async fetchManifest(): Promise<BrowserDownloadManifest> {
     // The Chromium engine is CloakBrowser only. (CFT was removed; Camoufox is a
     // separate Firefox-family engine handled by its own bootstrap.)
-    return this.fetchCloakBrowserManifest();
+    return this.pinned ? pinnedCloakBrowserManifest() : this.fetchCloakBrowserManifest();
   }
 
   /**
@@ -558,7 +587,7 @@ export class ChromiumBootstrap extends EventEmitter {
         if (attempt < MAX_ATTEMPTS) {
           // Linear backoff: 2s, 4s, 6s, 8s. Enough to ride out a brief
           // network blip without making the user stare at a frozen screen.
-          await new Promise((r) => setTimeout(r, attempt * 2000));
+          await new Promise((r) => setTimeout(r, attempt * this.retryDelayMs));
         }
       }
     }
@@ -933,6 +962,25 @@ function cloakBrowserAssetName(): string {
   return process.arch === "arm64"
     ? "cloakbrowser-linux-arm64.tar.gz"
     : "cloakbrowser-linux-x64.tar.gz";
+}
+
+/** The one build a server installs here, with the hash it must have. Throws if there is none. */
+export function pinnedCloakBrowserManifest(
+  assetName: string = cloakBrowserAssetName(),
+): BrowserDownloadManifest & { sha256: string } {
+  const tag = CLOAKBROWSER_PINS[assetName];
+  const sha256 = CLOAKBROWSER_PIN_SHA256[assetName];
+  if (!tag || !sha256) {
+    throw new Error(
+      `This server has no pinned, verified CloakBrowser build for ${assetName}, and doesn't install ` +
+        "one it can't check. Use camoufox here, or a platform with a pin.",
+    );
+  }
+  return {
+    version: tag.replace(/^chromium-v?|^v/, ""),
+    url: `${CLOAKBROWSER_DOWNLOAD_BASE}/${tag}/${assetName}`,
+    sha256,
+  };
 }
 
 async function fetchCloakBrowserSha256(sumsUrl: string, assetName: string): Promise<string> {

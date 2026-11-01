@@ -195,7 +195,7 @@ export class CamoufoxBootstrap extends EventEmitter implements EngineBootstrap {
       // Executable bits: extract-zip preserves zip modes, but make the launch
       // binary runnable regardless (Windows: no-op).
       if (process.platform !== "win32") {
-        await execFileP("chmod", ["-R", "755", installDir]);
+        await execFileP("chmod", ["-R", (0o755 & ~process.umask()).toString(8), installDir]);
       }
 
       // Write the layout marker camoufox-js looks for, so launchPath() locates

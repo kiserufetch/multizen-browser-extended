@@ -31,6 +31,7 @@ function rig(overrides: Partial<PreflightDeps> = {}): Rig {
     },
     warn: (message, fields) => warnings.push({ message, ...(fields ? { fields } : {}) }),
     instructions: () => "the instructions",
+    modeOf: () => 0o700,
     ...overrides,
   };
 }
@@ -158,4 +159,17 @@ test("the instructions name the shipped profile, and the host's own knob when it
   assert.match(sandboxInstructions("apparmor"), /kernel\.apparmor_restrict_unprivileged_userns=0/);
   assert.match(sandboxInstructions("clone"), /kernel\.unprivileged_userns_clone=1/);
   assert.doesNotMatch(sandboxInstructions("clone"), /--no-sandbox/);
+});
+
+test("a data dir others can read is said out loud, and left as it is", () => {
+  withDataDir((dir) => {
+    const open = rig({ modeOf: () => 0o755 });
+    preflightProcess(dir, open);
+    assert.equal(open.warnings.length, 1);
+    assert.match(open.warnings[0]!.message, /read by other users \(mode 755\)/);
+
+    const closed = rig({ modeOf: () => 0o700 });
+    preflightProcess(dir, closed);
+    assert.deepEqual(closed.warnings, []);
+  });
 });

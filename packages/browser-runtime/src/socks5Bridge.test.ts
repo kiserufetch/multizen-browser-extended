@@ -75,8 +75,11 @@ async function socksRequest(
 ): Promise<{ status: number; socket: Socket }> {
   const bridgePort = Number(new URL(bridgeUrl).port);
   const socket = connect(bridgePort, "127.0.0.1");
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", () => resolve());
+    socket.once("error", reject);
+  });
   socket.on("error", () => {});
-  await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
   const read = (n: number): Promise<Buffer> =>
     new Promise((resolve, reject) => {
       let buf = Buffer.alloc(0);
@@ -674,4 +677,110 @@ test("stopping the bridge forgets its blocks", async () => {
   assert.equal((asEgressBlocked(id, refusedByProxy) as MultizenError).code, "EGRESS_BLOCKED");
   await stopBridgeForProfile(id);
   assert.equal(asEgressBlocked(id, refusedByProxy), refusedByProxy);
+});
+
+test("a page asking for names nobody answers holds up only its own bridge", async () => {
+  const target = await listener();
+  const hung = new Set(["hang.test"]);
+  let started = 0;
+  const policy = new EgressPolicy({
+    mode: "block-private",
+    allow: [`${target.host}:${target.port}`, `fine.test:${target.port}`],
+    lookupTimeoutMs: 1_000,
+    lookup: (host) => {
+      if (hung.has(host)) {
+        started += 1;
+        return new Promise(() => {});
+      }
+      return Promise.resolve([{ address: target.host }]);
+    },
+  });
+  const hostileUrl = await startBridgeForProfile("hostile", null, policy);
+  const otherUrl = await startBridgeForProfile("other", null, policy);
+  try {
+    const flood = Array.from({ length: 40 }, () =>
+      socksRequest(hostileUrl, { name: "hang.test", port: 80 }).catch(() => null),
+    );
+    const startedAt = performance.now();
+    const fine = await socksRequest(otherUrl, { name: "fine.test", port: target.port });
+    assert.equal(fine.status, OK);
+    assert.ok(performance.now() - startedAt < 800, "the other profile waited for the hostile one");
+    fine.socket.destroy();
+    for (const result of await Promise.all(flood)) {
+      assert.equal(result?.status, HOST_UNREACHABLE);
+      result?.socket.destroy();
+    }
+    // The real lookups, each holding a thread until the resolver gives up: never the whole flood.
+    assert.ok(started <= 8, `${started} lookups running`);
+  } finally {
+    await stopBridgeForProfile("hostile");
+    await stopBridgeForProfile("other");
+    await target.close();
+  }
+});
+
+test("a proxy that accepts and then says nothing fails the connection, instead of holding it", async () => {
+  const silent = await listener("127.0.0.1", 0, (socket) => socket.resume());
+  const proxy = { type: "http", host: "127.0.0.1", port: silent.port } as unknown as ProxyConfig;
+  const policy = enforcing([`127.0.0.1:${silent.port}`]);
+  const warn = mock.method(console, "warn", () => {});
+  const url = await startBridgeForProfile("silent", proxy, policy, { connectTimeoutMs: 100 });
+  try {
+    const started = performance.now();
+    const { status, socket } = await socksRequest(url, { name: "example.test", port: 443 });
+    assert.equal(status, CONNECTION_REFUSED);
+    assert.ok(performance.now() - started < 1_000);
+    socket.destroy();
+  } finally {
+    warn.mock.restore();
+    await stopBridgeForProfile("silent");
+    await silent.close();
+  }
+});
+
+test("without a policy a bridge sets no time limit of its own: the desktop", async () => {
+  const silent = await listener("127.0.0.1", 0, (socket) => socket.resume());
+  const proxy = { type: "http", host: "127.0.0.1", port: silent.port } as unknown as ProxyConfig;
+  const url = await startBridgeForProfile("desk", proxy, undefined, { connectTimeoutMs: 50 });
+  try {
+    const pending = socksRequest(url, { name: "example.test", port: 443 });
+    const outcome = await Promise.race([
+      pending.then(
+        () => "answered",
+        () => "answered",
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("still waiting"), 300)),
+    ]);
+    assert.equal(outcome, "still waiting");
+  } finally {
+    await stopBridgeForProfile("desk");
+    await silent.close();
+  }
+});
+
+test("a page naming a new host each time can't fill the log", async () => {
+  const warn = mock.method(console, "warn", () => {});
+  mock.timers.enable({ apis: ["Date"], now: Date.now() + 3_600_000 });
+  const url = await startBridgeForProfile("noisy", null, enforcing());
+  try {
+    for (let i = 0; i < 200; i++) {
+      const { socket } = await socksRequest(url, { name: `host${i}.internal`, port: 80 });
+      socket.destroy();
+    }
+    const targetsNamed = (): string[] =>
+      warn.mock.calls.map((call) => call.arguments.join(" ")).filter((line) => /\.internal/.test(line));
+    const logged = targetsNamed().length;
+    assert.ok(logged > 0 && logged <= 20, `${logged} lines for 200 targets`);
+    // The next window says how many it didn't show.
+    mock.timers.tick(31_000);
+    const { socket } = await socksRequest(url, { name: "later.internal", port: 80 });
+    socket.destroy();
+    const lines = warn.mock.calls.map((call) => call.arguments.join(" "));
+    assert.ok(lines.some((line) => /\d+ more messages in the last 30s not shown/.test(line)), lines.at(-2));
+    assert.ok(lines.some((line) => line.includes("later.internal")));
+  } finally {
+    mock.timers.reset();
+    warn.mock.restore();
+    await stopBridgeForProfile("noisy");
+  }
 });

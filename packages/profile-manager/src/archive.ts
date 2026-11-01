@@ -11,7 +11,7 @@ import {
 } from "node:crypto";
 import { promisify } from "node:util";
 import type { Profile } from "@multizen/types";
-import { PROFILE_DOWNLOADS_DIR, PROFILE_UPLOADS_DIR } from "@multizen/types";
+import { PROFILE_DOWNLOADS_DIR, PROFILE_UPLOADS_DIR, trimEndChars } from "@multizen/types";
 
 const scrypt = promisify(scryptCb);
 
@@ -229,6 +229,7 @@ export async function importProfile(
     const content = plaintext.subarray(cursor, cursor + len);
     cursor += len;
     verifyChecksum(fileMeta, content);
+    if (landsInExcludedDir(restored.dataDir, fileMeta.path)) continue;
     await writeGuarded(restored.dataDir, fileMeta.path, content);
   }
 
@@ -254,6 +255,17 @@ export async function importProfile(
   }
 
   return restored;
+}
+
+/**
+ * Export leaves these out, so an archive holding one was made by hand, and its contents get read
+ * and acted on at the next start (a download index names files). Written for the filesystems
+ * where `Downloads`, `downloads.` and `downloads::$DATA` are that same directory.
+ */
+function landsInExcludedDir(baseDir: string, relPath: string): boolean {
+  const base = resolve(baseDir);
+  const top = relative(base, resolve(base, relPath)).split(/[\\/]/)[0] ?? "";
+  return EXCLUDED_PROFILE_DIRS.has(trimEndChars(top.split(":")[0]!, ". ").toLowerCase());
 }
 
 /** Throw if the content's SHA-256 doesn't match the manifest entry. */

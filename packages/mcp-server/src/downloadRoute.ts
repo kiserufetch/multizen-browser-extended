@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import type { ServerResponse } from "node:http";
 import type { ProfileManager } from "@multizen/profile-manager";
-import type { BrowserDriver } from "@multizen/types";
+import { wellFormed, type BrowserDriver } from "@multizen/types";
 import type { HttpRoute } from "./HttpTransport.js";
 import { mayUse, mayUseProfile } from "./toolGate.js";
 import { policyFor } from "./toolPolicy.js";
@@ -26,7 +26,7 @@ function refuse(res: ServerResponse, status: number, error: string): void {
 /** The name is sanitized by the tracker. This is only about what a header can carry. */
 function contentDisposition(fileName: string): string {
   const ascii = fileName.replace(/[^\x20-\x7e]|["\\]/g, "_");
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(wellFormed(fileName))}`;
 }
 
 /**

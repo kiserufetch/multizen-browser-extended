@@ -42,10 +42,13 @@ interface EngineRegistryEvents {
 export class EngineRegistry extends EventEmitter {
   private readonly bootstraps = new Map<BrowserEngine, EngineBootstrap>();
   private readonly host: RuntimeHost;
+  private readonly pinned: boolean;
 
-  constructor(host: RuntimeHost) {
+  /** `pinned`: see the option of {@link ChromiumBootstrap}. */
+  constructor(host: RuntimeHost, opts: { pinned?: boolean } = {}) {
     super();
     this.host = host;
+    this.pinned = opts.pinned ?? false;
   }
 
   override on<K extends keyof EngineRegistryEvents>(
@@ -77,7 +80,9 @@ export class EngineRegistry extends EventEmitter {
   }
 
   private create(engine: BrowserEngine): EngineBootstrap {
-    if (isChromiumEngine(engine)) return new ChromiumBootstrap({ engine, host: this.host });
+    if (isChromiumEngine(engine)) {
+      return new ChromiumBootstrap({ engine, host: this.host, pinned: this.pinned });
+    }
     if (engine === "camoufox") return new CamoufoxBootstrap(this.host);
     throw new Error(`No bootstrap available for engine "${engine}"`);
   }

@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import {
   MultizenError,
   PROFILE_UPLOADS_DIR,
+  trimEndChars,
   UPLOAD_INBOX_DIR,
+  wellFormed,
   type DriverAction,
   type ElementTarget,
 } from "@multizen/types";
@@ -109,15 +111,22 @@ export function windowsPathProblem(fileName: string): string | null {
   return null;
 }
 
-/** A plain file name for the inbox: no directories, nothing a filesystem reinterprets. */
-export function safeUploadName(fileName: string): string {
+/**
+ * A plain file name for the inbox: no directories, nothing a filesystem reinterprets. The file
+ * stays on this host, so a device's name only needs its `_` where it would open that device.
+ */
+export function safeUploadName(fileName: string, platform: NodeJS.Platform = process.platform): string {
   const base = fileName.split(/[\\/]/).pop() ?? "";
   // The tail, to keep the extension of an overlong name.
-  const cleaned = base
-    .replace(/[\u0000-\u001f<>:"|?*]/g, "_")
-    .slice(-MAX_UPLOAD_NAME_CHARS)
-    .replace(/^[. ]+|[. ]+$/g, "");
-  return cleaned || "upload";
+  const cleaned = wellFormed(
+    base
+      .replace(/[\u0000-\u001f<>:"|?*]/g, "_")
+      .slice(-MAX_UPLOAD_NAME_CHARS)
+      .replace(/^[. ]+|[. ]+$/g, ""),
+  );
+  if (!cleaned) return "upload";
+  const device = platform === "win32" && WINDOWS_RESERVED_NAME.test(cleaned.split(".")[0]!.trimEnd());
+  return device ? `_${cleaned}` : cleaned;
 }
 
 function notAllowed(fileName: string, why: string): MultizenError {
@@ -165,7 +174,7 @@ export async function resolveAllowedFile(
 function decodeBase64(fileName: string, data: string): Buffer {
   const compact = data.replace(/\s+/g, "");
   const decoded = Buffer.from(compact, "base64");
-  if (decoded.toString("base64").replace(/=+$/, "") !== compact.replace(/=+$/, "")) {
+  if (trimEndChars(decoded.toString("base64"), "=") !== trimEndChars(compact, "=")) {
     throw new MultizenError("INVALID_INPUT", `data_base64 of "${fileName}" is not valid base64`);
   }
   return decoded;
@@ -214,14 +223,44 @@ export async function planUploads(
   return planned;
 }
 
+/** What the inbox holds now: a directory per file, as {@link saveToInbox} makes it. */
+async function inboxBytes(inbox: string): Promise<number> {
+  let total = 0;
+  for (const dir of await readdir(inbox).catch((): string[] => [])) {
+    for (const name of await readdir(join(inbox, dir)).catch((): string[] => [])) {
+      total += await stat(join(inbox, dir, name)).then(
+        (file) => file.size,
+        () => 0,
+      );
+    }
+  }
+  return total;
+}
+
 /**
  * Puts what came as base64 in the inbox, which is cleared when the browser is gone. Gives
- * the path of each file in `planned`, and a way to take the written ones back.
+ * the path of each file in `planned`, and a way to take the written ones back. Each call is
+ * within the upload limit, but a caller can keep calling: `quotaBytes` bounds what piles up.
  */
 export async function saveToInbox(
   inbox: string,
   planned: readonly PlannedUpload[],
+  quotaBytes = Infinity,
 ): Promise<{ paths: string[]; cleanup: () => Promise<void> }> {
+  if (quotaBytes !== Infinity) {
+    const adding = planned.reduce((sum, file) => sum + (file.bytes?.length ?? 0), 0);
+    const held = await inboxBytes(inbox);
+    if (held + adding > quotaBytes) {
+      throw new MultizenError(
+        "FILE_TOO_LARGE",
+        `This profile's upload inbox holds ${held} bytes, and ${adding} more would pass its limit of ${quotaBytes}.`,
+        {
+          hint: "The inbox empties when the profile closes. Or put the file in the profile's uploads directory and pass only file_name.",
+          details: { size_bytes: adding, held_bytes: held, max_bytes: quotaBytes },
+        },
+      );
+    }
+  }
   const written: string[] = [];
   const cleanup = async (): Promise<void> => {
     await Promise.all(written.map((dir) => rm(dir, { recursive: true, force: true })));
@@ -261,7 +300,11 @@ async function uploadFile(args: Record<string, unknown>, ctx: ToolContext): Prom
     ctx.maxInlineFileBytes ?? DEFAULT_MAX_INLINE_FILE_BYTES,
   );
 
-  const { paths, cleanup } = await saveToInbox(join(uploadsDir, UPLOAD_INBOX_DIR), planned);
+  const { paths, cleanup } = await saveToInbox(
+    join(uploadsDir, UPLOAD_INBOX_DIR),
+    planned,
+    ctx.maxInboxBytes,
+  );
   try {
     await ctx.browserDriver.performAction(id, {
       type: "upload_file",

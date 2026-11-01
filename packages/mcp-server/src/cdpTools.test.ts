@@ -60,6 +60,7 @@ class SpyDriver implements BrowserDriver {
   }
   listDownloads = notUsedHere;
   getDownload = notUsedHere;
+  deleteDownload = notUsedHere;
   setDialogPolicy = notUsedHere;
   listDialogs = notUsedHere;
   handleDialog = notUsedHere;

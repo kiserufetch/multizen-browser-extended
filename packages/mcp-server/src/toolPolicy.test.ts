@@ -1,10 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { MultizenError, type ProxyConfig } from "@multizen/types";
-import type { ProfileManager } from "@multizen/profile-manager";
+import { ProfileManager } from "@multizen/profile-manager";
 
 import { LOGGED_ARGS } from "./ActivityLog.js";
 import {
@@ -49,6 +52,7 @@ const SPEC_GROUPS: Record<ToolGroup, string[]> = {
     "scroll",
     "upload_file",
     "get_download",
+    "delete_download",
     "handle_dialog",
     "set_dialog_policy",
     "evaluate_js",
@@ -467,4 +471,77 @@ test("with no principal anywhere, a client sees every tool, as on the desktop", 
     assert.deepEqual(tool.annotations, policyFor(tool.name)!.annotations, tool.name);
   }
   await client.close();
+});
+
+test("list_profiles names no host path, to anyone: a real manager's listing has none", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "mz-policy-"));
+  const profiles = new ProfileManager({ dbPath: join(dir, "profiles.db"), profilesRoot: join(dir, "profiles") });
+  t.after(() => {
+    profiles.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const created = profiles.create({ name: "n", engine: "cloakbrowser" });
+  profiles.update(created.id, {
+    extensions: [{ id: "e", name: "x", version: "1", scope: "profile", enabled: true, dir: "ext", source: "file" }],
+  });
+  const { server } = createMultizenMcpServer({
+    profileManager: profiles,
+    browserDriver: new MockBrowserDriver(),
+    principal: limited(["read"]),
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "test", version: "0.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const res = await client.callTool({ name: "list_profiles", arguments: {} });
+  await client.close();
+  const text = (res.content as Array<{ text: string }>)[0]!.text;
+  assert.equal(text.includes(dir), false, text);
+  assert.equal(text.includes("dataDir"), false);
+  assert.equal(text.includes('"dir"'), false);
+});
+
+test("an unexpected error names no host path to a token that isn't the owner's", async () => {
+  const seen = async (principal: Principal, message: string): Promise<string> => {
+    const driver = new MockBrowserDriver();
+    await driver.launch("p");
+    driver.navigate = async () => {
+      throw new Error(message);
+    };
+    const { server } = createMultizenMcpServer({
+      profileManager: { get: () => ({ id: "p" }), list: () => [] } as unknown as ProfileManager,
+      browserDriver: driver,
+      principal,
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test", version: "0.0.0" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const res = await client.callTool({ name: "navigate", arguments: { profile_id: "p", url: "http://x.test/" } });
+    await client.close();
+    const { error } = JSON.parse((res.content as Array<{ text: string }>)[0]!.text) as {
+      error: { code: string; message: string };
+    };
+    assert.equal(error.code, "INTERNAL_ERROR");
+    return error.message;
+  };
+  for (const [message, expected] of [
+    ["ENOENT: no such file or directory, open '/data/profiles/p/x y.db'", "ENOENT: no such file or directory, open '<path>'"],
+    [String.raw`EPERM: operation not permitted, rename 'C:\Users\Name Here\a' -> 'C:\Users\b'`, "EPERM: operation not permitted, rename '<path>' -> '<path>'"],
+    ["failed at /data/profiles/p/db with code 5", "failed at <path> with code 5"],
+    [String.raw`failed at C:\mzs\profiles\p`, "failed at <path>"],
+    ["fetch http://example.test/a/b failed", "fetch http://example.test/a/b failed"],
+    ["1/2 of it, and either/or", "1/2 of it, and either/or"],
+  ] as const) {
+    assert.equal(await seen(limited(["read", "act"]), message), expected);
+  }
+  const untouched = "ENOENT: no such file or directory, open '/data/profiles/p/x.db'";
+  assert.equal(await seen(FULL_PRINCIPAL, untouched), untouched);
+});
+
+test("delete_download is in act, takes a lease, and is marked destructive", () => {
+  const policy = policyFor("delete_download")!;
+  assert.equal(policy.group, "act");
+  assert.equal(policy.annotations.destructiveHint, true);
+  assert.equal(leaseBinds(policy), true);
 });

@@ -6,6 +6,7 @@ import {
   MultizenError,
   PROFILE_UPLOADS_DIR,
   UPLOAD_INBOX_DIR,
+  originOf,
   type BrowserDriver,
   type CapturedFrame,
   type HumanInputEvent,
@@ -134,6 +135,8 @@ export interface PanelRouteOptions {
   /** Who did what: lifecycle only, never a frame or anything typed. */
   activityLog?: ActivityLog;
   maxUploadBytes?: number;
+  /** What one profile's upload inbox may hold. Off, as on a desktop: no limit. */
+  maxInboxBytes?: number;
   /** For an operator's log. Gets the route and the error's code or name, never its message. */
   onError?: (route: string, code: string) => void;
 }
@@ -545,7 +548,11 @@ export function createPanelRoute(opts: PanelRouteOptions): HttpRoute {
                 active: t.targetId === tabs.activeTargetId,
               })),
             dialogs,
-            fileChoosers,
+            fileChoosers: fileChoosers.map(({ url, ...chooser }) => {
+              // A frame's own, or until that is known, its page's.
+              const asking = url ?? tabs.targetInfos?.find((t) => t.targetId === chooser.targetId)?.url;
+              return { ...chooser, ...(asking ? { origin: originOf(asking) } : {}) };
+            }),
             otherOwner: ownerActive ? control.ownerName : null,
           });
         } catch (e) {
@@ -627,7 +634,7 @@ export function createPanelRoute(opts: PanelRouteOptions): HttpRoute {
         const body = await readBody(req, res, ChooserBodySchema, DEFAULT_MAX_REQUEST_BYTES);
         if (!body) return;
         try {
-          await answerChooser(driver, profiles, profileId, body, maxUploadBytes);
+          await answerChooser(driver, profiles, profileId, body, maxUploadBytes, opts.maxInboxBytes);
           sendJson(res, 200, { ok: true });
         } catch (e) {
           const code = errorCode(e);
@@ -752,6 +759,7 @@ async function answerChooser(
   profileId: ProfileId,
   body: z.infer<typeof ChooserBodySchema>,
   maxUploadBytes: number,
+  maxInboxBytes: number | undefined,
 ): Promise<void> {
   if (body.cancel) {
     await driver.dismissFileChooser?.(profileId, body.chooser_id);
@@ -767,7 +775,7 @@ async function answerChooser(
   }
   const planned = await planUploads(body.files, [], maxUploadBytes);
   const inbox = join(dataDir, PROFILE_UPLOADS_DIR, UPLOAD_INBOX_DIR);
-  const { paths, cleanup } = await saveToInbox(inbox, planned);
+  const { paths, cleanup } = await saveToInbox(inbox, planned, maxInboxBytes);
   try {
     await driver.respondFileChooser(profileId, body.chooser_id, paths);
   } catch (e) {

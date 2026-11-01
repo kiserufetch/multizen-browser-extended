@@ -164,3 +164,17 @@ test("a waiter is awake before a transition listener runs, so it can't overtake 
   await wait(0);
   assert.deepEqual(order, ["listener", "waiter continued"]);
 });
+
+test("keepReason leaves the reason a person is reading as it was", () => {
+  const h = new InMemoryHumanHandoff();
+  const changes: string[] = [];
+  h.onChange((pending) => changes.push(pending[0]?.reason ?? ""));
+  const first = h.request("p", "solve the captcha");
+  changes.length = 0;
+  const second = h.request("p", "now type the password", { keepReason: true });
+  assert.equal(second.id, first.id);
+  assert.equal(second.reason, "solve the captcha");
+  assert.equal(h.activeForProfile("p")!.reason, "solve the captcha");
+  assert.deepEqual(changes, [], "nothing changed, so nothing to announce");
+  h.closeForProfile("p");
+});

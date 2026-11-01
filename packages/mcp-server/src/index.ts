@@ -13,12 +13,12 @@ export { createDownloadRoute } from "./downloadRoute.js";
 export { createPanelRoute } from "./panel/panelRoutes.js";
 export { PanelSessions } from "./panel/panelSessions.js";
 export { createSharedMcpState } from "./sharedState.js";
-export { createPrincipal, FULL_PRINCIPAL, principalFrom, TOOL_GROUPS } from "./auth/principal.js";
+export { createPrincipal, FULL_PRINCIPAL, principalFrom, sameSecret, TOOL_GROUPS } from "./auth/principal.js";
 export { TokenStore } from "./auth/TokenStore.js";
 export { AuthFailureLimiter, clientAddress } from "./auth/AuthFailureLimiter.js";
 export { policedToolNames } from "./toolPolicy.js";
 export type { Principal, ToolGroup } from "./auth/principal.js";
-export type { EgressGate } from "./toolGate.js";
+export type { EgressGate, ToolLimits } from "./toolGate.js";
 export type {
   HandoffKind,
   HandoffRecord,

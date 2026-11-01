@@ -11,6 +11,7 @@ import {
   buildRuntime,
   enginesInUse,
   RUNTIME_CLOSE_BUDGET_MS,
+  SERVER_TOOL_LIMITS,
   SERVER_VERSION,
   takeOverFromPreviousRun,
 } from "../runtime.ts";
@@ -23,7 +24,8 @@ export function stdioLockHint(e: ServerLockHeldError, dataDir: string): string {
   if (mode !== "serve" || !url) {
     return `Stop that process, or point this one at another --data-dir (${dataDir} is taken).`;
   }
-  const tokenArg = tokenFile ? ` --token-file "${tokenFile}"` : "";
+  // Not the owner's token, which can do everything: this is advice for connecting an agent.
+  const tokenArg = tokenFile ? " --token-file <file holding a token from `multizen-server token create`>" : "";
   return `A running serve can be used over stdio instead: multizen-server stdio --connect ${url}${tokenArg}`;
 }
 
@@ -73,6 +75,7 @@ async function runLocal(
     getDefaultEngine: runtime.getDefaultEngine,
     uploadsRoot: config.uploadsRoot,
     egress: runtime.egress,
+    limits: SERVER_TOOL_LIMITS,
   });
   const transport = new StdioServerTransport(process.stdin, protocolStdout);
   transport.onclose = () => void shutdown.run("transport-closed", 0);

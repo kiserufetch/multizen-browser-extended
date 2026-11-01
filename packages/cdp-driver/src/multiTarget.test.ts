@@ -2163,3 +2163,12 @@ test("clicks land by the frame's image, which has the scrollbar the metrics leav
   assert.equal(move!.params.x, 1536);
   assert.equal(move!.params.y, 371.5);
 });
+
+test("a failed navigate's message has the origin; the whole URL stays in details", async () => {
+  const { b, s } = await connected(["A"]);
+  const secretUrl = "http://user:hunter2@x.test:81/path?token=abc123";
+  b.handlers.set("Page.navigate", () => ({ frameId: "F", errorText: "net::ERR_FAILED" }));
+  const e = await assertMultizenCode(s.navigate(secretUrl), "NAVIGATION_FAILED");
+  assert.equal(e.message, "Navigation to http://x.test:81 failed: net::ERR_FAILED");
+  assert.equal(e.details?.url, secretUrl);
+});

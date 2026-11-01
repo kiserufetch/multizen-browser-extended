@@ -4,6 +4,7 @@ import CDP from "chrome-remote-interface";
 import {
   DEFAULT_DIALOG_ANSWERS,
   MultizenError,
+  originOf,
   type DialogPolicy,
   type DialogResponse,
   type DialogType,
@@ -404,7 +405,7 @@ interface TrackedChooser extends OpenFileChooser {
 
 /** Browser download events, as {@link CdpSession.enableDownloads} passes them on. */
 export interface DownloadEventSink {
-  began(event: { guid: string; url: string; suggestedFilename: string }): void;
+  began(event: { guid: string; url: string; suggestedFilename: string }): unknown;
   progress(event: {
     guid: string;
     totalBytes: number;
@@ -1494,7 +1495,7 @@ export class CdpSession {
   }
 
   private onFileChooserOpened(
-    p: { mode?: string; backendNodeId?: number },
+    p: { mode?: string; backendNodeId?: number; frameId?: string },
     sessionId: string | undefined,
   ): void {
     // Otherwise upload_file is waiting for this one itself.
@@ -1506,14 +1507,43 @@ export class CdpSession {
       if (chooser.targetId === tab.targetId) this.fileChoosers.delete(id);
     }
     const id = `c${++this.chooserSeq}`;
-    this.fileChoosers.set(id, {
+    const chooser: TrackedChooser = {
       id,
       multiple: p.mode === "selectMultiple",
       targetId: tab.targetId,
       openedAt: new Date().toISOString(),
       sessionId,
       backendNodeId: p.backendNodeId,
-    });
+    };
+    this.fileChoosers.set(id, chooser);
+    // The person answering has to see who asks: a frame in a page can be anyone.
+    if (p.frameId) {
+      void this.frameUrl(sessionId, p.frameId).then(
+        (url) => {
+          if (url) chooser.url = url;
+        },
+        () => {},
+      );
+    }
+  }
+
+  private async frameUrl(sessionId: string, frameId: string): Promise<string | undefined> {
+    interface FrameTree {
+      frame: { id: string; url: string };
+      childFrames?: FrameTree[];
+    }
+    const { frameTree } = await this.send<{ frameTree: FrameTree }>(
+      "Page.getFrameTree",
+      undefined,
+      sessionId,
+      FRAME_DEADLINE_MS,
+    );
+    const pending = [frameTree];
+    for (const node of pending) {
+      if (node.frame.id === frameId) return node.frame.url;
+      pending.push(...(node.childFrames ?? []));
+    }
+    return undefined;
   }
 
   listFileChoosers(): OpenFileChooser[] {
@@ -1648,6 +1678,8 @@ export class CdpSession {
     const tab = this.activeTab();
     const client = this.require();
     const timeoutMs = opts.timeoutMs ?? 30000;
+    // What a message says goes to the log, and a URL can carry a password or a token.
+    const origin = originOf(url);
     return this.pageOp(tab, async () => {
       const loaded = onceEvent(client, "Page.loadEventFired", tab.sessionId);
       try {
@@ -1660,9 +1692,9 @@ export class CdpSession {
         if (nav.errorText) {
           throw new MultizenError(
             "NAVIGATION_FAILED",
-            `Navigation to ${url} failed: ${nav.errorText}`,
+            `Navigation to ${origin} failed: ${nav.errorText}`,
             {
-              details: { error_text: nav.errorText },
+              details: { url, error_text: nav.errorText },
               // What a URL that serves a file reports, having started a download.
               ...(nav.errorText === "net::ERR_ABORTED"
                 ? { hint: "If this URL serves a file, list_downloads shows it." }
@@ -1675,7 +1707,7 @@ export class CdpSession {
           await withTimeout(
             loaded.promise,
             timeoutMs,
-            `Navigation to ${url} timed out after ${timeoutMs}ms`,
+            `Navigation to ${origin} timed out after ${timeoutMs}ms`,
           );
         }
       } finally {

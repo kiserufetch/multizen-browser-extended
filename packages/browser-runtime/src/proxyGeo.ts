@@ -2,6 +2,7 @@ import { request } from "node:https";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import type { ProxyConfig } from "@multizen/types";
+import { pinnedLookup } from "./socks5Bridge.ts";
 
 /**
  * Result of probing a proxy for its public IP geolocation.
@@ -62,11 +63,15 @@ const PROVIDERS: readonly GeoProvider[] = [
  */
 export async function probeProxyGeo(
   proxy: ProxyConfig,
-  opts: { timeoutMs?: number } = {},
+  /** `connectTo`: the addresses a policy checked. The proxy's name isn't looked up again. */
+  opts: { timeoutMs?: number; connectTo?: readonly string[] } = {},
 ): Promise<ProxyGeoResult> {
   const proxyUrl = buildProxyUrl(proxy);
+  const lookup = opts.connectTo ? pinnedLookup(opts.connectTo) : undefined;
   const agent =
-    proxy.type === "socks5" ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
+    proxy.type === "socks5"
+      ? new SocksProxyAgent(proxyUrl, lookup ? { socketOptions: { lookup } } : undefined)
+      : new HttpsProxyAgent(proxyUrl, lookup ? { lookup } : undefined);
   const timeoutMs = opts.timeoutMs ?? 10000;
   // `timeoutMs` bounds the WHOLE probe, not each provider. Each provider gets
   // only the remaining budget, so a dead/black-holing proxy can't stall the

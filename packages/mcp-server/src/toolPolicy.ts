@@ -89,6 +89,7 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
   scroll: { group: "act", annotations: hints(false, false, false, true), ...pageWrite },
   upload_file: { group: "act", annotations: PAGE_ACTION, ...pageWrite },
   get_download: { group: "act", annotations: LOCAL_READ, scope: "profile", ...unlocked },
+  delete_download: { group: "act", annotations: hints(false, true, true, false), scope: "profile", ...unlocked },
   handle_dialog: { group: "act", annotations: PAGE_ACTION, scope: "profile", lock: "none", humanGate: "block" },
   set_dialog_policy: { group: "act", annotations: LOCAL_CHANGE, scope: "profile", lock: "none", humanGate: "block" },
   evaluate_js: { group: "act", annotations: PAGE_ACTION, ...pageWrite },

@@ -1,6 +1,6 @@
 import { promises as dns } from "node:dns";
 import { isIPv4, isIPv6 } from "node:net";
-import { MultizenError, type ProxyConfig } from "@multizen/types";
+import { MultizenError, trimEndChars, type ProxyConfig } from "@multizen/types";
 
 /**
  * Where a server's browsers may connect. `allow-all` is the desktop's behaviour: nothing
@@ -34,6 +34,11 @@ export interface EgressDecision {
 
 type Bytes = readonly number[];
 
+const VALID_HOST = /^[a-z0-9._-]+$/;
+
+/** Longer than this, a URL is refused before anything reads it. Browsers take more; a server's tools don't. */
+export const MAX_URL_CHARS = 8_192;
+
 interface Range {
   label: string;
   bytes: Bytes;
@@ -41,7 +46,10 @@ interface Range {
 }
 
 function parseIp(text: string): Bytes | null {
-  const plain = text.split("%")[0]!;
+  const zoneAt = text.indexOf("%");
+  const plain = zoneAt === -1 ? text : text.slice(0, zoneAt);
+  // A zone belongs to an IPv6 address and names an interface: past that it is smuggled text.
+  if (zoneAt !== -1 && !(isIPv6(plain) && VALID_HOST.test(text.slice(zoneAt + 1)))) return null;
   if (isIPv4(plain)) return plain.split(".").map(Number);
   if (!isIPv6(plain)) return null;
   const bytes = ipv6Bytes(plain);
@@ -180,15 +188,27 @@ function numericAddress(name: string): Bytes | "invalid" | null {
 
 type Target = { ip: Bytes; text: string } | { name: string } | { invalid: true };
 
-/** A host as a browser or an operator wrote it: any case, bracketed, a trailing dot. */
+/** A name has at most 253 characters. These two are for its brackets or root dot. */
+const MAX_HOST_CHARS = 255;
+/** A host in an error goes to the log, and only the gate's own check has looked at its length. */
+const MAX_HOST_CHARS_SHOWN = 80;
+
+function shownHost(host: string): string {
+  return host.slice(0, MAX_HOST_CHARS_SHOWN);
+}
+
+/**
+ * A host as a browser or an operator wrote it: any case, bracketed, a trailing dot. What isn't
+ * an address has to be a plain name. `169.254.169.254:80/#` passes for one that won't resolve
+ * until something builds a URL from it, and then it is the metadata address.
+ */
 function parseTarget(host: string): Target {
-  const plain = host
-    .toLowerCase()
-    .replace(/^\[(.*)\]$/, "$1")
-    .replace(/\.+$/, "");
+  if (host.length > MAX_HOST_CHARS) return { invalid: true };
+  const plain = trimEndChars(host.toLowerCase().replace(/^\[(.*)\]$/, "$1"), ".");
   if (!plain || /[\s\0]/.test(plain)) return { invalid: true };
   const literal = parseIp(plain);
   if (literal) return { ip: literal, text: ipText(literal, plain) };
+  if (!VALID_HOST.test(plain)) return { invalid: true };
   const numeric = numericAddress(plain);
   if (numeric === "invalid") return { invalid: true };
   if (numeric) return { ip: numeric, text: numeric.join(".") };
@@ -258,6 +278,47 @@ export type EgressLookup = (host: string) => Promise<ReadonlyArray<{ address: st
 
 const systemLookup: EgressLookup = (host) => dns.lookup(host, { all: true });
 
+/** libuv's own, unless UV_THREADPOOL_SIZE says otherwise. The server's start sets that to 64. */
+const DEFAULT_THREADPOOL_SIZE = 4;
+/** What a lookup may take before its connection is refused. The resolver may take far longer. */
+const LOOKUP_TIMEOUT_MS = 5_000;
+
+function threadpoolSize(): number {
+  return Number(process.env.UV_THREADPOOL_SIZE) || DEFAULT_THREADPOOL_SIZE;
+}
+
+/**
+ * A lookup that holds at most `limit` of libuv's threads at once and answers within `timeoutMs`.
+ * dns.lookup takes a thread for as long as the resolver takes and can't be cancelled, and the same
+ * threads do this process's file work, so a page asking for names a resolver never answers could
+ * stop everything else. A call that times out only stops waiting: its thread counts until it is back.
+ */
+export function boundedLookup(lookup: EgressLookup, limit: number, timeoutMs = LOOKUP_TIMEOUT_MS): EgressLookup {
+  let running = 0;
+  const queue: Array<() => void> = [];
+  return (host) =>
+    new Promise((resolve, reject) => {
+      const start = (): void => {
+        running++;
+        // In an async function so a lookup that throws, rather than rejects, still gives its turn back.
+        void (async () => lookup(host))()
+          .then(resolve, reject)
+          .finally(() => {
+            clearTimeout(timer);
+            running--;
+            queue.shift()?.();
+          });
+      };
+      const timer = setTimeout(() => {
+        const waiting = queue.indexOf(start);
+        if (waiting !== -1) queue.splice(waiting, 1);
+        reject(new Error(`no answer within ${timeoutMs} ms`));
+      }, timeoutMs);
+      if (running < limit) start();
+      else queue.push(start);
+    });
+}
+
 const blocked = (reason: string): EgressDecision => ({ allowed: false, reason });
 
 export class EgressPolicy {
@@ -265,14 +326,29 @@ export class EgressPolicy {
   /** False in `allow-all`: every check allows, with no lookup, and launches stay as they were. */
   readonly enforced: boolean;
   private readonly allow: readonly EgressAllowEntry[];
+  private readonly rawLookup: EgressLookup;
+  /** For tools and launches: a token can ask for as many names as a page can. */
   private readonly lookup: EgressLookup;
+  private readonly lookupTimeoutMs: number | undefined;
 
   /** @throws on an `allow` entry {@link parseEgressAllowEntry} refuses. */
-  constructor(opts: { mode: EgressMode; allow?: readonly string[]; lookup?: EgressLookup }) {
+  constructor(opts: {
+    mode: EgressMode;
+    allow?: readonly string[];
+    lookup?: EgressLookup;
+    lookupTimeoutMs?: number;
+  }) {
     this.mode = opts.mode;
     this.enforced = opts.mode !== "allow-all";
     this.allow = (opts.allow ?? []).map(parseEgressAllowEntry);
-    this.lookup = opts.lookup ?? systemLookup;
+    this.rawLookup = opts.lookup ?? systemLookup;
+    this.lookupTimeoutMs = opts.lookupTimeoutMs;
+    this.lookup = boundedLookup(this.rawLookup, Math.max(1, threadpoolSize() >> 2), opts.lookupTimeoutMs);
+  }
+
+  /** A bridge's own share, so one page can only run out of its own: an eighth of the pool. */
+  bridgeLookup(): EgressLookup {
+    return boundedLookup(this.rawLookup, Math.max(1, threadpoolSize() >> 3), this.lookupTimeoutMs);
   }
 
   private allowsIp(bytes: Bytes, port: number): boolean {
@@ -299,17 +375,17 @@ export class EgressPolicy {
   }
 
   /** Direct bridge path: resolves the name, classifies every address, keeps the allowed ones. */
-  async checkDirect(host: string, port: number): Promise<EgressDecision> {
+  async checkDirect(host: string, port: number, lookup: EgressLookup = this.lookup): Promise<EgressDecision> {
     if (!this.enforced) return { allowed: true };
     const target = parseTarget(host);
-    if ("invalid" in target) return blocked(`"${host}" is neither a name nor an address`);
+    if ("invalid" in target) return blocked(`"${shownHost(host)}" is neither a name nor an address`);
     if ("ip" in target) return this.checkIp(target.ip, target.text, port);
 
     const named = this.allowsName(target.name, port);
     if (!named && isBlockedName(target.name)) return blocked(`${target.name} is a local or metadata name`);
     let addresses: readonly string[];
     try {
-      addresses = (await this.lookup(target.name)).map((a) => a.address);
+      addresses = (await lookup(target.name)).map((a) => a.address);
     } catch (e) {
       return { allowed: false, unresolved: true, reason: `${target.name} did not resolve: ${(e as Error).message}` };
     }
@@ -332,7 +408,7 @@ export class EgressPolicy {
   checkProxied(host: string, port: number): EgressDecision {
     if (!this.enforced) return { allowed: true };
     const target = parseTarget(host);
-    if ("invalid" in target) return blocked(`"${host}" is neither a name nor an address`);
+    if ("invalid" in target) return blocked(`"${shownHost(host)}" is neither a name nor an address`);
     if ("ip" in target) {
       const { allowed, reason } = this.checkIp(target.ip, target.text, port);
       return allowed ? { allowed } : blocked(reason!);
@@ -344,13 +420,16 @@ export class EgressPolicy {
   }
 
   /** The upstream proxy's own address: the bridge and the geo probe connect to it from here. */
-  checkUpstream(proxy: Pick<ProxyConfig, "host" | "port">): Promise<EgressDecision> {
-    return this.checkDirect(proxy.host, proxy.port);
+  checkUpstream(proxy: Pick<ProxyConfig, "host" | "port">, lookup?: EgressLookup): Promise<EgressDecision> {
+    return this.checkDirect(proxy.host, proxy.port, lookup);
   }
 
   /** Tool level, for a typed answer before anything starts. The bridge still has the last word. */
   async assertUrlAllowed(url: string, ctx: { proxied: boolean }): Promise<void> {
     if (!this.enforced) return;
+    if (url.length > MAX_URL_CHARS) {
+      throw new MultizenError("INVALID_INPUT", `A URL of ${url.length} characters is over the limit of ${MAX_URL_CHARS}.`);
+    }
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -370,16 +449,37 @@ export class EgressPolicy {
     });
   }
 
-  /** A proxy that doesn't resolve is refused by no policy: it just won't connect. */
-  async assertProxyAllowed(proxy: Pick<ProxyConfig, "host" | "port">): Promise<void> {
-    if (!this.enforced) return;
+  /**
+   * A proxy that doesn't resolve is refused by no policy: it just won't connect. Gives the
+   * decision, as whoever dials next must keep to it: {@link EgressDecision.connectTo}.
+   */
+  async assertProxyAllowed(proxy: Pick<ProxyConfig, "host" | "port">): Promise<EgressDecision> {
+    if (!this.enforced) return { allowed: true };
     const decision = await this.checkUpstream(proxy);
-    if (decision.allowed || decision.unresolved) return;
-    throw egressBlocked(`The egress policy blocks the proxy ${proxy.host}:${proxy.port}: ${decision.reason}`, {
-      host: proxy.host,
+    if (decision.allowed || decision.unresolved) return decision;
+    const host = shownHost(proxy.host);
+    throw egressBlocked(`The egress policy blocks the proxy ${host}:${proxy.port}: ${decision.reason}`, {
+      host,
       port: proxy.port,
     });
   }
+
+  /** Allow entries that let a page reach this machine's own ports, whatever is listening there. */
+  loopbackAllowedOnAnyPort(): string[] {
+    return this.allow.flatMap((e) =>
+      e.port === undefined && reachesLoopback(e) ? [e.range?.label ?? e.name ?? `*${e.suffix ?? ""}`] : [],
+    );
+  }
+}
+
+const LOOPBACK_V4: Bytes = [127, 0, 0, 1];
+const LOOPBACK_V6: Bytes = ipv6Bytes("::1");
+
+function reachesLoopback(entry: EgressAllowEntry): boolean {
+  if (entry.range) {
+    return [LOOPBACK_V4, LOOPBACK_V6].some((ip) => inPrefix(ip, entry.range!.bytes, entry.range!.bits));
+  }
+  return entry.name === "localhost" || entry.suffix === ".localhost";
 }
 
 export function egressBlocked(message: string, details?: Record<string, unknown>): MultizenError {
