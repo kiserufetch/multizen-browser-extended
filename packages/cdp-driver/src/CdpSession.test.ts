@@ -379,6 +379,8 @@ test("after disconnect, actions fail loud with a clear message (not a hang)", as
 interface FakePage {
   delivers: (kind: "press" | "release" | "key", nth: number) => boolean;
   hidden?: boolean;
+  /** Hidden at some point after the probe was armed, visible again by the read. */
+  wasHidden?: boolean;
   painted?: boolean;
   /** Replace the document on mouse release, as a link click would. */
   navigatesOnClick?: boolean;
@@ -405,7 +407,7 @@ function makeInputClient(page: FakePage): FakeClient & { client: unknown } {
       }
       if (navigated) throw new Error("Cannot find context with specified id");
       if (expr.includes("delete globalThis.__mzInputProbe")) probe = null;
-      else if (expr.includes("visibilityState")) {
+      else if (expr.includes("return JSON.stringify")) {
         return {
           result: {
             value: JSON.stringify({
@@ -413,6 +415,7 @@ function makeInputClient(page: FakePage): FakeClient & { client: unknown } {
               released: probe?.released ?? false,
               keys: probe?.keys ?? 0,
               hidden: page.hidden ?? false,
+              wasHidden: page.wasHidden ?? page.hidden ?? false,
               painted: page.painted ?? true,
             }),
           },
@@ -507,10 +510,28 @@ for (const [name, run] of [
       assert.match(e.message, /visibilityState is "hidden"/);
       assert.match(e.message, /has not painted/);
       assert.match(e.message, /Page\.bringToFront/);
+      assert.match(e.message, /activate_tab/);
+      // Page.bringToFront cannot fix a display that is off or a locked
+      // session, so the advice must not stop at "bring it forward and retry".
+      assert.match(e.message, /retry only if it is "visible"/);
+      assert.match(e.message, /display (is )?off/);
+      assert.match(e.message, /request_human/);
       return true;
     });
   });
 }
+
+test("a lost click on a hidden page that has painted keeps the visibility advice", async () => {
+  const { s } = inputSession({ delivers: dropsAll, hidden: true, painted: true });
+  await assert.rejects(s.click("#b"), (e: unknown) => {
+    assert.ok(e instanceof InputNotDeliveredError);
+    assert.match(e.message, /visibilityState is "hidden"/);
+    assert.doesNotMatch(e.message, /has not painted/);
+    assert.match(e.message, /retry only if it is "visible"/);
+    assert.match(e.message, /session is unlocked/);
+    return true;
+  });
+});
 
 test("typeRef sends no keys when its focusing click was lost", async () => {
   const { s, fake } = inputSession({ delivers: dropsAll, hidden: true, painted: false });
@@ -533,6 +554,19 @@ test("a partly delivered type reports how many keys arrived", async () => {
 test("a press without a release is not a delivered click", async () => {
   const { s } = inputSession({ delivers: (kind) => kind === "press" });
   await assert.rejects(s.click("#b"), /received the press and no release/);
+});
+
+test("a page hidden when the input went out and visible by the read says to retry", async () => {
+  // Measured on Windows (2026-11-01-win-headed-desktop-cb): the press went out while
+  // the window was behind others, the window then came forward, only the release
+  // arrived, and the old message blamed something covering the target.
+  const { s } = inputSession({ delivers: dropsAll, hidden: false, wasHidden: true });
+  await assert.rejects(s.click("#b"), (e: unknown) => {
+    assert.ok(e instanceof InputNotDeliveredError);
+    assert.match(e.message, /was hidden when the input was sent and is visible now\. Retry\./);
+    assert.doesNotMatch(e.message, /screenshot/);
+    return true;
+  });
 });
 
 test("a lost click on a visible page does not blame visibility", async () => {
