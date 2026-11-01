@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-11-01
 
 MultiZen without the desktop app: `multizen-server` runs the same MCP tools and browser drivers
 in Docker or on a bare server, with headless and Xvfb display modes, permissions per token, an
@@ -15,6 +15,38 @@ per-profile engine gaps listed as known limitations in 0.10.0. How to run it:
 [`apps/server/README.md`](apps/server/README.md). Where it falls short, and what changed on the
 desktop: [`docs/server-mode.md`](docs/server-mode.md). What was checked and what wasn't:
 [`docs/server-acceptance.md`](docs/server-acceptance.md).
+
+### Upgrading from 0.10.0
+
+The desktop keeps port 7777, its token, the old tool names, windows by default and its browser
+flags, and its database only gains a column. No agent is blocked during a handoff there. The full
+list of desktop changes is in [`docs/server-mode.md`](docs/server-mode.md). What an MCP client or a
+script may notice:
+
+- **`wait_for_human` returns within 55 s**, not 5 minutes, and a handoff expires after 15 minutes.
+  Call it again while `status` is `pending`, and treat only `resumed` as done.
+- **`new_tab` makes the new tab active, and page tools follow the active tab.** They used to stay on
+  the first tab. A flow that opens a tab and carries on in the old one now needs `activate_tab`.
+- **Calls on one profile are queued** across all sessions. A call can now get a retryable `TIMEOUT`
+  after 30 s in line, or after 60 s running: retry it.
+- **Error codes:** code that matched `INTERNAL_ERROR` on a stopped profile should match
+  `PROFILE_NOT_RUNNING`. `cdp_send` and `cdp_send_no_safety` keep `INTERNAL_ERROR` there.
+- **`cdp_send` with no `sessionId`** sends `Browser.*`, `SystemInfo.*` and `Target.*` to the browser
+  session and the rest to the active tab, not the root tab.
+- **Refs are opaque** and no longer start at `e1`. Take them from the latest `extract`.
+- `navigate` now fails on a failed load, and names only the origin in its message.
+- `multizen-mcp` needs `--mock` to run its mock driver.
+- The activity feed shows only allowlisted arguments: `evaluate_js` expressions, CDP `params` and a
+  profile's `notes` are no longer in it.
+
+For someone working in a profile's window: on tabs you open yourself, `Intl` now reports the profile's
+locale, a new tab can wait up to 5 s while it is set up, and prerender is off. Dialogs on those tabs
+still wait for you on CloakBrowser. On Camoufox the dialog policy answers on every tab, where Playwright
+used to dismiss them all. Port 7777 also serves `/panel` (with a sign-in) and `/files/downloads/*` (with
+the token).
+
+For maintainers of this fork: the driver files moved, so merge upstream with
+`git merge -X find-renames=15`. A plain merge gives modify/delete conflicts.
 
 ### Added
 
@@ -260,6 +292,9 @@ desktop: [`docs/server-mode.md`](docs/server-mode.md). What was checked and what
   each launch, so one profile looks like a new device at each sign-in. Both are open, and neither is
   new here.
 - A server has no CloakBrowser on linux-arm64: that release has no such asset to pin.
+- Checked by hand on Windows, and on Linux in Docker. macOS packages come from CI and were not run.
+  Hosts that restrict user namespaces with AppArmor (Ubuntu 23.10+) were not tried either: a server
+  there fails with `SANDBOX_UNAVAILABLE` and the host setting to change.
 - Camoufox has no CDP. This is intended: `cdp_send` and `cdp_send_no_safety` return
   `UNSUPPORTED_ON_ENGINE` there. `request_human` restores a minimized window there, and Windows
   may not let it take the foreground.
@@ -807,6 +842,7 @@ feature set into the extended fork while keeping the fork's MCP/CDP tooling.
   per-profile SOCKS5 bridge with persona alignment, and the activity log.
 - GitHub Actions release workflow with stable, version-less download URLs.
 
+[0.11.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.10.0...v0.11.0
 [0.8.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.8.0-canary.1...v0.8.0
 [0.8.0-canary.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.7.1...v0.8.0-canary.1

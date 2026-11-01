@@ -1,6 +1,6 @@
 {
   "name": "@multizen/server",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "description": "MultiZen headless server: MCP over HTTP or stdio with the real browser drivers, no Electron",

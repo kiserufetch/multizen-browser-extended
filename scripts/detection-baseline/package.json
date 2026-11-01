@@ -1,6 +1,6 @@
 {
   "name": "@multizen/detection-baseline",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "description": "What pages and servers can see of a MultiZen browser: probes, input, TLS and HTTP/2, CreepJS, rebrowser-bot-detector",
