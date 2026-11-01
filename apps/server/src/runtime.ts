@@ -1,7 +1,7 @@
 import { ActivityLog, createSharedMcpState, type SharedMcpState } from "@multizen/mcp-server";
 import { ProfileManager } from "@multizen/profile-manager";
 import { defaultSettingsPath, SettingsStore } from "@multizen/settings-store";
-import type { BrowserEngine, ChromiumStatus, ProfileId } from "@multizen/types";
+import { resolveEngine, type BrowserEngine, type ChromiumStatus, type ProfileId } from "@multizen/types";
 import {
   ChromiumBrowserDriver,
   EngineRegistry,
@@ -171,6 +171,17 @@ export interface ServerRuntime {
   close(opts?: { gracefulMs?: number; reap?: boolean }): Promise<void>;
 }
 
+/** The engines this server would launch today: the default, and any profile's own pin. */
+export function enginesInUse(
+  runtime: Pick<ServerRuntime, "profileManager" | "getDefaultEngine">,
+): Set<BrowserEngine> {
+  const fallback = runtime.getDefaultEngine();
+  return new Set([
+    fallback,
+    ...runtime.profileManager.list().map((p) => resolveEngine(p.engine, fallback)),
+  ]);
+}
+
 /**
  * The browser runtime as the server runs it. Compared with the desktop's startup
  * this leaves out, on purpose: EngineUpdateService (the version stays pinned, so a
@@ -205,6 +216,8 @@ export async function buildRuntime(
     allocatePort: () => randomFreePort(),
     extraDisabledFeatures: serverDisabledFeatures(process.platform),
     armDownloadsAtLaunch: true,
+    requireSandbox: true,
+    ownsDataDir: true,
     onBrowserStderr: (pid, text) =>
       log.debug("browser stderr", { pid, text: text.slice(0, BROWSER_STDERR_MAX_CHARS) }),
   });

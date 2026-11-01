@@ -10,7 +10,8 @@ import {
 } from "@multizen/mcp-server";
 import { dataDirPathWarning, dataPaths, isWildcardHost, type ServerConfig } from "../config.ts";
 import { log } from "../log.ts";
-import { buildRuntime, SERVER_VERSION } from "../runtime.ts";
+import { buildRuntime, enginesInUse, SERVER_VERSION } from "../runtime.ts";
+import { preflightProcess, preflightUserNamespaces } from "../sandboxPreflight.ts";
 import { ensurePrivateFile } from "../secretKey.ts";
 import type { ShutdownManager } from "../shutdown.ts";
 
@@ -59,6 +60,7 @@ function localUrl(config: ServerConfig): string {
 export async function runServe(config: ServerConfig, shutdown: ShutdownManager): Promise<void> {
   const pathWarning = dataDirPathWarning(config.dataDir, process.platform);
   if (pathWarning) log.warn(pathWarning, { dataDir: config.dataDir });
+  preflightProcess(config.dataDir);
 
   const { ownerTokenPath, tokensPath } = dataPaths(config.dataDir);
   const url = localUrl(config);
@@ -85,6 +87,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
 
   const runtime = await buildRuntime(config);
   shutdown.add("runtime", () => runtime.close(), RUNTIME_CLOSE_BUDGET_MS);
+  preflightUserNamespaces(enginesInUse(runtime));
 
   const http = new HttpTransport({
     host: config.host,

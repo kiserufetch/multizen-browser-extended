@@ -1,7 +1,15 @@
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 
 import { CdpSession, InputNotDeliveredError } from "./CdpSession.js";
+
+// Deadlines here are unref'd, as they are in the code they test. Node 22's runner takes an
+// event loop with nothing else in it to mean a test will never finish, and cancels it.
+let holdLoop: NodeJS.Timeout;
+beforeEach(() => {
+  holdLoop = setInterval(() => {}, 1_000);
+});
+afterEach(() => clearInterval(holdLoop));
 
 /**
  * Unit/integration coverage for the stealth-preserving `cdpSend` primitive.

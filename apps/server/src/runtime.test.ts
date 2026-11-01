@@ -11,6 +11,7 @@ import {
   buildRuntime,
   DataDirMismatchError,
   engineProgressLogger,
+  enginesInUse,
   openProfiles,
   SERVER_FIREFOX_OPTIONS,
   serverDisabledFeatures,
@@ -309,6 +310,30 @@ test("engine progress: downloads are throttled, other changes pass at once", () 
     ],
   );
   assert.equal(logged.at(-1)?.error, "boom");
+});
+
+test("a server never turns the sandbox off, and owns the Singleton files of its data dir", async () => {
+  await withRuntime(async (runtime) => {
+    const chromium = (
+      runtime.driver as unknown as { chromiumDriver: { requireSandbox: boolean; ownsDataDir: boolean } }
+    ).chromiumDriver;
+    assert.equal(chromium.requireSandbox, true);
+    assert.equal(chromium.ownsDataDir, true);
+  });
+});
+
+test("the engines in use: the default and every profile's own pin", async () => {
+  await withRuntime(
+    async (runtime) => {
+      assert.deepEqual([...enginesInUse(runtime)], ["camoufox"]);
+      runtime.profileManager.create({ name: "follows the default" });
+      assert.deepEqual([...enginesInUse(runtime)], ["camoufox"]);
+      runtime.profileManager.create({ name: "pinned", engine: "cloakbrowser" });
+      assert.deepEqual([...enginesInUse(runtime)].sort(), ["camoufox", "cloakbrowser"]);
+    },
+    () => {},
+    "camoufox",
+  );
 });
 
 test("the readiness budget on a server is 30 s, for software GL in a container", async () => {

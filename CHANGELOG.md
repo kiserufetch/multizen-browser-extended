@@ -53,6 +53,15 @@ Closes the per-profile engine gaps listed as known limitations in 0.10.0.
   `<data-dir>/secret.key`, plaintext ones at start, and `secrets rotate` changes the key.
   The owner's token is in `<data-dir>/owner-token`. The desktop's `mcp-token` keeps full
   access, and the desktop stores proxy passwords as before.
+- **`multizen-server` in Docker.** `docker compose up -d` builds and runs it, published on
+  the host's loopback only, as a non-root user with every capability dropped. The image has
+  no browser engine: the first start downloads it into the volume, and a launch meanwhile
+  gets a retryable `ENGINE_NOT_READY`. `docker/seccomp-chromium.json` is Docker's default
+  profile plus the calls Chromium's sandbox needs. A server never falls back to
+  `--no-sandbox`, in a container or on bare-metal Linux: if the sandbox can't start, the
+  launch fails with `SANDBOX_UNAVAILABLE` and what to do about it. Starting as root, or on a
+  data directory it can't write to or run from, is refused at once. Under Xvfb and in headless
+  the first page has focus, and under Xvfb its window has the persona's exact size.
 - **MCP `create_profile` / `update_profile` take an `engine`** (`cloakbrowser` or
   `camoufox`), so agents can create Camoufox profiles. Like the app,
   `update_profile` refuses an engine change while the profile is running.

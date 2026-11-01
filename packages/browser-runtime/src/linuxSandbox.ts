@@ -128,6 +128,33 @@ export function detectMechanism(): RestrictionMechanism {
   return "none";
 }
 
+/**
+ * What an operator can do when Chromium's sandbox can't start. A server never turns the
+ * sandbox off instead, so this is the whole of its answer. In a container the host's
+ * knobs still read through `/proc/sys`, and are still the host's to change.
+ */
+export function sandboxInstructions(mechanism: RestrictionMechanism = detectMechanism()): string {
+  const steps = [
+    "In Docker, use the seccomp profile shipped with MultiZen, since Docker's default blocks " +
+      "user namespaces: `--security-opt seccomp=docker/seccomp-chromium.json`, which " +
+      "docker-compose.yml already does. `seccomp=unconfined` works too, and is weaker.",
+    "Run as a non-root user: Chromium refuses to start its sandbox as root.",
+  ];
+  if (mechanism === "apparmor") {
+    steps.push(
+      "This host's AppArmor restricts user namespaces. On the host, run " +
+        "`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, or install a per-binary " +
+        "AppArmor profile for the engine binary.",
+    );
+  } else if (mechanism === "clone") {
+    steps.push(
+      "This host's kernel restricts user namespaces. On the host, run " +
+        "`sudo sysctl -w kernel.unprivileged_userns_clone=1`.",
+    );
+  }
+  return steps.join(" ");
+}
+
 /** Whether the AppArmor LSM is active on this host. */
 export function isApparmorEnabled(): boolean {
   return readSysctl("/sys/module/apparmor/parameters/enabled") === "Y";

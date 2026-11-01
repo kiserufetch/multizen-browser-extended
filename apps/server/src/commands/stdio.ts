@@ -6,7 +6,8 @@ import { acquireServerLock, ServerLockHeldError } from "@multizen/browser-runtim
 import { createMultizenMcpServer } from "@multizen/mcp-server";
 import { dataDirPathWarning, type StdioConfig } from "../config.ts";
 import { errorFields, log, protocolStdout } from "../log.ts";
-import { buildRuntime, SERVER_VERSION } from "../runtime.ts";
+import { buildRuntime, enginesInUse, SERVER_VERSION } from "../runtime.ts";
+import { preflightProcess, preflightUserNamespaces } from "../sandboxPreflight.ts";
 import type { ShutdownManager } from "../shutdown.ts";
 
 /** Covers closeAll's own budget, the bridges and the database. */
@@ -33,6 +34,7 @@ async function runLocal(
 ): Promise<void> {
   const pathWarning = dataDirPathWarning(config.dataDir, process.platform);
   if (pathWarning) log.warn(pathWarning, { dataDir: config.dataDir });
+  preflightProcess(config.dataDir);
 
   let lock;
   try {
@@ -55,6 +57,7 @@ async function runLocal(
     () => runtime.close(clientGone ? { gracefulMs: 1500, reap: false } : {}),
     RUNTIME_CLOSE_BUDGET_MS,
   );
+  preflightUserNamespaces(enginesInUse(runtime));
 
   const { server } = createMultizenMcpServer({
     profileManager: runtime.profileManager,

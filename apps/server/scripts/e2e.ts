@@ -1,8 +1,10 @@
 /**
  * Live end-to-end check of the built server against a real browser engine, with
  * real MCP SDK clients. Not part of test:unit: it opens real browser windows, unless
- * --headless. Run it from PowerShell or cmd: Ctrl+C can't be delivered to anything
- * started from Git Bash.
+ * --headless. On Windows run it from PowerShell or cmd: Ctrl+C can't be delivered to
+ * anything started from Git Bash. On Linux run it where there is no DISPLAY, such as in
+ * the image of docker/Dockerfile, with its seccomp profile: without --headless, browsers
+ * run under Xvfb there, and its checks say so.
  *
  *   corepack yarn workspace @multizen/server build
  *   corepack yarn workspace @multizen/server exec tsx scripts/e2e.ts \
@@ -11,8 +13,8 @@
  *     [--keep] [--camoufox-install <dir>] [--headless] [--lan-address <ip>]
  *
  * --engine-version-dir links an installed engine into the temp data dir through a
- * junction on the version directory only, so nothing the server does to its own
- * engine cache can reach the original. Without it the engine is downloaded.
+ * junction (a symlink on Linux) on the version directory only, so nothing the server
+ * does to its own engine cache can reach the original. Without it the engine is downloaded.
  * --camoufox-install does the same for an installed Camoufox, and adds the concurrency
  * flow's checks across both engines.
  *
@@ -51,10 +53,10 @@
  * there are no OOPIF targets, cdp_send refuses, its pid is unknown (so nothing is killed
  * from outside), and no chrome:// pages. Its engine installs into the data dir.
  *
- * Windows only: the signal delivery, the junction and the process scan all are.
+ * The signal delivery, the link to the engine and the process scan differ by platform.
  */
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import {
   createServer as createHttpServer,
   request as httpRequest,
@@ -85,7 +87,12 @@ const { values } = parseArgs({
     "lan-address": { type: "string" },
   },
 });
-if (process.platform !== "win32") throw new Error("This check only runs on Windows");
+const IS_WINDOWS = process.platform === "win32";
+/** What ends the server gracefully from outside: Ctrl+Break there, a plain SIGTERM here. */
+const STOP_SIGNAL = IS_WINDOWS ? "SIGBREAK" : "SIGTERM";
+/** The mode with a window this machine can run, and the one it can't. */
+const WINDOW_MODE = IS_WINDOWS ? "headed" : "xvfb";
+const IMPOSSIBLE_MODE = IS_WINDOWS ? "xvfb" : "headed";
 const dataDirFlag = values["data-dir"];
 if (!dataDirFlag) throw new Error("--data-dir is required");
 const DATA_DIR = resolve(dataDirFlag);
@@ -114,6 +121,10 @@ function expect(condition: unknown, message: string): asserts condition {
 
 function junction(link: string, target: string): void {
   if (existsSync(link)) return;
+  if (!IS_WINDOWS) {
+    symlinkSync(target, link);
+    return;
+  }
   const res = spawnSync("cmd", ["/c", "mklink", "/J", link, target], { encoding: "utf8" });
   expect(res.status === 0, `mklink failed: ${res.stdout}${res.stderr}`);
 }
@@ -130,7 +141,7 @@ function prepareDataDir(): void {
   junction(join(cache, version), versionDir);
   writeFileSync(
     join(cache, "current.json"),
-    JSON.stringify({ version, binaryRelative: "chrome.exe" }),
+    JSON.stringify({ version, binaryRelative: IS_WINDOWS ? "chrome.exe" : "chrome" }),
   );
 }
 
@@ -143,6 +154,10 @@ function cleanDataDir(): void {
   ];
   for (const link of links) {
     if (!existsSync(link)) continue;
+    if (!IS_WINDOWS) {
+      unlinkSync(link);
+      continue;
+    }
     const res = spawnSync("cmd", ["/c", "rmdir", link], { encoding: "utf8" });
     expect(res.status === 0, `rmdir of the junction failed: ${res.stderr}`);
   }
@@ -399,6 +414,10 @@ function snapshotLine(snapshot: string, name: string): string | undefined {
 
 /** Windows delivers no signals: a console control event is the graceful equivalent. */
 function sendConsoleCtrl(pid: number, event: "CTRL_C" | "CTRL_BREAK"): void {
+  if (!IS_WINDOWS) {
+    process.kill(pid, event === "CTRL_C" ? "SIGINT" : STOP_SIGNAL);
+    return;
+  }
   const code = event === "CTRL_C" ? 0 : 1;
   const script = `
 Add-Type -Namespace Mz -Name Console -MemberDefinition @'
@@ -429,6 +448,7 @@ Start-Sleep -Milliseconds 300
 /** Processes whose command line mentions the data dir: the server and its browsers,
  *  renderers and GPU process. Not this script or whatever shell started it. */
 function leftoverProcesses(): string[] {
+  if (!IS_WINDOWS) return leftoverLinuxProcesses();
   const dir = DATA_DIR.toLowerCase().replace(/'/g, "''");
   const script =
     "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
@@ -441,6 +461,43 @@ function leftoverProcesses(): string[] {
     windowsHide: true,
   });
   return res.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
+/**
+ * The same from /proc, and what a Linux child hides from that test: a renderer needn't
+ * name the data dir, and Xvfb never does. A zombie has an empty command line, so it counts
+ * by its state: that is the point of the image's init, and of reaping here too.
+ */
+function leftoverLinuxProcesses(): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync("/proc")) {
+    const pid = Number(entry);
+    if (!Number.isInteger(pid) || pid === process.pid) continue;
+    try {
+      const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+      const name = stat.slice(stat.indexOf("(") + 1, stat.lastIndexOf(")"));
+      const line = argv.join(" ");
+      if (line.includes("e2e.ts")) continue;
+      const ours = /(^|\/)(chrome|chrome_crashpad_handler|camoufox-bin|Xvfb)$/.test(argv[0] ?? "");
+      const zombieOfOurs = state === "Z" && /^(chrome|camoufox|Xvfb|Isolated|Web Content|Socket)/i.test(name);
+      if (ours || line.includes(DATA_DIR) || zombieOfOurs) found.push(`${pid} ${state} ${name}`);
+    } catch {
+      // Gone between the listing and the read.
+    }
+  }
+  return found;
+}
+
+/** A browser's whole tree, from outside, as something other than this server would. */
+function killBrowserTree(pid: number): void {
+  if (!IS_WINDOWS) {
+    process.kill(-pid, "SIGKILL");
+    return;
+  }
+  const killed = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { encoding: "utf8", windowsHide: true });
+  expect(killed.status === 0, `taskkill failed: ${killed.stdout}${killed.stderr}`);
 }
 
 async function assertNoLeftovers(what: string): Promise<void> {
@@ -567,10 +624,10 @@ async function httpFlow(fixture: Fixture): Promise<string> {
     sendConsoleCtrl(serve.child.pid!, "CTRL_BREAK");
     const code = await serve.exited;
     expect(code === 0, `Ctrl+Break exit code ${code}:\n${serve.output()}`);
-    expect(/"reason":"SIGBREAK"/.test(serve.output()), "the shutdown was not started by SIGBREAK");
+    expect(serve.output().includes(`"reason":"${STOP_SIGNAL}"`), `the shutdown was not started by ${STOP_SIGNAL}`);
     expect(!existsSync(join(DATA_DIR, "server.lock")), "the lock outlived the shutdown");
-    pass("Ctrl+Break with a browser running", `exit ${code}, lock released`);
-    await assertNoLeftovers("Ctrl+Break");
+    pass(`${STOP_SIGNAL} with a browser running`, `exit ${code}, lock released`);
+    await assertNoLeftovers(STOP_SIGNAL);
     return id;
   } finally {
     if (serve.child.exitCode === null) serve.child.kill();
@@ -586,11 +643,7 @@ async function sigintFlow(profileId: string): Promise<void> {
     // A browser dying under the server must cost that profile only. In Electron a
     // stray socket error is survivable; under plain Node it would end the process.
     if (!IS_CAMOUFOX) {
-      const killed = spawnSync("taskkill", ["/PID", String(launched.pid), "/T", "/F"], {
-        encoding: "utf8",
-        windowsHide: true,
-      });
-      expect(killed.status === 0, `taskkill failed: ${killed.stderr}`);
+      killBrowserTree(Number(launched.pid));
       await waitFor(() => /"reason":"external-exit"/.test(serve.output()), "the browser's exit to register");
       const after = (await call(client, "list_profiles")).profiles as Array<{ isRunning: boolean }>;
       expect(after[0]?.isRunning === false, "the killed browser still reads as running");
@@ -1579,8 +1632,7 @@ async function limitChecks(owner: Client, ids: string[]): Promise<void> {
   const victim = secondUp;
   const running = (await call(owner, "launch_profile", { profile_id: victim })) as { pid?: number };
   expect(typeof running.pid === "number" && running.pid > 0, `no pid: ${JSON.stringify(running)}`);
-  const killed = spawnSync("taskkill", ["/PID", String(running.pid), "/T", "/F"], { encoding: "utf8" });
-  expect(killed.status === 0, `taskkill: ${killed.stdout}${killed.stderr}`);
+  killBrowserTree(running.pid);
   const noticedIn = await waitUntilStopped(owner, victim, 10_000);
   const afterKill = await rawCall(owner, "launch_profile", { profile_id: d });
   expect(!afterKill.isError, `after the kill: ${afterKill.content[0]?.text}`);
@@ -1968,6 +2020,7 @@ async function headlessSurfaceChecks(fixture: Fixture): Promise<void> {
     expect(surface.pointerFine, "(pointer: fine) is false");
     expect(surface.hover, "(hover: hover) is false");
     expect(surface.webdriver === false, `navigator.webdriver is ${surface.webdriver}`);
+    expect(surface.hasFocus, "the page has no focus in headless");
     const claims = JSON.stringify([surface.userAgent, surface.brands, fixture.lastHeaders()]);
     expect(!/headless/i.test(claims), `a headless marker in ${claims}`);
     pass("no headless marker", `in the UA, brands or request headers; sec-ch-ua: ${String(fixture.lastHeaders()["sec-ch-ua"])}`);
@@ -2011,6 +2064,51 @@ async function headlessSurfaceChecks(fixture: Fixture): Promise<void> {
   }
 }
 
+/** Xvfb is what a Linux server runs by default: the same questions of a page as for headless. */
+async function xvfbSurfaceChecks(fixture: Fixture): Promise<void> {
+  const serve = await startServe();
+  try {
+    const client = await httpClient(serve.url, serve.token);
+    const id = String((await call(client, "create_profile", { name: "under xvfb", ...ENGINE_ARGS })).id);
+    const launched = await launch(client, id);
+    expect(launched.displayMode === "xvfb", `auto chose ${String(launched.displayMode)}`);
+    pass("auto on Linux with Xvfb", "xvfb");
+
+    await call(client, "navigate", { profile_id: id, url: fixture.url });
+    const surface = await pageSurface(client, id);
+    pass("xvfb: page right after load", JSON.stringify(surface));
+    for (const ms of [100, 900]) {
+      await new Promise((done) => setTimeout(done, ms));
+      const later = await pageSurface(client, id);
+      pass(`xvfb: the same page ${ms === 100 ? "100 ms" : "1 s"} later`, `${later.visibility}, paints ${JSON.stringify(later.paints)}, focus ${later.hasFocus}`);
+    }
+    expect(surface.pointerFine, "(pointer: fine) is false");
+    expect(surface.hover, "(hover: hover) is false");
+    expect(surface.webdriver === false, `navigator.webdriver is ${surface.webdriver}`);
+    expect(surface.hasFocus, "the page has no focus under Xvfb");
+
+    await call(client, "new_tab", { profile_id: id, url: `${fixture.url}?fresh=1` });
+    await call(client, "wait_for_load", { profile_id: id });
+    const fresh = await pageSurface(client, id);
+    pass("xvfb: a new tab right after load", `${fresh.visibility}, paints ${JSON.stringify(fresh.paints)}, focus ${fresh.hasFocus}`);
+
+    const tree = treeOf((await call(client, "extract", { profile_id: id })).result as Extracted);
+    await call(client, "click_ref", { profile_id: id, ref: refOf(tree, "Press me") });
+    const clicked = (await call(client, "extract", { profile_id: id })).result as { title: string };
+    expect(clicked.title === "clicked", `the click in the new tab didn't land: ${clicked.title}`);
+    pass("xvfb: input in that tab at once", "delivered, no INPUT_NOT_DELIVERED");
+
+    const probe = await call(client, "probe_fingerprint", { profile_id: id });
+    pass("probe_fingerprint under xvfb", JSON.stringify({ ok: probe.ok, drift: probe.drift }));
+
+    await call(client, "close_profile", { profile_id: id });
+    await closeAndExit(serve, client);
+    await assertNoLeftovers("xvfb");
+  } finally {
+    if (serve.child.exitCode === null) serve.child.kill();
+  }
+}
+
 /** With nothing forced: what a machine can't do, and what a running browser won't change. */
 async function refusalChecks(): Promise<void> {
   const serve = await startServe();
@@ -2018,20 +2116,20 @@ async function refusalChecks(): Promise<void> {
     const client = await httpClient(serve.url, serve.token);
     const id = String((await call(client, "create_profile", { name: "refusals", ...ENGINE_ARGS })).id);
 
-    const xvfb = await callError(client, "launch_profile", { profile_id: id, display_mode: "xvfb" });
-    expect(xvfb.code === "DISPLAY_UNAVAILABLE", `xvfb on Windows: ${JSON.stringify(xvfb)}`);
-    pass("xvfb on Windows", `DISPLAY_UNAVAILABLE: ${String(xvfb.message)}`);
+    const impossible = await callError(client, "launch_profile", { profile_id: id, display_mode: IMPOSSIBLE_MODE });
+    expect(impossible.code === "DISPLAY_UNAVAILABLE", `${IMPOSSIBLE_MODE}: ${JSON.stringify(impossible)}`);
+    pass(`${IMPOSSIBLE_MODE} on this machine`, `DISPLAY_UNAVAILABLE: ${String(impossible.message)}`);
 
-    await call(client, "update_profile", { profile_id: id, display_mode: "xvfb" });
+    await call(client, "update_profile", { profile_id: id, display_mode: IMPOSSIBLE_MODE });
     const saved = await callError(client, "launch_profile", { profile_id: id });
-    expect(saved.code === "DISPLAY_UNAVAILABLE", `a saved xvfb: ${JSON.stringify(saved)}`);
+    expect(saved.code === "DISPLAY_UNAVAILABLE", `a saved ${IMPOSSIBLE_MODE}: ${JSON.stringify(saved)}`);
     await call(client, "update_profile", { profile_id: id, display_mode: null });
-    pass("a saved xvfb on Windows", "DISPLAY_UNAVAILABLE, not some other mode");
+    pass(`a saved ${IMPOSSIBLE_MODE} on this machine`, "DISPLAY_UNAVAILABLE, not some other mode");
 
     const launched = await call(client, "launch_profile", { profile_id: id, display_mode: "headless" });
     expect(launched.displayMode === "headless", `launched ${String(launched.displayMode)}`);
 
-    const mismatch = await callError(client, "launch_profile", { profile_id: id, display_mode: "headed" });
+    const mismatch = await callError(client, "launch_profile", { profile_id: id, display_mode: WINDOW_MODE });
     expect(mismatch.code === "PROFILE_ALREADY_RUNNING", `mismatch: ${JSON.stringify(mismatch)}`);
     expect(/close_profile/.test(String(mismatch.hint)), `no way out: ${JSON.stringify(mismatch)}`);
     pass("an explicit mismatch on a running profile", `PROFILE_ALREADY_RUNNING: ${String(mismatch.hint)}`);
@@ -2040,7 +2138,7 @@ async function refusalChecks(): Promise<void> {
     expect(plain.displayMode === "headless", "a plain launch changed something");
     pass("a plain launch on it", "idempotent, still headless");
 
-    const change = await callError(client, "update_profile", { profile_id: id, display_mode: "headed" });
+    const change = await callError(client, "update_profile", { profile_id: id, display_mode: WINDOW_MODE });
     expect(change.code === "PROFILE_ALREADY_RUNNING", `a real change: ${JSON.stringify(change)}`);
     await call(client, "update_profile", { profile_id: id, name: "renamed", display_mode: null });
     pass("update_profile while it runs", "a real change is refused, re-sending the same saves");
@@ -2071,9 +2169,9 @@ async function dataDirSwitchChecks(fixture: Fixture): Promise<void> {
       await call(client, "close_profile", { profile_id: id });
       pass(`one data dir: ${mode}`, expected.length ? `the page got "${sent}"` : "the cookie is set");
     };
-    await stage("headed", "from_headed", []);
-    await stage("headless", "from_headless", ["from_headed"]);
-    await stage("headed", "from_headed_again", ["from_headed", "from_headless"]);
+    await stage(WINDOW_MODE, "from_window", []);
+    await stage("headless", "from_headless", ["from_window"]);
+    await stage(WINDOW_MODE, "from_window_again", ["from_window", "from_headless"]);
     await closeAndExit(serve, client);
     await assertNoLeftovers("data dir switching");
   } finally {
@@ -2184,6 +2282,7 @@ async function extensionChecks(fixture: Fixture): Promise<void> {
 async function displayFlow(fixture: Fixture): Promise<void> {
   expect(!FORCED_HEADLESS, "this flow decides per server whether --headless is on: run it without");
   await headlessSurfaceChecks(fixture);
+  if (!IS_WINDOWS) await xvfbSurfaceChecks(fixture);
   await refusalChecks();
   await dataDirSwitchChecks(fixture);
   await restoreChecks(fixture);

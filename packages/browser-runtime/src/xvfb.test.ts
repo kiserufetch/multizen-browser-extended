@@ -1,4 +1,4 @@
-import { test, type TestContext } from "node:test";
+import { afterEach, beforeEach, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import type { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -8,6 +8,14 @@ import { delimiter, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { MultizenError } from "@multizen/types";
 import { hasXvfbBinary, startXvfb, xauthorityRecord } from "./xvfb.ts";
+
+// Deadlines here are unref'd, as they are in the code they test. Node 22's runner takes an
+// event loop with nothing else in it to mean a test will never finish, and cancels it.
+let holdLoop: NodeJS.Timeout;
+beforeEach(() => {
+  holdLoop = setInterval(() => {}, 1_000);
+});
+afterEach(() => clearInterval(holdLoop));
 
 /** Speaks as Xvfb does: the display on fd 3, diagnostics on stderr, exit on a signal. */
 class FakeXvfb extends EventEmitter {

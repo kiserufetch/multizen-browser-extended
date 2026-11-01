@@ -1135,7 +1135,9 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     const page = await r.context.newPage();
     const targetId = this.trackPage(r, profileId, page);
     await this.activate(r, targetId, page);
-    if (url) void page.goto(url).catch(() => {});
+    // As for a first tab: a client's next call must not land in the blank page and lose
+    // its context to this navigation committing.
+    if (url) await openStartPage(page, url);
     return { targetId };
   }
 

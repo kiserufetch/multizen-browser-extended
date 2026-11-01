@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 
 import { MultizenError } from "@multizen/types";
@@ -8,6 +8,14 @@ import { CdpSession, InputNotDeliveredError, randomRefBase, type TargetSender } 
 import { describeNamedKey, parseChord } from "./keyboard.js";
 import { TargetRegistry } from "./targetRegistry.js";
 import type { AccessibilityNode } from "./types.js";
+
+// Deadlines here are unref'd, as they are in the code they test. Node 22's runner takes an
+// event loop with nothing else in it to mean a test will never finish, and cancels it.
+let holdLoop: NodeJS.Timeout;
+beforeEach(() => {
+  holdLoop = setInterval(() => {}, 1_000);
+});
+afterEach(() => clearInterval(holdLoop));
 
 /**
  * A fake browser behind the one websocket: scripted answers per session, events
@@ -293,6 +301,68 @@ test("setup runs on new targets before they resume, on every tab and iframe", as
   const order = b.methods("S-B");
   assert.ok(order.indexOf("Page.enable") < order.indexOf("Runtime.runIfWaitingForDebugger"));
   assert.ok(b.methods("S-IF").includes("Runtime.runIfWaitingForDebugger"));
+});
+
+/** Restored tabs the browser hasn't got to answer nothing that needs their renderer. */
+function restoredTabs(pages: string[], live: string): FakeBrowser {
+  const b = new FakeBrowser();
+  b.handlers.set("Target.setAutoAttach", (_p, sid) => {
+    if (!sid) for (const id of pages) b.attachPage(id, `S-${id}`);
+    return {};
+  });
+  const real = b.send.bind(b);
+  b.send = async (method, params, sessionId) => {
+    if (sessionId && sessionId !== `S-${live}`) {
+      b.log.push({ method, params: params ?? {}, sessionId });
+      return new Promise(() => {});
+    }
+    if (method === "Runtime.evaluate" && String(params?.expression) === "document.visibilityState") {
+      return { result: { value: "visible" } };
+    }
+    return real(method, params, sessionId);
+  };
+  return b;
+}
+
+test("connect with restored tabs doesn't wait for those with no renderer yet", async () => {
+  const b = restoredTabs(["A", "B", "C", "D", "E"], "D");
+  const s = newSession(b);
+  await s.connect();
+  assert.equal(((await s.listTabs()) as { activeTargetId: string }).activeTargetId, "D");
+  for (const id of ["A", "B", "C", "D", "E"]) {
+    assert.ok(b.methods(`S-${id}`).includes("Page.enable"), "every tab is still set up");
+  }
+});
+
+test("restored tabs with no renderer don't hold up bootstrap, and still get their setup", async () => {
+  const b = restoredTabs(["A", "B", "C"], "B");
+  const s = newSession(b);
+  await s.connect();
+  await s.bootstrapTargets(async (send: TargetSender) => {
+    await send("Emulation.setLocaleOverride", { locale: "en-US" });
+  });
+  assert.deepEqual(
+    b.calls("Emulation.setLocaleOverride").map((c) => c.sessionId).sort(),
+    ["S-A", "S-B", "S-C"],
+  );
+});
+
+test("the active tab not answering its setup is waited for only so long", async (t) => {
+  const { b, s } = await connected(["A"]);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  b.hang.add("Emulation.setLocaleOverride");
+  let finished = false;
+  const bootstrap = s
+    .bootstrapTargets(async (send: TargetSender) => {
+      await send("Emulation.setLocaleOverride", { locale: "en-US" });
+    })
+    .then(() => {
+      finished = true;
+    });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(finished, false);
+  t.mock.timers.tick(5_000);
+  await bootstrap;
 });
 
 test("a target is resumed even when its setup never finishes", async (t) => {

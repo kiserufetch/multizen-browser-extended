@@ -2,15 +2,20 @@ import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { ProfileManager } from "@multizen/profile-manager";
-import type { ChromiumStatus, DisplayMode, MultizenError, ProfileId } from "@multizen/types";
-import { ChromiumBrowserDriver, type ChromiumBrowserDriverOptions } from "./ChromiumBrowserDriver.ts";
+import { MultizenError, type ChromiumStatus, type DisplayMode, type ProfileId } from "@multizen/types";
+import {
+  browserDataDirForEngine,
+  ChromiumBrowserDriver,
+  focusFirstPage,
+  type ChromiumBrowserDriverOptions,
+} from "./ChromiumBrowserDriver.ts";
 import type { EngineRegistry } from "./engineRegistry.ts";
 import { EngineRouter } from "./engineRouter.ts";
 import type { RuntimeHost } from "./host.ts";
@@ -156,6 +161,171 @@ test("extra disabled features join the one --disable-features switch; default ad
   });
 });
 
+/** Spawns stand in for a browser that dies at once with this on stderr. */
+function mockBrowserDying(stderr: string): { spawned: string[][]; restore: () => void } {
+  const spawned: string[][] = [];
+  const spawnMock = mock.method(childProcess, "spawn", (_bin: string, args: readonly string[]) => {
+    spawned.push([...args]);
+    const child = Object.assign(new EventEmitter(), {
+      pid: 900_000 + spawned.length,
+      exitCode: null as number | null,
+      signalCode: null,
+      stderr: new PassThrough(),
+    });
+    setImmediate(() => {
+      child.stderr.write(stderr);
+      setImmediate(() => {
+        child.exitCode = 1;
+        child.emit("exit", 1, null);
+      });
+    });
+    return child;
+  });
+  syncBuiltinESMExports();
+  return {
+    spawned,
+    restore: () => {
+      spawnMock.mock.restore();
+      syncBuiltinESMExports();
+    },
+  };
+}
+
+const NO_USABLE_SANDBOX = "[12:12:FATAL:zygote_host_impl_linux.cc(128)] No usable sandbox!\n";
+
+test("requireSandbox: a sandbox that can't start fails typed, with no second try and no --no-sandbox", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const browser = mockBrowserDying(NO_USABLE_SANDBOX);
+    let inactive = 0;
+    try {
+      const driver = driverFor(pm, join(dir, "chrome"), {
+        requireSandbox: true,
+        onBrowserStderr: () => {},
+        onSandboxInactive: () => (inactive += 1),
+      });
+      await assert.rejects(driver.launch(id), (e: unknown) => {
+        assert.ok(e instanceof MultizenError, `not a MultizenError: ${String(e)}`);
+        assert.equal(e.code, "SANDBOX_UNAVAILABLE");
+        assert.equal(e.retryable, false);
+        assert.match(e.hint ?? "", /seccomp-chromium\.json/);
+        return true;
+      });
+      assert.equal(browser.spawned.length, 1);
+      assert.ok(!browser.spawned[0]!.includes("--no-sandbox"));
+      assert.equal(inactive, 0);
+      assert.equal(driver.isRunning(id), false);
+    } finally {
+      browser.restore();
+    }
+  });
+});
+
+test("requireSandbox: neither the resolver nor the kernel check is asked", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const browser = mockBrowserDying("");
+    let asked = 0;
+    try {
+      const driver = driverFor(pm, join(dir, "chrome"), {
+        requireSandbox: true,
+        readinessBudgetMs: 50,
+        onBrowserStderr: () => {},
+        resolveSandboxDecision: async () => {
+          asked += 1;
+          return { noSandbox: true };
+        },
+      });
+      await assert.rejects(driver.launch(id));
+      assert.equal(asked, 0);
+      assert.ok(!browser.spawned[0]!.includes("--no-sandbox"));
+    } finally {
+      browser.restore();
+    }
+  });
+});
+
+test("without requireSandbox the desktop's backstop stays: one relaunch with --no-sandbox", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const browser = mockBrowserDying(NO_USABLE_SANDBOX);
+    const inactive: string[] = [];
+    const warn = mock.method(console, "warn", () => {});
+    try {
+      const driver = driverFor(pm, join(dir, "chrome"), {
+        readinessBudgetMs: 50,
+        onBrowserStderr: () => {},
+        resolveSandboxDecision: async () => ({ noSandbox: false }),
+        onSandboxInactive: (binaryPath) => inactive.push(binaryPath),
+      });
+      await assert.rejects(driver.launch(id));
+      assert.equal(browser.spawned.length, 2);
+      assert.ok(!browser.spawned[0]!.includes("--no-sandbox"));
+      assert.equal(browser.spawned[1]![0], "--no-sandbox");
+      assert.deepEqual(inactive, [join(dir, "chrome")]);
+    } finally {
+      warn.mock.restore();
+      browser.restore();
+    }
+  });
+});
+
+/** Every Singleton* as a browser leaves them, naming a process that is alive right now. */
+function plantSingletonFiles(browserDataDir: string): string[] {
+  mkdirSync(browserDataDir, { recursive: true });
+  const names = ["SingletonLock", "SingletonSocket", "SingletonCookie"];
+  for (const name of names) {
+    const path = join(browserDataDir, name);
+    // Links need a privilege on Windows, and Chromium only makes them on POSIX.
+    if (process.platform === "win32") writeFileSync(path, "");
+    else symlinkSync(`multizen-${process.pid}`, path);
+  }
+  return names.map((name) => join(browserDataDir, name));
+}
+
+function present(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("ownsDataDir: every Singleton* goes before the spawn, even one naming a live PID", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const planted = plantSingletonFiles(browserDataDirForEngine(pm.get(id)!.dataDir, "cloakbrowser"));
+    let atSpawn: boolean[] = [];
+    const spawnMock = mock.method(childProcess, "spawn", () => {
+      atSpawn = planted.map(present);
+      throw new Error("stop before a real spawn");
+    });
+    syncBuiltinESMExports();
+    try {
+      const driver = driverFor(pm, join(dir, "chrome"), { ownsDataDir: true });
+      await assert.rejects(driver.launch(id), /stop before a real spawn/);
+      assert.deepEqual(atSpawn, [false, false, false]);
+    } finally {
+      spawnMock.mock.restore();
+      syncBuiltinESMExports();
+    }
+  });
+});
+
+test("without ownsDataDir a Singleton* naming a live PID stays, as on the desktop", async () => {
+  await withProfile(async (pm, id, dir) => {
+    const planted = plantSingletonFiles(browserDataDirForEngine(pm.get(id)!.dataDir, "cloakbrowser"));
+    const spawnMock = mock.method(childProcess, "spawn", () => {
+      throw new Error("stop before a real spawn");
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(driverFor(pm, join(dir, "chrome")).launch(id), /stop before a real spawn/);
+      assert.equal(present(planted[0]!), true);
+    } finally {
+      spawnMock.mock.restore();
+      syncBuiltinESMExports();
+    }
+  });
+});
+
 test("the router hands firefoxOptions to the driver it constructs", async () => {
   await withProfile(async (pm, id, dir) => {
     const launchExtras = { handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false };
@@ -175,6 +345,7 @@ test("the router hands firefoxOptions to the driver it constructs", async () => 
       getDefaultEngine: () => "cloakbrowser",
       chromiumDriver,
       firefoxOptions: { launchExtras },
+      displayEnvironment: { platform: "win32", env: {}, hasXvfb: () => false },
     });
 
     await assert.rejects(router.launch(id), /not found/);
@@ -557,13 +728,42 @@ test("xvfb: the browser gets the private display, and the display goes when the 
     }
     const [server, browser] = spawned as [(typeof spawned)[0], (typeof spawned)[0]];
     assert.equal(server.bin, "Xvfb");
-    assert.ok(server.args.includes(`${screen.width}x${screen.height}x24`), "the fingerprint's screen");
+    assert.ok(
+      server.args.includes(`${screen.width + 1}x${screen.height + 1}x24`),
+      "the fingerprint's screen, a pixel over, so the window can have the persona's exact size",
+    );
     assert.equal(browser.env.DISPLAY, ":42");
     assert.equal(browser.env.XAUTHORITY, server.args[server.args.indexOf("-auth") + 1]);
     assert.equal(browser.env.WAYLAND_DISPLAY, undefined);
     assert.deepEqual(xvfb.signals, ["SIGTERM"], "stopped on the failure path");
     assert.equal(existsSync(browser.env.XAUTHORITY!), false, "and its auth file with it");
   });
+});
+
+test("with no window, the first page takes the focus from the address bar; headed leaves it", async () => {
+  const calls: DisplayMode[] = [];
+  const session = (mode: DisplayMode) => ({
+    bringToFront: async () => {
+      calls.push(mode);
+    },
+  });
+  for (const mode of ["headed", "xvfb", "headless"] as const) await focusFirstPage(session(mode), mode);
+  assert.deepEqual(calls, ["xvfb", "headless"]);
+
+  const warn = mock.method(console, "warn", () => {});
+  try {
+    await focusFirstPage(
+      {
+        bringToFront: async () => {
+          throw new Error("no such tab");
+        },
+      },
+      "headless",
+    );
+    assert.equal(warn.mock.callCount(), 1, "a launch is not worth failing over this");
+  } finally {
+    warn.mock.restore();
+  }
 });
 
 test("xvfb: the record's display stops on close and on a browser that exits by itself", async () => {

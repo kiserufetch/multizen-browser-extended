@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -20,6 +20,14 @@ import { DownloadTracker } from "./downloads.ts";
 import type { EngineRegistry } from "./engineRegistry.ts";
 import { EngineRouter, type EngineRouterOptions } from "./engineRouter.ts";
 import { StrictGeoCoherenceError } from "./launchTimezone";
+
+// Deadlines here are unref'd, as they are in the code they test. Node 22's runner takes an
+// event loop with nothing else in it to mean a test will never finish, and cancels it.
+let holdLoop: NodeJS.Timeout;
+beforeEach(() => {
+  holdLoop = setInterval(() => {}, 1_000);
+});
+afterEach(() => clearInterval(holdLoop));
 
 const READY: ChromiumStatus = { kind: "ready", version: "146", binaryPath: "x" };
 
@@ -88,6 +96,7 @@ function router(
     engineRegistry: { get: () => bootstrap } as unknown as EngineRegistry,
     getDefaultEngine: (): BrowserEngine => "cloakbrowser",
     chromiumDriver: driver as unknown as ChromiumBrowserDriver,
+    displayEnvironment: WINDOWS_MACHINE,
     engineNotReady,
   });
 }
@@ -315,6 +324,7 @@ function limitedRouter(
     engineRegistry: { get: () => new FakeBootstrap(true) } as unknown as EngineRegistry,
     getDefaultEngine: (): BrowserEngine => "cloakbrowser",
     chromiumDriver: driver as unknown as ChromiumBrowserDriver,
+    displayEnvironment: WINDOWS_MACHINE,
     ...opts,
   });
 }

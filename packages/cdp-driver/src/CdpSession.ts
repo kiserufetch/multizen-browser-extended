@@ -633,8 +633,11 @@ export class CdpSession {
           }).catch(() => {});
         }
       }
-      const attached = await Promise.all([...this.tabs.values()].map((tab) => tab.setup));
-      if (!attached.includes(true)) throw new Error("No page target could be attached");
+      // One working tab is enough: session restore starts a few tabs every few seconds,
+      // and a tab it hasn't got to answers nothing until it does.
+      if (!(await anyTrue([...this.tabs.values()].map((tab) => tab.setup)))) {
+        throw new Error("No page target could be attached");
+      }
       await this.pickVisibleTab(client);
     } catch (e) {
       this.forgetTargets();
@@ -650,22 +653,29 @@ export class CdpSession {
     return CDP({ target: webSocketDebuggerUrl, local: true });
   }
 
-  /** With session-restored tabs: the one the browser shows, not whichever came first. */
+  /**
+   * With session-restored tabs: the one the browser shows, not whichever came first.
+   * All at once, since a tab with no renderer yet answers nothing: in turn, that costs
+   * a second per tab.
+   */
   private async pickVisibleTab(client: CDP.Client): Promise<void> {
     if (this.tabs.size < 2) return;
-    for (const tab of this.tabs.values()) {
-      const visible = await sendTo<{ result?: { value?: unknown } }>(
-        client,
-        "Runtime.evaluate",
-        { expression: "document.visibilityState", returnByValue: true },
-        tab.sessionId,
-        1_000,
-      ).catch(() => null);
-      if (visible?.result?.value === "visible") {
+    let picked = false;
+    await anyTrue(
+      [...this.tabs.values()].map(async (tab) => {
+        const state = await sendTo<{ result?: { value?: unknown } }>(
+          client,
+          "Runtime.evaluate",
+          { expression: "document.visibilityState", returnByValue: true },
+          tab.sessionId,
+          1_000,
+        ).catch(() => null);
+        if (state?.result?.value !== "visible" || picked) return false;
+        picked = true;
         this.targets.setActive(tab.targetId);
-        return;
-      }
-    }
+        return true;
+      }),
+    );
   }
 
   private listenForTargets(client: CDP.Client): void {
@@ -801,7 +811,8 @@ export class CdpSession {
     } catch {
       return false;
     } finally {
-      await resumeTarget(client, sessionId);
+      // Not awaited: a tab session restore hasn't got to yet won't answer this either.
+      void resumeTarget(client, sessionId);
     }
   }
 
@@ -933,14 +944,20 @@ export class CdpSession {
   ): Promise<void> {
     const client = this.require();
     this.targetSetup = setup;
+    // Only the active tab is waited for. A restored tab with no renderer yet gets its
+    // commands when it comes up, which with enough tabs can be never: a launch that
+    // waited for all of them would never return (seen with 22 restored tabs).
+    const active = this.targets.active();
     const jobs: Array<Promise<void>> = [];
     for (const tab of this.tabs.values()) {
-      jobs.push(this.runTargetSetup(client, tab.targetId, tab.sessionId, "page"));
+      const job = this.runTargetSetup(client, tab.targetId, tab.sessionId, "page");
+      if (tab.targetId === active) jobs.push(job);
       for (const [sessionId, oopif] of tab.oopifs) {
-        jobs.push(this.runTargetSetup(client, oopif.targetId, sessionId, "iframe"));
+        const frameJob = this.runTargetSetup(client, oopif.targetId, sessionId, "iframe");
+        if (tab.targetId === active) jobs.push(frameJob);
       }
     }
-    await Promise.all(jobs);
+    await withTimeout(Promise.all(jobs), TARGET_SETUP_BUDGET_MS, "Target setup timed out").catch(() => {});
   }
 
   /**
@@ -2686,6 +2703,13 @@ function delay(ms: number): Promise<void> {
  *  synthetic input does not land on a single constant interval. */
 function randIn(min: number, max: number): number {
   return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+/** True as soon as one is, false once all have said no. */
+function anyTrue(results: Array<Promise<boolean>>): Promise<boolean> {
+  return Promise.any(results.map((r) => r.then((yes) => (yes ? true : Promise.reject(new Error("no")))))).catch(
+    () => false,
+  );
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {

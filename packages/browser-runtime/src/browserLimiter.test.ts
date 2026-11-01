@@ -1,7 +1,15 @@
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { MultizenError } from "@multizen/types";
 import { BROWSER_QUEUE_TIMEOUT_MS, BrowserLimiter } from "./browserLimiter.ts";
+
+// Deadlines here are unref'd, as they are in the code they test. Node 22's runner takes an
+// event loop with nothing else in it to mean a test will never finish, and cancels it.
+let holdLoop: NodeJS.Timeout;
+beforeEach(() => {
+  holdLoop = setInterval(() => {}, 1_000);
+});
+afterEach(() => clearInterval(holdLoop));
 
 const WAIT = { timeoutMs: 60_000 };
 

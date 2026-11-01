@@ -176,6 +176,7 @@ function stack(opts: { maxBrowsers?: number; browserQueueTimeoutMs?: number } = 
     engineRegistry,
     getDefaultEngine: () => "cloakbrowser",
     chromiumDriver: driver,
+    displayEnvironment: { platform: "win32", env: {}, hasXvfb: () => false },
     ...opts,
   });
   return { driver, router };

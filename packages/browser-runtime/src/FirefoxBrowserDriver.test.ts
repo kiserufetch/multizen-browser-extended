@@ -396,7 +396,7 @@ test("with every tab closed, verbs report TAB_NOT_FOUND", async (t) => {
   await assert.rejects(driver.screenshot(ID), hasCode("TAB_NOT_FOUND"));
 });
 
-test("new_tab with a url returns without waiting for it, and a failed load stays quiet", async (t) => {
+test("new_tab with a url waits for the commit at most, and a failed load stays quiet", async (t) => {
   const { driver, context } = rig(t);
   const page = new FakePage();
   page.gotoImpl = () => Promise.reject(new Error("page.goto: NS_ERROR_CONNECTION_REFUSED"));

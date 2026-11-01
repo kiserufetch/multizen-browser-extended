@@ -45,6 +45,7 @@ import { sanitizeStartUrl } from "./startPage";
 import { firstFreePort } from "./portProbe.ts";
 import { displayEnv, HEADLESS_CHROMIUM_ARGS } from "./displayMode.ts";
 import { startXvfb, type XvfbHandle } from "./xvfb.ts";
+import { sandboxInstructions } from "./linuxSandbox.ts";
 import type { RuntimeHost } from "./host.ts";
 
 function readSysctl(path: string): string | null {
@@ -68,6 +69,32 @@ const SANDBOX_FAILURE_RE = /No usable sandbox|Failed to move to new (?:user )?na
 class SandboxStartupError extends Error {}
 
 const STDERR_TAIL_CHARS = 2_048;
+
+/**
+ * Chromium takes one pixel off each side of a window the exact size of its screen,
+ * to keep window managers from maximizing it: 1919x1079 on a 1920x1080 persona. A real
+ * screen a pixel larger gives the window the persona's size. Pages can't see this: the
+ * persona's flags decide `screen.*` and the CSS device size (measured on CloakBrowser 146).
+ */
+const XVFB_SCREEN_MARGIN_PX = 1;
+
+/**
+ * A window opening on about:blank puts the focus in its address bar, for a person to
+ * type in, and it stays there through a navigation: `document.hasFocus()` reads false
+ * until someone clicks the page, with or without a window manager (measured under Xvfb,
+ * and in headless on Linux and Windows). With no window to raise and nobody to click,
+ * this does what the click would. Headed stays as it was, since it would take the
+ * desktop's focus from whoever is using it.
+ */
+export async function focusFirstPage(
+  session: Pick<CdpSession, "bringToFront">,
+  displayMode: DisplayMode,
+): Promise<void> {
+  if (displayMode === "headed") return;
+  await session.bringToFront().catch((e: unknown) => {
+    console.warn("[multizen] could not focus the first page:", (e as Error).message);
+  });
+}
 
 /**
  * What the browser last said is often the only clue why it never answered: a missing
@@ -132,6 +159,14 @@ interface LaunchInProgress {
   killStarting?: () => void;
 }
 
+function sandboxUnavailable(): MultizenError {
+  return new MultizenError(
+    "SANDBOX_UNAVAILABLE",
+    "Chromium's sandbox could not start, and this server never runs a browser without it.",
+    { hint: sandboxInstructions() },
+  );
+}
+
 function launchAborted(): MultizenError {
   return new MultizenError("LAUNCH_FAILED", "The launch was abandoned: the server is shutting down.");
 }
@@ -172,6 +207,20 @@ export interface ChromiumBrowserDriverOptions {
    * launch).
    */
   onSandboxInactive?: (binaryPath: string) => void;
+  /**
+   * Never run a browser with `--no-sandbox`, whatever the kernel says: for a server,
+   * whose pages come from agents and whose windows nobody watches. This bypasses the
+   * resolver, the fallback and the crash backstop, and a sandbox that fails to start
+   * fails the launch with SANDBOX_UNAVAILABLE. Default: the desktop's flow above.
+   */
+  requireSandbox?: boolean;
+  /**
+   * The caller holds the data dir's `server.lock`, so nothing else of ours can be using
+   * a profile here and this driver only spawns for one it isn't running. Then any
+   * `Singleton*` is left over and goes before the spawn, unjudged: judging one by its
+   * PID is what a restarted container gets wrong, with PIDs reused under a fixed hostname.
+   */
+  ownsDataDir?: boolean;
   /** Receives the browser's stderr. Default: raw lines on this process's stderr. */
   onBrowserStderr?: (pid: number, text: string) => void;
   /** Budget for the CDP readiness ladder after spawn. Default 15 s. */
@@ -225,6 +274,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     binaryPath: string;
   }) => Promise<{ noSandbox: boolean }>;
   private readonly onSandboxInactive?: (binaryPath: string) => void;
+  private readonly requireSandbox: boolean;
+  private readonly ownsDataDir: boolean;
   private readonly onBrowserStderr?: (pid: number, text: string) => void;
   private readonly readinessBudgetMs: number;
   private readonly customAllocatePort?: () => Promise<number>;
@@ -241,6 +292,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     this.extensionStoreRoot = opts.extensionStoreRoot;
     this.resolveSandboxDecision = opts.resolveSandboxDecision;
     this.onSandboxInactive = opts.onSandboxInactive;
+    this.requireSandbox = opts.requireSandbox ?? false;
+    this.ownsDataDir = opts.ownsDataDir ?? false;
     this.onBrowserStderr = opts.onBrowserStderr;
     this.readinessBudgetMs = opts.readinessBudgetMs ?? 15000;
     this.customAllocatePort = opts.allocatePort;
@@ -351,9 +404,11 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // launch sees `SingletonLock -> hostname-PID` pointing to a dead
     // PID and silently exits (the "socket hang up" the user sees: CDP
     // briefly opens, profile-in-use check fires, process bails).
-    await cleanStaleSingletonLocks(browserDataDir).catch((e: unknown) => {
-      console.warn("[multizen] failed to clean Singleton locks:", (e as Error).message);
-    });
+    if (!this.ownsDataDir) {
+      await cleanStaleSingletonLocks(browserDataDir).catch((e: unknown) => {
+        console.warn("[multizen] failed to clean Singleton locks:", (e as Error).message);
+      });
+    }
 
     // macOS records app crashes and on next launch shows
     // "Reopen windows from previous crash?" modal via NSPersistentUIRestorer.
@@ -389,14 +444,16 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // resolver failure can never dead-launch. `--no-sandbox` is NOT added to the
     // args literal below; it's applied at spawn time so the crash backstop can
     // relaunch with it without rebuilding the args.
-    let noSandbox: boolean;
-    try {
-      noSandbox = this.resolveSandboxDecision
-        ? (await this.resolveSandboxDecision({ engine, binaryPath: chromiumPath })).noSandbox
-        : fallbackNeedsNoSandbox();
-    } catch (e) {
-      console.warn("[multizen] sandbox resolver failed; using fallback:", (e as Error).message);
-      noSandbox = fallbackNeedsNoSandbox();
+    let noSandbox = false;
+    if (!this.requireSandbox) {
+      try {
+        noSandbox = this.resolveSandboxDecision
+          ? (await this.resolveSandboxDecision({ engine, binaryPath: chromiumPath })).noSandbox
+          : fallbackNeedsNoSandbox();
+      } catch (e) {
+        console.warn("[multizen] sandbox resolver failed; using fallback:", (e as Error).message);
+        noSandbox = fallbackNeedsNoSandbox();
+      }
     }
 
     // Probed here, after the engine download and geo lookup: this close to the
@@ -638,6 +695,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       useNoSandbox: boolean,
     ): Promise<{ child: ChildProcess; session: CdpSession }> => {
       if (launch.aborted) throw launchAborted();
+      if (this.ownsDataDir) await removeSingletonFiles(browserDataDir);
       const spawnArgs = useNoSandbox ? ["--no-sandbox", ...args] : args;
       const child = spawn(chromiumPath, spawnArgs, {
         // Unix: make the child a process-group leader so we can group-kill the
@@ -730,8 +788,8 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     try {
       if (displayMode === "xvfb") {
         xvfb = await startXvfb({
-          width: fp.screen.width,
-          height: fp.screen.height,
+          width: fp.screen.width + XVFB_SCREEN_MARGIN_PX,
+          height: fp.screen.height + XVFB_SCREEN_MARGIN_PX,
           runDir: tmpdir(),
         });
       }
@@ -739,6 +797,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       try {
         ({ child, session } = await attemptSpawn(noSandbox));
       } catch (e) {
+        if (e instanceof SandboxStartupError && this.requireSandbox) throw sandboxUnavailable();
         if (e instanceof SandboxStartupError && !noSandbox) {
           console.warn("[multizen] sandbox failed to start; relaunching with --no-sandbox");
           // Profile was expected active but isn't — let the host re-offer setup.
@@ -830,6 +889,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       .catch((e: unknown) => {
         console.error("[multizen] CDP bootstrap failed:", e);
       });
+    await focusFirstPage(session, displayMode);
 
     // Wire the companion's "Add to MultiZen" channel for this profile — scoped
     // to Web Store pages only (the host polls a DOM attribute there, never on
@@ -1445,6 +1505,17 @@ async function disableMacOsPersistentStateRestore(): Promise<void> {
   ]).catch(() => {});
 }
 
+const SINGLETON_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] as const;
+
+/** See {@link ChromiumBrowserDriverOptions.ownsDataDir}. */
+async function removeSingletonFiles(dataDir: string): Promise<void> {
+  for (const name of SINGLETON_FILES) {
+    await fsp.unlink(join(dataDir, name)).catch((e: NodeJS.ErrnoException) => {
+      if (e.code !== "ENOENT") throw e;
+    });
+  }
+}
+
 /**
  * Delete `SingletonLock` / `SingletonSocket` / `SingletonCookie` symlinks
  * if their target PID is no longer alive. Chromium refuses to launch
@@ -1457,7 +1528,7 @@ async function disableMacOsPersistentStateRestore(): Promise<void> {
  * loudly).
  */
 async function cleanStaleSingletonLocks(dataDir: string): Promise<void> {
-  const candidates = ["SingletonLock", "SingletonSocket", "SingletonCookie"];
+  const candidates = [...SINGLETON_FILES];
   const { readlink } = await import("node:fs/promises");
 
   const lockPath = join(dataDir, "SingletonLock");
