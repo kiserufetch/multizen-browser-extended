@@ -260,7 +260,7 @@ const INPUT_PROBE_GRACE_MS = 300;
  * keydowns are not counted either: one character is one counted keydown.
  */
 const INPUT_PROBE_INSTALL = `(() => {
-  const s = { pressed: false, released: false, keys: 0 };
+  const s = { pressed: false, released: false, keys: 0, wasHidden: document.visibilityState === "hidden" };
   const types = ["pointerdown", "mousedown", "pointerup", "mouseup", "click", "keydown"];
   const on = (e) => {
     if (!e.isTrusted) return;
@@ -268,8 +268,13 @@ const INPUT_PROBE_INSTALL = `(() => {
     else if (e.type === "keydown") { if (e.key !== "Shift") s.keys++; }
     else s.released = true;
   };
+  const vis = () => { if (document.visibilityState === "hidden") s.wasHidden = true; };
   for (const t of types) addEventListener(t, on, true);
-  s.stop = () => { for (const t of types) removeEventListener(t, on, true); };
+  document.addEventListener("visibilitychange", vis, true);
+  s.stop = () => {
+    for (const t of types) removeEventListener(t, on, true);
+    document.removeEventListener("visibilitychange", vis, true);
+  };
   if (globalThis.__mzInputProbe) globalThis.__mzInputProbe.stop();
   globalThis.__mzInputProbe = s;
 })()`;
@@ -281,6 +286,7 @@ const INPUT_PROBE_READ = `(() => {
     released: !!(s && s.released),
     keys: s ? s.keys : 0,
     hidden: document.visibilityState === "hidden",
+    wasHidden: !!(s && s.wasHidden),
     painted: performance.getEntriesByType("paint").length > 0,
   });
 })()`;
@@ -325,6 +331,8 @@ interface InputProbeState {
   released: boolean;
   keys: number;
   hidden: boolean;
+  /** Hidden at any point since the probe was armed: the input may have gone out then. */
+  wasHidden?: boolean;
   painted: boolean;
 }
 
@@ -426,6 +434,16 @@ export class InputNotDeliveredError extends Error {
   }
 }
 
+/**
+ * Raising the window fixes a background tab or a minimized or covered window, but
+ * not always: on Windows the foreground can stay with another app, and with the
+ * display off or the session locked Chromium marks every non-minimized window
+ * occluded whatever its z-order (ui/aura/native_window_occlusion_tracker_win.cc).
+ * Page.bringToFront failed 5 of 5 times there. So the advice is to check
+ * visibility after raising and to retry only if that worked. A page that was
+ * hidden when the input went out and is visible now just needs a retry.
+ * See docs/desktop-window-occlusion.md.
+ */
 function inputLostHint(st: InputProbeState): string {
   if (st.hidden) {
     return (
@@ -433,8 +451,19 @@ function inputLostHint(st: InputProbeState): string {
       (st.painted
         ? ""
         : " and has not painted since it loaded, and Chromium drops input to such a page") +
-      ". Bring its window to the front (cdp_send Page.bringToFront), then retry."
+      ". Pages are hidden in a background tab, in a minimized or fully covered window," +
+      " and on Windows while the display is off or the session is locked." +
+      " Call activate_tab on its tab or cdp_send Page.bringToFront (either takes focus from" +
+      " the operator's other windows), then check document.visibilityState with evaluate_js," +
+      ' and retry only if it is "visible".' +
+      ' If it is still "hidden", raising the window did not help: Windows can keep another' +
+      " app in the foreground, and with the display off or the session locked it reports" +
+      " every window as covered. Call request_human, or wait until the display is on and" +
+      " the session is unlocked."
     );
+  }
+  if (st.wasHidden) {
+    return " The page was hidden when the input was sent and is visible now. Retry.";
   }
   return " The page is visible. Take a screenshot to check whether something covers the target, then retry.";
 }

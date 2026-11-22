@@ -35,6 +35,16 @@ listed below. Measurements, causes, and what still needs engine changes:
   `America/Buenos_Aires`, `Asia/Calcutta`, `Europe/Kiev` and `Asia/Saigon` for the catalog's
   `America/Argentina/Buenos_Aires`, `Asia/Kolkata`, `Europe/Kyiv` and `Asia/Ho_Chi_Minh`. Zones are
   now compared as zones, here and in the launch's proxy-geo timezone check.
+- **`INPUT_NOT_DELIVERED` on a hidden page no longer says just "bring the window
+  to the front and retry".** On Windows that failed 5 of 5 times with the display
+  off: Chromium then reports every window as covered, whatever is in front. The
+  message now offers `activate_tab` or `cdp_send Page.bringToFront`, says to retry
+  only if the page then reads `visible`, and otherwise to call `request_human` or
+  wait. A page that was hidden when the input went out and visible by the check
+  now gets "Retry." The old message told the agent to look for something covering
+  the target. See `docs/desktop-window-occlusion.md`, which also weighs turning
+  occlusion tracking off on the desktop as the server does. The desktop's launch
+  flags are unchanged.
 
 ### Changed
 

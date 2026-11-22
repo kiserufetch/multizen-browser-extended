@@ -85,7 +85,7 @@ class FakeBrowser extends EventEmitter {
   }
 
   private evaluate(expression: string): unknown {
-    if (expression.includes("visibilityState")) {
+    if (expression.includes("return JSON.stringify")) {
       const delivered = { pressed: true, released: true, keys: 100, hidden: false, painted: true };
       return { result: { value: JSON.stringify(delivered) } };
     }

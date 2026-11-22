@@ -59,7 +59,7 @@ class FakeBrowser extends EventEmitter {
   /** The default answer is the probe seeing everything, as on a healthy page. */
   private onEvaluate(p: Record<string, unknown>): unknown {
     const expression = String(p.expression);
-    if (expression.includes("visibilityState") && p.contextId !== undefined) {
+    if (expression.includes("return JSON.stringify") && p.contextId !== undefined) {
       return {
         result: {
           value: JSON.stringify({
@@ -763,7 +763,7 @@ test("the probe for a ref in a frame is armed in that frame, on that frame's ses
 test("a dropped click in an OOPIF still throws InputNotDeliveredError", async () => {
   const { b, s, names } = await framedPage();
   b.handlers.set("Runtime.evaluate", (p) => {
-    if (String(p.expression).includes("visibilityState")) {
+    if (String(p.expression).includes("return JSON.stringify")) {
       return {
         result: {
           value: JSON.stringify({
@@ -1282,7 +1282,7 @@ test("press_key with no target: the first frame refusing the probe is still an e
 function probeReads(b: FakeBrowser, read: (sid: string | undefined) => unknown): void {
   const evaluate = b.handlers.get("Runtime.evaluate")!;
   b.handlers.set("Runtime.evaluate", (p, sid) =>
-    String(p.expression).includes("visibilityState") && p.contextId !== undefined
+    String(p.expression).includes("return JSON.stringify") && p.contextId !== undefined
       ? read(sid)
       : evaluate(p, sid),
   );
@@ -1404,7 +1404,7 @@ test("press_key without a target arms the probe in every frame, so a key in a fr
 test("press_key throws when no frame saw the key", async () => {
   const { b, s } = await connected(["A"]);
   b.handlers.set("Runtime.evaluate", (p) =>
-    String(p.expression).includes("visibilityState")
+    String(p.expression).includes("return JSON.stringify")
       ? {
           result: {
             value: JSON.stringify({
@@ -1890,7 +1890,7 @@ test("a dialog's click still finishes its release after the operation has answer
   });
   b.handlers.set("Runtime.evaluate", (p) => {
     const expression = String(p.expression);
-    if (expression.includes("visibilityState")) {
+    if (expression.includes("return JSON.stringify")) {
       return {
         result: {
           value: JSON.stringify({ pressed: true, released: true, keys: 0, hidden: false, painted: true }),
