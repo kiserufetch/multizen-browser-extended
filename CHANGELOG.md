@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Four fingerprint defects the 0.11.0 detection baselines found, fixed with values that stay the same
+for a profile from one launch to the next. Each changes what some desktop personas show pages, as
+listed below. Measurements, causes, and what still needs engine changes:
+[`docs/fingerprint-defects-2026-11-01.md`](docs/fingerprint-defects-2026-11-01.md).
+
+### Fixed
+
+- **Linux personas' WebGL strings are in the form Chrome reports.** CloakBrowser wraps a bare
+  NVIDIA renderer itself, so `linux-*-nvidia` pages read `…/PCIe/SSE2/PCIe/SSE2…` (CreepJS:
+  confidence moderate, grade C) and `probe_fingerprint` reported `webgl` drift. Mesa personas
+  showed vendor `Mesa` and a bare renderer, which Chrome never reports. Every Linux pair is now
+  `Google Inc. (<GL vendor>)` / `ANGLE (<GL vendor>, <renderer>, OpenGL …)`, which the engine
+  passes through unchanged (CreepJS: high, grade A).
+- **Camoufox profiles read the same at every launch, and their window matches the persona.** It
+  used to draw new threads, GPU, available screen, window size, canvas, audio and font-metric
+  noise at every launch (138 differences between two launches of one profile, now 12), with
+  `availWidth` sometimes wider than the screen and the page always 1280×720 (Playwright's default
+  viewport). Thread count, GPU vendor, screen, available area and a maximized window now come
+  from the persona, and the noise seeds from the profile's seed.
+- **CloakBrowser direct profiles gather a WebRTC candidate.** The engine's own default gathers
+  none, which stock Chrome never does. A direct profile now gets one srflx candidate with the
+  address its HTTP traffic shows anyway, and no host candidate (the engine would give the raw LAN
+  address). Proxied profiles, and direct ones behind a server's egress bridge, still gather none:
+  any other policy sends STUN from the real interface.
+- **`probe_fingerprint` no longer reports timezone drift for an ICU alias.** Chromium reports
+  `America/Buenos_Aires`, `Asia/Calcutta`, `Europe/Kiev` and `Asia/Saigon` for the catalog's
+  `America/Argentina/Buenos_Aires`, `Asia/Kolkata`, `Europe/Kyiv` and `Asia/Ho_Chi_Minh`. Zones are
+  now compared as zones, here and in the launch's proxy-geo timezone check.
+
+### Changed
+
+- **Saved Linux profiles are migrated when the database opens** (once; `updated_at` is left
+  alone). The GPU model is kept, and NVIDIA keeps the driver string pages already saw. Only the
+  nouveau entries (`NV178`, `NV137`) take the family's first GPU.
+- **A Camoufox profile's fingerprint changes once**, at its first launch on this version, and then
+  stays put. It was new at every launch before.
+- `probe_fingerprint` also compares `hardwareConcurrency` on Camoufox, which now pins it.
+
 ## [0.11.0] - 2026-11-01
 
 MultiZen without the desktop app: `multizen-server` runs the same MCP tools and browser drivers

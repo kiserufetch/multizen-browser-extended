@@ -192,11 +192,22 @@ function check(fp: FingerprintConfig): InvariantResult[] {
         fp.webgl.vendor !== "Apple Inc." && !fp.webgl.vendor.startsWith("Mesa"),
     });
   } else if (fp.platform === "Linux x86_64") {
-    const linuxVendors = new Set(["Mesa", "AMD", "Intel", "NVIDIA Corporation"]);
+    // Chrome on Linux: ANGLE over the desktop GL driver. The GL vendor appears
+    // in both strings: "Google Inc. (Intel)" / "ANGLE (Intel, Mesa ..., OpenGL ...)".
+    const glVendor = /^Google Inc\. \((AMD|Intel|NVIDIA Corporation)\)$/.exec(fp.webgl.vendor)?.[1];
     results.push({
-      name: "Linux → WebGL vendor is Mesa/AMD/Intel/NVIDIA",
-      passed: linuxVendors.has(fp.webgl.vendor) && fp.webgl.vendor !== "Apple Inc.",
+      name: "Linux → WebGL vendor is Google Inc. (AMD/Intel/NVIDIA Corporation)",
+      passed: glVendor !== undefined,
       message: fp.webgl.vendor,
+    });
+    results.push({
+      name: "Linux → WebGL renderer is ANGLE over OpenGL, same vendor, one driver suffix",
+      passed:
+        glVendor !== undefined &&
+        fp.webgl.renderer.startsWith(`ANGLE (${glVendor}, `) &&
+        / OpenGL [\d.]+ /.test(fp.webgl.renderer) &&
+        !/(\/PCIe\/SSE2){2}/.test(fp.webgl.renderer),
+      message: fp.webgl.renderer.slice(0, 100),
     });
   }
 

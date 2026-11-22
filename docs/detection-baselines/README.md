@@ -68,6 +68,25 @@ CreepJS: «похоже на headless» / «headless» / «stealth», %. Лож�
 
 Сайты с worker просто ломались бы, и детектор это видит сразу: `rebrowser workerConsistency` давал таймаут, а CreepJS не мог снять `workerScope`. Исправление: фильтра нет ни на одном уровне, всё, что не вкладка и не фрейм, снимается с паузы и отключается при подключении. Прогон до исправления лежит в `2026-10-31-before-worker-fix-win-headless-cb`, все остальные сделаны после.
 
+## Исправления после 0.11.0 (2026-11-01)
+
+Четыре находки отсюда и из `docs/server-mode.md` исправлены: двойной `/PCIe/SSE2` у `linux-*-nvidia`, Camoufox, который каждый раз новое устройство и окно 1280×720, ноль WebRTC-кандидатов у CloakBrowser и ложный дрейф часового пояса в `probe_fingerprint`. Причины, что стало с сохранёнными профилями и что упирается в движки: [`../fingerprint-defects-2026-11-01.md`](../fingerprint-defects-2026-11-01.md).
+
+Это другая машина: облачный Linux-контейнер без видеокарты, Xvfb, `run.ts` от непривилегированного пользователя (песочница CloakBrowser не запускается от root). «До» снято с дерева `v0.11.0` (`5f4d19c`), «после» с исправлениями, сид `mz-baseline-70`, тот же `--device`. Прогоны `2026-11-01-before-*` и `2026-11-01-after-*`, сравнения `compare-2026-11-01-*`.
+
+| Что | До | После |
+| --- | --- | --- |
+| CloakBrowser, `linux-desktop-nvidia`, WebGL | `NVIDIA Corporation`, `…RTX 4070/PCIe/SSE2/PCIe/SSE2…`; CreepJS GPU moderate, C | `Google Inc. (NVIDIA Corporation)`, один суффикс; high, A |
+| CloakBrowser, `linux-laptop-intel` и `linux-desktop-amd`, WebGL | вендор `Mesa`, рендерер без `ANGLE (…)` | `Google Inc. (Intel)` и `(AMD)`, `ANGLE (…, OpenGL 4.6 (Core Profile) Mesa 24.0.9)` |
+| CloakBrowser, прямой профиль, WebRTC | 0 кандидатов, 0 запросов STUN | 1 srflx с адресом, который видел STUN; host нет |
+| CloakBrowser, `--egress block-private` (мост), WebRTC | 0 и 0 | 0 и 0, без изменений |
+| Camoufox, два запуска одного профиля | 138 отличий | 12: шум canvas самого движка и `history.length` |
+| Camoufox, Linux-персона 1920×1080: avail, outer, inner | 1485×928, 1485×896, 1280×720 (у второго запуска 1920×1080, 1920×1040) | 1920×1050, 1920×1050, 1920×965 в обоих |
+| Camoufox, Windows-персона 1920×1080 | avail 3072×1680, потоков 12 при 8 в персоне | avail 1920×1040, outer 1936×1056, inner 1920×961, потоков 8 |
+| Camoufox headless, inner | 1280×720 | 1920×965 |
+
+Заголовки, TLS, HTTP/2, шрифты, ввод и rebrowser между «до» и «после» не отличаются.
+
 ## Что это за прогоны
 
 Все с одной персоной `--seed mz-baseline-70 --device windows-desktop-nvidia` (1920×1080, en-IE, Europe/Dublin), кроме `-linuxpersona`: там персона, которую `create_profile` выбирает на Linux сам (`linux-laptop-nvidia`, 2560×1440). `-cb` значит CloakBrowser, `-cf` значит Camoufox.

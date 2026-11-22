@@ -15,7 +15,7 @@ import type {
   BrowserEngine,
   DisplayMode,
 } from "@multizen/types";
-import { defaultFingerprint } from "./fingerprint.js";
+import { defaultFingerprint, migrateFingerprint } from "./fingerprint.js";
 import { isSealed, SecretKeyError, type SecretBox } from "./secretBox.js";
 
 interface ProfileRow {
@@ -125,6 +125,33 @@ export class ProfileManager {
     if (!cols.some((c) => c.name === "display_mode")) {
       this.db.exec(`ALTER TABLE profiles ADD COLUMN display_mode TEXT`);
     }
+    this.migrateFingerprints();
+  }
+
+  /**
+   * Rewrite fingerprints stored by an older catalog (see migrateFingerprint):
+   * the same persona, in the form the engine shows pages unchanged. Reads
+   * apply the same migration, so this only keeps the stored JSON (and exports
+   * made from it) current. Idempotent; `updated_at` is left alone, since the
+   * user changed nothing and the list is ordered by it.
+   */
+  private migrateFingerprints(): void {
+    const rows = this.db.prepare(`SELECT id, fingerprint FROM profiles`).all() as Array<
+      Pick<ProfileRow, "id" | "fingerprint">
+    >;
+    const update = this.db.prepare(`UPDATE profiles SET fingerprint = ? WHERE id = ?`);
+    this.db.transaction(() => {
+      for (const row of rows) {
+        let stored: FingerprintConfig;
+        try {
+          stored = JSON.parse(row.fingerprint) as FingerprintConfig;
+        } catch {
+          continue;
+        }
+        const migrated = migrateFingerprint(stored);
+        if (migrated !== stored) update.run(JSON.stringify(migrated), row.id);
+      }
+    })();
   }
 
   list(): ProfileSummary[] {
@@ -553,7 +580,7 @@ export class ProfileManager {
       notes: row.notes ?? undefined,
       tags: JSON.parse(row.tags) as string[],
       proxy: row.proxy ? this.readProxy(row.proxy) : undefined,
-      fingerprint: JSON.parse(row.fingerprint) as FingerprintConfig,
+      fingerprint: migrateFingerprint(JSON.parse(row.fingerprint) as FingerprintConfig),
       extensions: normalizeExtensions(row.extensions),
       icon: row.icon ?? undefined,
       startUrl: row.start_url ?? undefined,

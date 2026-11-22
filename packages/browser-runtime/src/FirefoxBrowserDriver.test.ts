@@ -927,6 +927,7 @@ test("launch options: camoufox's prefs stay under ours, and the caller's extras 
   );
   assert.deepEqual(options, {
     headless: false,
+    viewport: null,
     firefoxUserPrefs: { "from.camoufox": 1, both: "ours", "from.us": true },
     proxy: { server: "socks5://bridge" },
     downloadsPath: "dir",
@@ -935,6 +936,11 @@ test("launch options: camoufox's prefs stay under ours, and the caller's extras 
   assert.deepEqual(persistentContextOptions({ proxy: { server: "kept" } }, { downloadsPath: "d" }).proxy, {
     server: "kept",
   });
+});
+
+test("launch options: the page gets the real window, not Playwright's 1280x720 viewport", () => {
+  // Camoufox sizes the window to the persona; an emulated viewport would contradict it.
+  assert.equal(persistentContextOptions({ viewport: { width: 1280, height: 720 } }, { downloadsPath: "d" }).viewport, null);
 });
 
 test("an action found ready that never happens points at a covered window", async (t) => {
