@@ -2,25 +2,38 @@ import {
   ActivityLog,
   bindHandoffToBrowser,
   createSharedMcpState,
+  HttpWebhookSolverAdapter,
   InMemoryHumanHandoff,
+  SolverWebhookSessions,
   type ActivityEvent,
   type SharedMcpState,
 } from "@multizen/mcp-server";
 import { ProfileManager } from "@multizen/profile-manager";
-import { defaultSettingsPath, SettingsStore } from "@multizen/settings-store";
+import {
+  DEFAULT_SOLVER_SETTINGS,
+  defaultSettingsPath,
+  normalizeSolverSettings,
+  SettingsStore,
+} from "@multizen/settings-store";
 import {
   resolveEngine,
   withOriginsOnly,
   type BrowserEngine,
+  type CaptchaSolverPort,
   type ChromiumStatus,
   type ProfileId,
+  type SolverSettings,
 } from "@multizen/types";
 import {
   ChromiumBrowserDriver,
+  createCloudProviderSolverPort,
   DOWNLOAD_QUOTA_BYTES,
   EgressPolicy,
   EngineRegistry,
   EngineRouter,
+  getProfileBridgeInfo,
+  isCloudSolverProviderKind,
+  loadModuleSolverPort,
   MAX_URL_CHARS,
   randomFreePort,
   reapPreviousRun,
@@ -189,6 +202,9 @@ export interface ServerRuntime {
   shared: SharedMcpState;
   /** What the drivers enforce on connections, for tools to refuse up front. */
   egress: EgressPolicy;
+  solverPort: CaptchaSolverPort | null;
+  solverSettings: SolverSettings;
+  solverWebhookSessions: SolverWebhookSessions;
   getDefaultEngine: () => BrowserEngine;
   /**
    * Starts fetching the default engine in the background, so a first run's
@@ -257,6 +273,53 @@ export interface MeasurementOverrides {
   companionDir?: string;
 }
 
+export function resolveServerSolverSettings(
+  stored: SolverSettings | undefined,
+  cfg: Partial<
+    Pick<
+      ServerConfig,
+      | "solverAdapter"
+      | "solverWebhook"
+      | "solverWebhookSecret"
+      | "solverModule"
+      | "solverApiKey"
+      | "solverFallback"
+      | "solverProxyExposure"
+      | "solverAllowMainWorldJs"
+      | "solverTimeoutMs"
+    >
+  >,
+): SolverSettings {
+  const base = normalizeSolverSettings(stored ?? DEFAULT_SOLVER_SETTINGS);
+  const hasCliAdapter = Boolean(
+    (cfg.solverAdapter && cfg.solverAdapter !== "none") ||
+      cfg.solverWebhook ||
+      cfg.solverModule,
+  );
+  const adapter = cfg.solverAdapter
+    ? cfg.solverAdapter
+    : cfg.solverModule
+      ? "module"
+      : cfg.solverWebhook
+        ? "webhook"
+        : base.adapter;
+  return {
+    ...base,
+    enabled: cfg.solverAdapter === "none" ? false : hasCliAdapter ? true : base.enabled,
+    adapter,
+    ...(cfg.solverWebhook !== undefined ? { webhookUrl: cfg.solverWebhook } : {}),
+    ...(cfg.solverWebhookSecret !== undefined ? { webhookSecret: cfg.solverWebhookSecret } : {}),
+    ...(cfg.solverModule !== undefined ? { modulePath: cfg.solverModule } : {}),
+    ...(cfg.solverApiKey !== undefined ? { apiKey: cfg.solverApiKey } : {}),
+    ...(cfg.solverFallback !== undefined ? { fallbackPolicy: cfg.solverFallback } : {}),
+    ...(cfg.solverProxyExposure !== undefined ? { proxyExposure: cfg.solverProxyExposure } : {}),
+    ...(cfg.solverAllowMainWorldJs !== undefined
+      ? { allowMainWorldJs: cfg.solverAllowMainWorldJs }
+      : {}),
+    ...(cfg.solverTimeoutMs !== undefined ? { timeoutMs: cfg.solverTimeoutMs } : {}),
+  };
+}
+
 /**
  * The browser runtime as the server runs it. Compared with the desktop's startup
  * this leaves out, on purpose: EngineUpdateService (the version stays pinned, so a
@@ -274,7 +337,26 @@ export async function buildRuntime(
     | "headless"
     | "egressPolicy"
     | "egressAllow"
-  > & { handoffTtlMs?: number; downloadQuotaBytes?: number; measurement?: MeasurementOverrides },
+  > &
+    Partial<
+      Pick<
+        ServerConfig,
+        | "solverAdapter"
+        | "solverWebhook"
+        | "solverWebhookSecret"
+        | "solverModule"
+        | "solverApiKey"
+        | "solverFallback"
+        | "solverProxyExposure"
+        | "solverAllowMainWorldJs"
+        | "solverTimeoutMs"
+      >
+    > & {
+      handoffTtlMs?: number;
+      downloadQuotaBytes?: number;
+      measurement?: MeasurementOverrides;
+      callbackBaseUrl?: () => string;
+    },
   processJournal?: ProcessJournal,
   /** Whether people work on handoffs through a panel here. Plain stdio has none. */
   panel = false,
@@ -369,6 +451,55 @@ export async function buildRuntime(
   );
   bindHandoffToBrowser({ handoff, driver, activityLog, panelDriven: () => panel });
 
+  let currentSolverSettings = resolveServerSolverSettings(initialSettings.solver, cfg);
+  const solverWebhookSessions = new SolverWebhookSessions();
+  let solverPort: CaptchaSolverPort | null = null;
+  if (currentSolverSettings.enabled) {
+    if (isCloudSolverProviderKind(currentSolverSettings.adapter) && currentSolverSettings.apiKey) {
+      const apiBaseUrl =
+        typeof currentSolverSettings.options?.apiBaseUrl === "string"
+          ? currentSolverSettings.options.apiBaseUrl
+          : undefined;
+      solverPort = createCloudProviderSolverPort(currentSolverSettings.adapter, {
+        apiKey: currentSolverSettings.apiKey,
+        ...(apiBaseUrl ? { apiBaseUrl } : {}),
+      });
+    } else if (currentSolverSettings.adapter === "module" && currentSolverSettings.modulePath) {
+      solverPort = await loadModuleSolverPort(currentSolverSettings.modulePath, {
+        ...(currentSolverSettings.options ? { options: currentSolverSettings.options } : {}),
+        ...(currentSolverSettings.apiKey ? { apiKey: currentSolverSettings.apiKey } : {}),
+        ...(currentSolverSettings.webhookSecret ? { secret: currentSolverSettings.webhookSecret } : {}),
+      });
+    } else if (currentSolverSettings.adapter === "webhook" && currentSolverSettings.webhookUrl) {
+      solverPort = new HttpWebhookSolverAdapter({
+        webhookUrl: currentSolverSettings.webhookUrl,
+        ...(currentSolverSettings.webhookSecret
+          ? { webhookSecret: currentSolverSettings.webhookSecret }
+          : {}),
+        ...(currentSolverSettings.apiKey ? { apiKey: currentSolverSettings.apiKey } : {}),
+        callbackBaseUrl: cfg.callbackBaseUrl ?? (() => "http://127.0.0.1:7777"),
+        sessions: solverWebhookSessions,
+      });
+    }
+  }
+
+  const shared = createSharedMcpState({
+    handoff,
+    solverOptions: {
+      getSolverPort: () => solverPort,
+      getSolverSettings: () => currentSolverSettings,
+      onUpdateSettings: async (nextSettings, nextPort) => {
+        currentSolverSettings = nextSettings;
+        solverPort = nextPort;
+        await settings.update({ solver: nextSettings });
+      },
+      webhookSessions: solverWebhookSessions,
+      callbackBaseUrl: cfg.callbackBaseUrl ?? (() => "http://127.0.0.1:7777"),
+      getBridgeInfo: (profileId) => getProfileBridgeInfo(profileId),
+      activityLog,
+    },
+  });
+
   const startEngineBootstrap = (): void => {
     const engine = getDefaultEngine();
     void engineRegistry
@@ -380,6 +511,7 @@ export async function buildRuntime(
   const close = (opts: { gracefulMs?: number; reap?: boolean } = {}): Promise<void> => {
     closing ??= (async () => {
       try {
+        await solverPort?.dispose?.().catch(() => {});
         if (!(await withinBudget(driver.closeAll(opts), CLOSE_ALL_BUDGET_MS))) {
           log.warn("closing browsers overran its budget", { budgetMs: CLOSE_ALL_BUDGET_MS });
         }
@@ -397,8 +529,11 @@ export async function buildRuntime(
     engineRegistry,
     driver,
     activityLog,
-    shared: createSharedMcpState({ handoff }),
+    shared,
     egress,
+    solverPort,
+    solverSettings: currentSolverSettings,
+    solverWebhookSessions,
     getDefaultEngine,
     startEngineBootstrap,
     close,

@@ -18,12 +18,24 @@ import {
 import type {
   BrowserDriver,
   BrowserEngine,
+  CaptchaSolverPort,
   FingerprintConfig,
   UpdateProfileInput,
   CreateProfileInput,
+  ProfileId,
   ProxyConfig,
+  SolverNetworkContext,
+  SolverSettings,
 } from "@multizen/types";
-import { BROWSER_ENGINES, DISPLAY_MODES, MultizenError, resolveEngine } from "@multizen/types";
+import {
+  BROWSER_ENGINES,
+  DISPLAY_MODES,
+  MultizenError,
+  PROFILE_SOLVER_MODES,
+  PROXY_EXPOSURE_MODES,
+  resolveEngine,
+  SOLVER_FALLBACK_POLICIES,
+} from "@multizen/types";
 import { ActivityLog } from "./ActivityLog.js";
 import { callSignal, principalFrom, type Principal } from "./auth/principal.js";
 import {
@@ -80,6 +92,12 @@ export interface MultizenMcpServerOptions {
   limits?: ToolLimits;
   /** What one profile's upload inbox may hold. Off, as on a desktop: no limit. */
   maxInboxBytes?: number;
+  /** Optional challenge solver port instance or getter. */
+  solverPort?: CaptchaSolverPort | null | (() => CaptchaSolverPort | null);
+  /** Optional challenge solver settings or getter. */
+  solverSettings?: SolverSettings | (() => SolverSettings);
+  /** Optional lookup for a profile's running local SOCKS5 bridge endpoint. */
+  getBridgeInfo?: (profileId: ProfileId) => SolverNetworkContext["bridgeProxy"] | null;
 }
 
 export interface MultizenMcpServer {
@@ -233,6 +251,21 @@ const EngineSchema = z.enum(BROWSER_ENGINES);
 const DisplayModeSchema = z.enum(DISPLAY_MODES);
 const LaunchProfileSchema = ProfileIdSchema.extend({ display_mode: DisplayModeSchema.optional() });
 
+const ProfileSolverConfigSchema = z
+  .object({
+    mode: z.enum(PROFILE_SOLVER_MODES),
+    adapter: z.enum(["none", "capsolver", "2captcha", "rucaptcha", "webhook"] as const).optional(),
+    apiKey: z.string().optional(),
+    apiBaseUrl: z.string().url().optional(),
+    webhookUrl: z.string().url().optional(),
+    webhookSecret: z.string().optional(),
+    fallbackPolicy: z.enum(SOLVER_FALLBACK_POLICIES).optional(),
+    proxyExposure: z.enum(PROXY_EXPOSURE_MODES).optional(),
+    allowMainWorldJs: z.boolean().optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+
 const CreateProfileSchema = z.object({
   name: z.string().min(1),
   notes: z.string().optional(),
@@ -251,6 +284,7 @@ const CreateProfileSchema = z.object({
   alignTimezoneToProxy: z.boolean().optional(),
   /** When true, launch fails if proxy-geo country ≠ fingerprint.country. */
   strictGeoCoherence: z.boolean().optional(),
+  solver_config: ProfileSolverConfigSchema.optional(),
 });
 
 const UpdateProfileSchema = ProfileIdSchema.extend({
@@ -267,6 +301,7 @@ const UpdateProfileSchema = ProfileIdSchema.extend({
   fingerprint: FingerprintInputSchema.optional(),
   alignTimezoneToProxy: z.boolean().nullable().optional(),
   strictGeoCoherence: z.boolean().nullable().optional(),
+  solver_config: ProfileSolverConfigSchema.nullable().optional(),
 });
 
 /**
@@ -300,6 +335,35 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
   const shared = opts.shared ?? createSharedMcpState({ handoff: opts.handoff });
   const handoff = opts.handoff ?? shared.handoff;
   const getDefaultEngine = opts.getDefaultEngine ?? (() => resolveEngine(undefined, undefined));
+  const solverPortOpt = opts.solverPort;
+  const solverSettingsOpt = opts.solverSettings;
+  if (
+    solverPortOpt !== undefined ||
+    solverSettingsOpt !== undefined ||
+    opts.getBridgeInfo !== undefined ||
+    opts.activityLog !== undefined
+  ) {
+    shared.solver.configure({
+      ...(solverPortOpt !== undefined
+        ? {
+            getSolverPort:
+              typeof solverPortOpt === "function"
+                ? solverPortOpt
+                : () => solverPortOpt ?? null,
+          }
+        : {}),
+      ...(solverSettingsOpt !== undefined
+        ? {
+            getSolverSettings:
+              typeof solverSettingsOpt === "function"
+                ? solverSettingsOpt
+                : () => solverSettingsOpt,
+          }
+        : {}),
+      ...(opts.getBridgeInfo !== undefined ? { getBridgeInfo: opts.getBridgeInfo } : {}),
+      activityLog,
+    });
+  }
 
   const server = new Server(
     { name: "multizen", version: opts.serverVersion ?? "0.0.0" },
@@ -357,8 +421,10 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
             browserDriver: driver,
             handoff,
             leases: shared.leases,
+            solver: shared.solver,
             caller: { principal, sessionId },
             getDefaultEngine,
+            egress: opts.egress,
             uploadsRoot: opts.uploadsRoot,
             maxInlineFileBytes: opts.maxInlineFileBytes,
             handoffGate: opts.handoffGate ?? false,
@@ -420,6 +486,7 @@ async function dispatch(
         proxy: input.proxy,
         alignTimezoneToProxy: input.alignTimezoneToProxy,
         strictGeoCoherence: input.strictGeoCoherence,
+        solverConfig: input.solver_config,
       };
       const seed =
         input.seed ?? input.entropy ?? input.fingerprint?.seed;
@@ -488,6 +555,9 @@ async function dispatch(
       }
       if (input.strictGeoCoherence !== undefined) {
         patch.strictGeoCoherence = input.strictGeoCoherence;
+      }
+      if (input.solver_config !== undefined) {
+        patch.solverConfig = input.solver_config;
       }
       if (input.fingerprint !== undefined) {
         const { seed: patchSeed, ...fingerprintPatch } = input.fingerprint;

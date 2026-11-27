@@ -32,8 +32,14 @@ export interface HandoffRecord {
   /** The token that asked. */
   requestedBy?: string;
   settledAt?: string;
-  /** Who ended it: an operator's name, or what happened to the browser. */
+  /** Who ended it: an operator's name, a solver adapter (`solver:<id>`), or what happened to the browser. */
   settledBy?: string;
+  /** True while an automated solver port is working on this challenge before any human fallback. */
+  solverActive?: boolean;
+  /** Associated solver task id, when delegated to a solver port. */
+  solverTaskId?: string;
+  /** Why the solver port handed the challenge back to a human operator. */
+  solverFallbackReason?: string;
 }
 
 /**
@@ -54,6 +60,9 @@ export interface PendingHandoff {
   handoffId: string;
   kind: HandoffKind;
   expiresAt: string;
+  solverActive?: boolean;
+  solverTaskId?: string;
+  solverFallbackReason?: string;
 }
 
 export interface HandoffRequestOptions {
@@ -62,6 +71,8 @@ export interface HandoffRequestOptions {
   requestedBy?: string;
   /** Asking again leaves the reason as it was. */
   keepReason?: boolean;
+  solverActive?: boolean;
+  solverTaskId?: string;
 }
 
 export interface HumanHandoff {
@@ -88,6 +99,8 @@ export interface HumanHandoff {
   /** False unless this call ended it. */
   resumeById(id: string, by?: string): boolean;
   abortById(id: string, by?: string): boolean;
+  /** Transitions a solver-held pending handoff to human operator control (fallback). */
+  handoffToHuman?(id: string, fallbackReason?: string): boolean;
   /** The browser is going or gone: whatever was pending on it is over. */
   closeForProfile(profileId: ProfileId, by?: string): void;
   /** The record once it ends, or as it stands when `timeoutMs` runs out. Null: no such id. */
@@ -135,6 +148,8 @@ export class InMemoryHumanHandoff implements HumanHandoff {
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + ttlMs).toISOString(),
       ...(opts.requestedBy !== undefined ? { requestedBy: opts.requestedBy } : {}),
+      ...(opts.solverActive !== undefined ? { solverActive: opts.solverActive } : {}),
+      ...(opts.solverTaskId !== undefined ? { solverTaskId: opts.solverTaskId } : {}),
     };
     const timer = setTimeout(() => this.settle(profileId, "expired", "ttl"), ttlMs);
     // A bound on a wait, not work itself: it must not keep a finished process alive.
@@ -168,6 +183,11 @@ export class InMemoryHumanHandoff implements HumanHandoff {
       handoffId: record.id,
       kind: record.kind,
       expiresAt: record.expiresAt,
+      ...(record.solverActive !== undefined ? { solverActive: record.solverActive } : {}),
+      ...(record.solverTaskId !== undefined ? { solverTaskId: record.solverTaskId } : {}),
+      ...(record.solverFallbackReason !== undefined
+        ? { solverFallbackReason: record.solverFallbackReason }
+        : {}),
     }));
   }
 
@@ -216,6 +236,20 @@ export class InMemoryHumanHandoff implements HumanHandoff {
 
   abortById(id: string, by?: string): boolean {
     return this.settleById(id, "aborted", by);
+  }
+
+  handoffToHuman(id: string, fallbackReason?: string): boolean {
+    for (const { record } of this.entries.values()) {
+      if (record.id === id) {
+        record.solverActive = false;
+        if (fallbackReason !== undefined) {
+          record.solverFallbackReason = fallbackReason.slice(0, MAX_REASON_CHARS);
+        }
+        this.notify();
+        return true;
+      }
+    }
+    return false;
   }
 
   closeForProfile(profileId: ProfileId, by?: string): void {

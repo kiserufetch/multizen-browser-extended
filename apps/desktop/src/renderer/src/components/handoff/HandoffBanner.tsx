@@ -49,10 +49,11 @@ export function HandoffBanner({ profiles, mcpUrl }: Props): JSX.Element | null {
             <Hand size={13} className="text-amber-300 shrink-0" />
             <span className="font-semibold shrink-0">{profile?.name ?? handoff.profileId}</span>
             <span className="mono text-[10.5px] px-1.5 rounded bg-white/5 text-slate-300 shrink-0">
-              {KIND_LABEL[handoff.kind]}
+              {handoff.solverActive ? "SOLVER PORT" : KIND_LABEL[handoff.kind]}
             </span>
             <span className="truncate min-w-0 text-slate-300" title={handoff.reason}>
               {handoff.reason}
+              {handoff.solverFallbackReason ? ` (Solver fallback: ${handoff.solverFallbackReason})` : ""}
             </span>
             {!hasWindow && !mcpUrl && (
               <span className="text-amber-300 shrink-0">
@@ -61,10 +62,17 @@ export function HandoffBanner({ profiles, mcpUrl }: Props): JSX.Element | null {
               </span>
             )}
             <div className="flex-1" />
-            {!hasWindow && mcpUrl && (
-              <BannerButton onClick={() => void window.multizen.handoff.openPanel(handoff.handoffId)}>
-                Open panel
+            {handoff.solverActive ? (
+              <BannerButton onClick={() => void window.multizen.handoff.takeover(handoff.profileId)}>
+                Take over manually
               </BannerButton>
+            ) : (
+              !hasWindow &&
+              mcpUrl && (
+                <BannerButton onClick={() => void window.multizen.handoff.openPanel(handoff.handoffId)}>
+                  Open panel
+                </BannerButton>
+              )
             )}
             <BannerButton
               primary

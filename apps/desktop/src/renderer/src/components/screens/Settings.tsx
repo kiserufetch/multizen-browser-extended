@@ -8,6 +8,7 @@ import {
   Eye,
   EyeOff,
   Monitor,
+  Plug,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
@@ -22,6 +23,7 @@ import type {
   ChromiumStatus,
   EngineUpdateStatus,
   SandboxStatus,
+  SolverSettings,
   SystemInfo,
   UpdateStatus,
 } from "../../types";
@@ -43,6 +45,11 @@ export function Settings({ onImport }: Props): JSX.Element {
   const [sandbox, setSandbox] = useState<SandboxStatus | null>(null);
   const [sandboxBusy, setSandboxBusy] = useState(false);
   const [sandboxCmdCopied, setSandboxCmdCopied] = useState(false);
+  const [solverTestBusy, setSolverTestBusy] = useState(false);
+  const [solverTestResult, setSolverTestResult] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!window.multizen) return;
@@ -72,6 +79,30 @@ export function Settings({ onImport }: Props): JSX.Element {
     if (!settings) return;
     const next = await window.multizen.settings.update(p);
     setSettings(next);
+  }
+
+  async function patchSolver(p: Partial<SolverSettings>): Promise<void> {
+    if (!settings) return;
+    const current: SolverSettings = settings.solver ?? {
+      enabled: false,
+      adapter: "none",
+      fallbackPolicy: "solver-then-human",
+      proxyExposure: "bridge",
+      allowMainWorldJs: false,
+      timeoutMs: 120_000,
+    };
+    await patch({ solver: { ...current, ...p } });
+  }
+
+  async function testSolverPort(): Promise<void> {
+    setSolverTestBusy(true);
+    setSolverTestResult(null);
+    try {
+      const res = await window.multizen.solver.test(settings?.solver);
+      setSolverTestResult({ ok: res.ok, message: res.message });
+    } finally {
+      setSolverTestBusy(false);
+    }
   }
 
   async function checkForUpdates(): Promise<void> {
@@ -207,6 +238,246 @@ export function Settings({ onImport }: Props): JSX.Element {
             />
             Auto-start MCP HTTP transport on app launch
           </label>
+        </Row>
+
+        <Row
+          icon={<Plug size={16} strokeWidth={1.5} />}
+          title="Challenge solver port"
+          desc="Connect an external HTTP webhook or local ESM solver adapter. When enabled, CAPTCHA requests route through the solver port first and fall back to human handoff if needed."
+        >
+          {(() => {
+            const solver: SolverSettings = settings.solver ?? {
+              enabled: false,
+              adapter: "none",
+              fallbackPolicy: "solver-then-human",
+              proxyExposure: "bridge",
+              allowMainWorldJs: false,
+              timeoutMs: 120_000,
+            };
+            return (
+              <div className="space-y-3">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <label className="flex items-center gap-2.5 text-[12px] text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={solver.enabled}
+                      onChange={(e) =>
+                        void patchSolver({
+                          enabled: e.target.checked,
+                          adapter:
+                            e.target.checked && solver.adapter === "none"
+                              ? "capsolver"
+                              : solver.adapter,
+                        })
+                      }
+                      className="w-3.5 h-3.5 rounded accent-purple-500"
+                    />
+                    Enable challenge solver port
+                  </label>
+                  <Pill kind={solver.enabled ? "running" : "idle"} dot={solver.enabled}>
+                    {solver.enabled ? solver.adapter : "off"}
+                  </Pill>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div>
+                    <div className="text-[11px] text-slate-500 mb-1">Adapter type</div>
+                    <select
+                      value={solver.adapter}
+                      onChange={(e) =>
+                        void patchSolver({
+                          adapter: e.target.value as SolverSettings["adapter"],
+                        })
+                      }
+                      className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 outline-none"
+                      style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+                    >
+                      <option value="none">None</option>
+                      <option value="capsolver">CapSolver (API v2)</option>
+                      <option value="2captcha">2Captcha (API v2)</option>
+                      <option value="rucaptcha">RuCaptcha (API v2)</option>
+                      <option value="webhook">HTTP Webhook</option>
+                      <option value="module">Local ESM Module</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] text-slate-500 mb-1">Fallback policy</div>
+                    <select
+                      value={solver.fallbackPolicy}
+                      onChange={(e) =>
+                        void patchSolver({
+                          fallbackPolicy: e.target.value as SolverSettings["fallbackPolicy"],
+                        })
+                      }
+                      className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 outline-none"
+                      style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+                    >
+                      <option value="solver-then-human">Solver → Human fallback</option>
+                      <option value="solver-only">Solver only</option>
+                      <option value="human-only">Human handoff only</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] text-slate-500 mb-1">Proxy exposure</div>
+                    <select
+                      value={solver.proxyExposure}
+                      onChange={(e) =>
+                        void patchSolver({
+                          proxyExposure: e.target.value as SolverSettings["proxyExposure"],
+                        })
+                      }
+                      className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 outline-none"
+                      style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+                    >
+                      <option value="bridge">Local SOCKS5 bridge (safe)</option>
+                      <option value="raw">Raw upstream credentials</option>
+                      <option value="none">Do not pass proxy</option>
+                    </select>
+                  </div>
+                </div>
+
+                {(solver.adapter === "capsolver" ||
+                  solver.adapter === "2captcha" ||
+                  solver.adapter === "rucaptcha") && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <div className="text-[11px] text-slate-500 mb-1">
+                        {solver.adapter === "capsolver"
+                          ? "CapSolver API Key"
+                          : solver.adapter === "2captcha"
+                            ? "2Captcha API Key"
+                            : "RuCaptcha API Key"}
+                      </div>
+                      <input
+                        type="password"
+                        value={solver.apiKey ?? ""}
+                        onChange={(e) => void patchSolver({ apiKey: e.target.value })}
+                        placeholder="clientKey from your dashboard"
+                        className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 mono outline-none placeholder:text-slate-600"
+                        style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-slate-500 mb-1">
+                        Custom API Base URL (optional)
+                      </div>
+                      <input
+                        type="text"
+                        value={
+                          typeof solver.options?.apiBaseUrl === "string"
+                            ? solver.options.apiBaseUrl
+                            : ""
+                        }
+                        onChange={(e) =>
+                          void patchSolver({
+                            options: {
+                              ...(solver.options ?? {}),
+                              apiBaseUrl: e.target.value,
+                            },
+                          })
+                        }
+                        placeholder={
+                          solver.adapter === "capsolver"
+                            ? "https://api.capsolver.com"
+                            : solver.adapter === "2captcha"
+                              ? "https://api.2captcha.com"
+                              : "https://api.rucaptcha.com"
+                        }
+                        className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 mono outline-none placeholder:text-slate-600"
+                        style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {solver.adapter === "webhook" && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <div className="text-[11px] text-slate-500 mb-1">Webhook URL</div>
+                      <input
+                        type="text"
+                        value={solver.webhookUrl ?? ""}
+                        onChange={(e) => void patchSolver({ webhookUrl: e.target.value })}
+                        placeholder="http://127.0.0.1:9090/solve"
+                        className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 mono outline-none placeholder:text-slate-600"
+                        style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-slate-500 mb-1">HMAC Secret (optional)</div>
+                      <input
+                        type="password"
+                        value={solver.webhookSecret ?? ""}
+                        onChange={(e) => void patchSolver({ webhookSecret: e.target.value })}
+                        placeholder="X-MultiZen-Signature secret"
+                        className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 mono outline-none placeholder:text-slate-600"
+                        style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {solver.adapter === "module" && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <div className="text-[11px] text-slate-500 mb-1">ESM Module Path</div>
+                      <input
+                        type="text"
+                        value={solver.modulePath ?? ""}
+                        onChange={(e) => void patchSolver({ modulePath: e.target.value })}
+                        placeholder="/path/to/solver-adapter.mjs"
+                        className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 mono outline-none placeholder:text-slate-600"
+                        style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-slate-500 mb-1">Adapter API Key (optional)</div>
+                      <input
+                        type="password"
+                        value={solver.apiKey ?? ""}
+                        onChange={(e) => void patchSolver({ apiKey: e.target.value })}
+                        placeholder="Passed to createSolverPort({ apiKey })"
+                        className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 mono outline-none placeholder:text-slate-600"
+                        style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <label className="flex items-center gap-2.5 text-[12px] text-slate-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={solver.allowMainWorldJs}
+                    onChange={(e) => void patchSolver({ allowMainWorldJs: e.target.checked })}
+                    className="w-3.5 h-3.5 rounded accent-purple-500"
+                  />
+                  Allow main-world JS callback execution after token injection
+                </label>
+
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <button
+                    type="button"
+                    className="btn-secondary px-3 py-[7px] text-[12px] rounded-[9px]"
+                    onClick={() => void testSolverPort()}
+                    disabled={solverTestBusy || solver.adapter === "none"}
+                  >
+                    {solverTestBusy ? "Testing…" : "Test solver port"}
+                  </button>
+                  {solverTestResult && (
+                    <span
+                      className={`text-[12px] ${
+                        solverTestResult.ok ? "text-emerald-400" : "text-amber-400"
+                      }`}
+                    >
+                      {solverTestResult.message}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
         </Row>
 
         <Row

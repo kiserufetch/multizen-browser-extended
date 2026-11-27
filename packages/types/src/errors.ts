@@ -33,6 +33,9 @@ export const MULTIZEN_ERROR_CODES = [
   "RATE_LIMITED",
   "SESSION_LIMIT",
   "INPUT_NOT_DELIVERED",
+  "SOLVER_NOT_CONFIGURED",
+  "SOLVER_UNSUPPORTED_CHALLENGE",
+  "SOLVER_FAILED",
 ] as const;
 
 export type MultizenErrorCode = (typeof MULTIZEN_ERROR_CODES)[number];
@@ -47,6 +50,7 @@ const RETRYABLE_BY_DEFAULT: ReadonlySet<MultizenErrorCode> = new Set<MultizenErr
   "RATE_LIMITED",
   "SESSION_LIMIT",
   "INPUT_NOT_DELIVERED",
+  "SOLVER_FAILED",
 ]);
 
 export interface MultizenErrorDetails {

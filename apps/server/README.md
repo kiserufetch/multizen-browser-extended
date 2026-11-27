@@ -160,6 +160,15 @@ MCP over Streamable HTTP (`/mcp`) and legacy SSE (`/sse`), plus the panel (`/pan
 | `--handoff-webhook` | `MULTIZEN_HANDOFF_WEBHOOK` | | Your endpoint, told about each new handoff. |
 | `--handoff-webhook-secret` | `MULTIZEN_HANDOFF_WEBHOOK_SECRET` | | Signs its body. Prefer the variable: a command line is readable by others. |
 | `--handoff-ttl-ms` | `MULTIZEN_HANDOFF_TTL_MS` | `900000` | How long a handoff waits for a person. |
+| `--solver-adapter` | `MULTIZEN_SOLVER_ADAPTER` | `none` | `none`, `capsolver`, `2captcha`, `rucaptcha`, `webhook` or `module`. |
+| `--solver-webhook` | `MULTIZEN_SOLVER_WEBHOOK` | | External HTTP webhook endpoint for the challenge solver port. |
+| `--solver-webhook-secret` | `MULTIZEN_SOLVER_WEBHOOK_SECRET` | | HMAC secret signing solver webhook requests (`X-MultiZen-Signature`). |
+| `--solver-module` | `MULTIZEN_SOLVER_MODULE` | | Path to a local ESM module exporting `createSolverPort(ctx)`. |
+| `--solver-api-key` | `MULTIZEN_SOLVER_API_KEY` | | API key passed to the configured solver adapter. |
+| `--solver-fallback` | `MULTIZEN_SOLVER_FALLBACK` | `solver-then-human` | `solver-then-human`, `solver-only` or `human-only`. |
+| `--solver-proxy-exposure` | `MULTIZEN_SOLVER_PROXY_EXPOSURE` | `bridge` | `bridge` (local SOCKS5 bridge only), `raw` (includes upstream credentials) or `none`. |
+| `--solver-allow-main-world-js` | `MULTIZEN_SOLVER_ALLOW_MAIN_WORLD_JS` | off | Allows the solver port to evaluate JS callbacks in the page's main world. |
+| `--solver-timeout-ms` | `MULTIZEN_SOLVER_TIMEOUT_MS` | `120000` | Per-task timeout in ms for the challenge solver port. |
 
 `MULTIZEN_LOG_LEVEL` is `debug`, `info`, `warn` or `error`, and nothing below it is written. The default, `info`, hides what browsers write to stderr: set `debug` to see it when a browser misbehaves. Anything else gets a warning and `info`.
 
@@ -255,8 +264,8 @@ A page with `<script type="speculationrules">` was checked for losing its tab wh
 
 | Group | Tools |
 | --- | --- |
-| `read` | `list_profiles`, `extract`, `screenshot`, `list_tabs`, `get_human_status`, `list_downloads`, `list_dialogs`, `list_fingerprint_options`, `probe_fingerprint` |
-| `act` | `navigate`, `click`, `type`, `click_ref`, `type_ref`, `press_key`, `hover`, `select_option`, `scroll`, `upload_file`, `get_download`, `delete_download`, `handle_dialog`, `set_dialog_policy`, `evaluate_js`, `wait_for_selector`, `wait_for_navigation`, `wait_for_load`, `get_cookies`, `set_cookies`, `new_tab`, `activate_tab`, `close_tab`, `launch_profile`, `close_profile`, `request_human`, `wait_for_human`, `acquire_profile`, `renew_profile`, `release_profile` |
+| `read` | `list_profiles`, `extract`, `screenshot`, `list_tabs`, `get_human_status`, `list_downloads`, `list_dialogs`, `list_fingerprint_options`, `probe_fingerprint`, `detect_captcha`, `get_solver_status`, `get_solver_balance` |
+| `act` | `navigate`, `click`, `type`, `click_ref`, `type_ref`, `press_key`, `hover`, `select_option`, `scroll`, `upload_file`, `get_download`, `delete_download`, `handle_dialog`, `set_dialog_policy`, `evaluate_js`, `wait_for_selector`, `wait_for_navigation`, `wait_for_load`, `get_cookies`, `set_cookies`, `new_tab`, `activate_tab`, `close_tab`, `launch_profile`, `close_profile`, `request_human`, `wait_for_human`, `configure_solver`, `solve_captcha`, `cancel_solver`, `acquire_profile`, `renew_profile`, `release_profile` |
 | `profile-admin` | `create_profile`, `update_profile`, `delete_profile` |
 | `raw` | `cdp_send`, `cdp_send_no_safety` |
 | `operator` | `resume_human`, the handoff panel, and force-releasing another token's lease |

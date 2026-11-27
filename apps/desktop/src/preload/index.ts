@@ -18,6 +18,7 @@ import type {
   ExtensionConfig,
   ProxyConfig,
   SandboxStatus,
+  SolverSettings,
   UpdateStatus,
 } from "@multizen/types";
 
@@ -123,6 +124,8 @@ const api = {
     resume: (profileId: ProfileId, handoffId?: string): Promise<void> =>
       ipcRenderer.invoke("handoff:resume", profileId, handoffId),
     abort: (handoffId: string): Promise<void> => ipcRenderer.invoke("handoff:abort", handoffId),
+    takeover: (profileId: ProfileId): Promise<void> =>
+      ipcRenderer.invoke("handoff:takeover", profileId),
     /** False when there is no panel to open: the MCP HTTP server is off or failed to bind. */
     openPanel: (handoffId?: string): Promise<boolean> =>
       ipcRenderer.invoke("handoff:openPanel", handoffId),
@@ -131,6 +134,12 @@ const api = {
       ipcRenderer.on("handoff:changed", listener);
       return () => ipcRenderer.off("handoff:changed", listener);
     },
+  },
+  solver: {
+    test: (
+      draft?: Partial<SolverSettings>,
+    ): Promise<{ ok: boolean; adapterId?: string; latencyMs?: number; message: string }> =>
+      ipcRenderer.invoke("solver:test", draft),
   },
   system: {
     info: (): Promise<SystemInfo> => ipcRenderer.invoke("system:info"),

@@ -43,6 +43,7 @@ export function startHandoffWebhook(opts: HandoffWebhookOptions): () => void {
       profileName: opts.profileName(pending.profileId) ?? null,
       kind: pending.kind,
       reason: pending.reason,
+      ...(pending.solverFallbackReason ? { solverFallbackReason: pending.solverFallbackReason } : {}),
       panelUrl: `${opts.panelUrl}#${pending.handoffId}`,
       createdAt: pending.since,
       expiresAt: pending.expiresAt,
@@ -70,12 +71,14 @@ export function startHandoffWebhook(opts: HandoffWebhookOptions): () => void {
     }
   };
 
-  // Only ids still pending are worth keeping: an id is never reused.
+  // Only ids still pending for a human are tracked: while solverActive is true,
+  // the automated solver port is working and the human operator is not notified yet.
   let seen = new Set<string>();
   return opts.handoff.onChange((pending) => {
-    for (const item of pending) {
+    const humanPending = pending.filter((item) => !item.solverActive);
+    for (const item of humanPending) {
       if (!seen.has(item.handoffId)) void deliver(item);
     }
-    seen = new Set(pending.map((item) => item.handoffId));
+    seen = new Set(humanPending.map((item) => item.handoffId));
   });
 }

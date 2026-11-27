@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { FingerprintReconcileError, type ProfileManager } from "@multizen/profile-manager";
-import { MultizenError, type BrowserDriver, type MultizenErrorDetails } from "@multizen/types";
+import { MultizenError, type BrowserDriver, type MultizenErrorDetails, type Profile } from "@multizen/types";
 
 /** The `error` object of a failed tool result. Clients branch on `code`. */
 export interface ToolErrorFields {
@@ -82,8 +82,10 @@ export function profileNotFound(id: string): MultizenError {
   return new MultizenError("PROFILE_NOT_FOUND", `Profile ${id} not found`);
 }
 
-export function assertProfileExists(pm: ProfileManager, id: string): void {
-  if (!pm.get(id)) throw profileNotFound(id);
+export function assertProfileExists(pm: ProfileManager, id: string): Profile {
+  const profile = pm.get(id);
+  if (!profile) throw profileNotFound(id);
+  return profile;
 }
 
 export function assertProfileRunning(driver: BrowserDriver, id: string): void {

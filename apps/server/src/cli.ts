@@ -19,11 +19,23 @@ Usage:
                         [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
                         [--handoff-webhook <url>] [--handoff-webhook-secret <secret>]
                         [--handoff-ttl-ms <ms>] [--download-quota-bytes <n>] [--upload-inbox-quota-bytes <n>]
+                        [--solver-adapter none|capsolver|2captcha|rucaptcha|webhook|module]
+                        [--solver-webhook <url>] [--solver-webhook-secret <secret>]
+                        [--solver-module <path>] [--solver-api-key <key>]
+                        [--solver-fallback solver-then-human|solver-only|human-only]
+                        [--solver-proxy-exposure bridge|raw|none]
+                        [--solver-allow-main-world-js] [--solver-timeout-ms <ms>]
   multizen-server stdio [--data-dir <dir>] [--default-engine cloakbrowser|camoufox]
                         [--uploads-root <dir>] [--max-browsers <n>] [--browser-queue-timeout-ms <ms>]
                         [--display-mode auto|headed|xvfb|headless] [--headless]
                         [--egress-policy block-private|allow-all] [--egress-allow <entry,...>]
                         [--upload-inbox-quota-bytes <n>]
+                        [--solver-adapter none|capsolver|2captcha|rucaptcha|webhook|module]
+                        [--solver-webhook <url>] [--solver-webhook-secret <secret>]
+                        [--solver-module <path>] [--solver-api-key <key>]
+                        [--solver-fallback solver-then-human|solver-only|human-only]
+                        [--solver-proxy-exposure bridge|raw|none]
+                        [--solver-allow-main-world-js] [--solver-timeout-ms <ms>]
   multizen-server stdio --connect <url> [--token-file <path>] [--keepalive-ms <ms>]
   multizen-server profile export <profile-id> [--out <file.mzar>] [--passphrase-file <path>] [--data-dir <dir>]
   multizen-server profile import <file.mzar> [--passphrase-file <path>] [--data-dir <dir>]
@@ -33,6 +45,7 @@ Usage:
   multizen-server token list [--data-dir <dir>]
   multizen-server token revoke <id or name> [--data-dir <dir>]
   multizen-server secrets rotate [--data-dir <dir>]
+  multizen-server solver status [--data-dir <dir>]
 
 Environment: MULTIZEN_DATA_DIR, MULTIZEN_HOST, MULTIZEN_PORT, MULTIZEN_DEFAULT_ENGINE,
 MULTIZEN_NO_AUTH=1, MULTIZEN_UPLOADS_ROOT, MULTIZEN_MAX_BROWSERS,
@@ -45,7 +58,10 @@ MULTIZEN_LEASE_ON_SESSION_CLOSE, MULTIZEN_UPLOAD_INBOX_QUOTA_BYTES,
 MULTIZEN_LOG_LEVEL (debug, info, warn, error; default info), MULTIZEN_SECRET_KEY,
 MULTIZEN_SECRET_KEY_NEW (secrets rotate only), MULTIZEN_EGRESS_POLICY, MULTIZEN_EGRESS_ALLOW,
 MULTIZEN_HANDOFF_WEBHOOK, MULTIZEN_HANDOFF_WEBHOOK_SECRET, MULTIZEN_HANDOFF_TTL_MS,
-MULTIZEN_DOWNLOAD_QUOTA_BYTES.
+MULTIZEN_DOWNLOAD_QUOTA_BYTES, MULTIZEN_SOLVER_ADAPTER, MULTIZEN_SOLVER_WEBHOOK,
+MULTIZEN_SOLVER_WEBHOOK_SECRET, MULTIZEN_SOLVER_MODULE, MULTIZEN_SOLVER_API_KEY,
+MULTIZEN_SOLVER_FALLBACK, MULTIZEN_SOLVER_PROXY_EXPOSURE,
+MULTIZEN_SOLVER_ALLOW_MAIN_WORLD_JS=1, MULTIZEN_SOLVER_TIMEOUT_MS.
 
 --max-browsers counts both engines and defaults to what the machine's memory allows.
 
@@ -105,7 +121,9 @@ if (command === undefined || command === "--help" || command === "-h") {
 } else {
   // Before anything else loads: everything below is imported dynamically so the
   // rebinding is in place by the time their module bodies run.
-  installLogging(command === "stdio" || command === "token" ? "stderr" : "stdout");
+  installLogging(
+    command === "stdio" || command === "token" || command === "solver" ? "stderr" : "stdout",
+  );
   await main(command, args);
 }
 
@@ -118,6 +136,7 @@ async function main(name: string, rest: string[]): Promise<void> {
     parseProfileCommand,
     parseSecretsCommand,
     parseServeConfig,
+    parseSolverCommand,
     parseStdioConfig,
     parseTokenCommand,
     UsageError,
@@ -140,6 +159,10 @@ async function main(name: string, rest: string[]): Promise<void> {
     } else if (name === "secrets") {
       const { runSecrets } = await import("./commands/secrets.ts");
       await runSecrets(parseSecretsCommand(rest), shutdown);
+      await shutdown.run("done", 0);
+    } else if (name === "solver") {
+      const { runSolver } = await import("./commands/solver.ts");
+      await runSolver(parseSolverCommand(rest));
       await shutdown.run("done", 0);
     } else {
       throw new UsageError(`Unknown command "${name}". Run multizen-server --help.`);

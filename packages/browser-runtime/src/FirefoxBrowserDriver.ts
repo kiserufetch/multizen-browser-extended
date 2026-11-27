@@ -1439,6 +1439,11 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
     });
   }
 
+  /** On Camoufox, Playwright's page.evaluate already executes in an isolated world. */
+  async evaluateIsolatedJs(profileId: ProfileId, expression: string): Promise<unknown> {
+    return this.evaluateJs(profileId, expression);
+  }
+
   async getCookies(profileId: ProfileId, urls?: string[]): Promise<unknown> {
     const cookies = await this.require(profileId).context.cookies(urls);
     return { cookies };

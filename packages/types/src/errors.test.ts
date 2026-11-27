@@ -38,6 +38,10 @@ test("every code from the spec, the addendum and the input check is defined exac
     "SESSION_LIMIT",
     // input delivery check
     "INPUT_NOT_DELIVERED",
+    // solver ports
+    "SOLVER_NOT_CONFIGURED",
+    "SOLVER_UNSUPPORTED_CHALLENGE",
+    "SOLVER_FAILED",
   ];
   assert.deepEqual([...MULTIZEN_ERROR_CODES].sort(), [...expected].sort());
   assert.equal(new Set(MULTIZEN_ERROR_CODES).size, MULTIZEN_ERROR_CODES.length);
@@ -64,6 +68,7 @@ test("retryable defaults by code and an explicit option overrides it", () => {
     "RATE_LIMITED",
     "SESSION_LIMIT",
     "INPUT_NOT_DELIVERED",
+    "SOLVER_FAILED",
   ];
   for (const code of MULTIZEN_ERROR_CODES) {
     assert.equal(new MultizenError(code, "x").retryable, retryable.includes(code), code);
@@ -83,7 +88,7 @@ test("hint and details pass through, including details.retry_after_ms", () => {
 });
 
 test("the seam files stay free of node: imports, because the renderer imports this package", () => {
-  for (const file of ["./errors.ts", "./driver.ts"]) {
+  for (const file of ["./errors.ts", "./driver.ts", "./solver.ts"]) {
     const source = readFileSync(new URL(file, import.meta.url), "utf8");
     assert.doesNotMatch(source, /from\s+["']node:/, file);
   }

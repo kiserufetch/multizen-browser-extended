@@ -155,6 +155,10 @@ export class MockBrowserDriver implements BrowserDriver {
     );
   }
 
+  async evaluateIsolatedJs(profileId: ProfileId, expression: string): Promise<unknown> {
+    return this.evaluateJs(profileId, expression);
+  }
+
   async getCookies(profileId: ProfileId, urls?: string[], sessionId?: string): Promise<unknown> {
     return this.cdpSend(profileId, "Network.getCookies", urls ? { urls } : {}, sessionId, {
       safe: true,

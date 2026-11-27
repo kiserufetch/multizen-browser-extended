@@ -42,6 +42,11 @@ function statusFields(record: HandoffRecord): Record<string, unknown> {
     expires_at: record.expiresAt,
     ...(record.settledAt !== undefined ? { settled_at: record.settledAt } : {}),
     ...(record.settledBy !== undefined ? { settled_by: record.settledBy } : {}),
+    ...(record.solverActive !== undefined ? { solver_active: record.solverActive } : {}),
+    ...(record.solverTaskId !== undefined ? { solver_task_id: record.solverTaskId } : {}),
+    ...(record.solverFallbackReason !== undefined
+      ? { solver_fallback_reason: record.solverFallbackReason }
+      : {}),
   };
 }
 
@@ -79,6 +84,33 @@ export const HUMAN_HANDLERS: ReadonlyMap<string, ExtensionTool["handler"]> = new
     async (args, ctx) => {
       const { profile_id: id, reason, kind } = RequestHumanSchema.parse(args);
       assertProfileRunning(ctx.browserDriver, id);
+      const profile = ctx.profileManager.get?.(id) ?? null;
+      if ((kind ?? "other") === "captcha" && profile && ctx.solver) {
+        const policy = ctx.solver.resolvePolicy(profile);
+        if (policy.enabled && policy.port) {
+          const { taskRecord, handoffId } = ctx.solver.startTask({
+            profile,
+            defaultEngine: ctx.getDefaultEngine ? ctx.getDefaultEngine() : "cloakbrowser",
+            driver: ctx.browserDriver,
+            reason,
+            requestedBy: ctx.caller.principal.name,
+            ...(ctx.handoffGate ? { keepReason: true } : {}),
+          });
+          const record = ctx.handoff.get(handoffId) ?? ctx.handoff.activeForProfile(id);
+          return {
+            status: "waiting_for_human",
+            handoff_id: handoffId,
+            handoff_status: record?.status ?? "pending",
+            kind: "captcha",
+            reason: record?.reason ?? reason,
+            expires_at: record?.expiresAt ?? taskRecord.expiresAt,
+            solver_active: true,
+            solver_task_id: taskRecord.taskId,
+            solver_adapter: taskRecord.adapterId,
+            note: `Challenge was routed to solver port "${taskRecord.adapterId}" (task ${taskRecord.taskId}) first. Repeat wait_for_human, or poll get_human_status, until the status is no longer pending. If the solver cannot complete it, it will fall back to a human operator according to policy (${policy.fallbackPolicy}).`,
+          };
+        }
+      }
       const record = ctx.handoff.request(id, reason, {
         ...(kind ? { kind } : {}),
         requestedBy: ctx.caller.principal.name,
@@ -122,6 +154,12 @@ export const HUMAN_HANDLERS: ReadonlyMap<string, ExtensionTool["handler"]> = new
         timedOut: record.status === "pending",
         status: record.status,
         handoff_id: record.id,
+        ...(record.settledBy !== undefined ? { settled_by: record.settledBy } : {}),
+        ...(record.solverActive !== undefined ? { solver_active: record.solverActive } : {}),
+        ...(record.solverTaskId !== undefined ? { solver_task_id: record.solverTaskId } : {}),
+        ...(record.solverFallbackReason !== undefined
+          ? { solver_fallback_reason: record.solverFallbackReason }
+          : {}),
       };
     },
   ],

@@ -1,8 +1,61 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { isDisplayMode, type BrowserEngine, type DisplayMode } from "@multizen/types";
+import {
+  isDisplayMode,
+  isProxyExposureMode,
+  isSolverAdapterKind,
+  isSolverFallbackPolicy,
+  type BrowserEngine,
+  type DisplayMode,
+  type SolverSettings,
+} from "@multizen/types";
 
-export type { BrowserEngine, DisplayMode };
+export type { BrowserEngine, DisplayMode, SolverSettings };
+
+export const DEFAULT_SOLVER_SETTINGS: SolverSettings = {
+  enabled: false,
+  adapter: "none",
+  fallbackPolicy: "solver-then-human",
+  proxyExposure: "bridge",
+  allowMainWorldJs: false,
+  timeoutMs: 120_000,
+};
+
+export function normalizeSolverSettings(raw: unknown): SolverSettings {
+  if (!raw || typeof raw !== "object") return { ...DEFAULT_SOLVER_SETTINGS };
+  const s = raw as Partial<SolverSettings>;
+  return {
+    enabled: typeof s.enabled === "boolean" ? s.enabled : DEFAULT_SOLVER_SETTINGS.enabled,
+    adapter: isSolverAdapterKind(s.adapter) ? s.adapter : DEFAULT_SOLVER_SETTINGS.adapter,
+    ...(typeof s.webhookUrl === "string" && s.webhookUrl.trim() !== ""
+      ? { webhookUrl: s.webhookUrl.trim() }
+      : {}),
+    ...(typeof s.webhookSecret === "string" && s.webhookSecret !== ""
+      ? { webhookSecret: s.webhookSecret }
+      : {}),
+    ...(typeof s.apiKey === "string" && s.apiKey !== "" ? { apiKey: s.apiKey } : {}),
+    ...(typeof s.modulePath === "string" && s.modulePath.trim() !== ""
+      ? { modulePath: s.modulePath.trim() }
+      : {}),
+    fallbackPolicy: isSolverFallbackPolicy(s.fallbackPolicy)
+      ? s.fallbackPolicy
+      : DEFAULT_SOLVER_SETTINGS.fallbackPolicy,
+    proxyExposure: isProxyExposureMode(s.proxyExposure)
+      ? s.proxyExposure
+      : DEFAULT_SOLVER_SETTINGS.proxyExposure,
+    allowMainWorldJs:
+      typeof s.allowMainWorldJs === "boolean"
+        ? s.allowMainWorldJs
+        : DEFAULT_SOLVER_SETTINGS.allowMainWorldJs,
+    timeoutMs:
+      typeof s.timeoutMs === "number" && Number.isFinite(s.timeoutMs) && s.timeoutMs > 0
+        ? Math.round(s.timeoutMs)
+        : DEFAULT_SOLVER_SETTINGS.timeoutMs,
+    ...(s.options && typeof s.options === "object" && !Array.isArray(s.options)
+      ? { options: s.options }
+      : {}),
+  };
+}
 
 /**
  * Linux sandbox secure-setup state.
@@ -55,6 +108,10 @@ export interface AppSettings {
    * desktop, and the `--display-mode` flag on a server.
    */
   defaultDisplayMode?: DisplayMode;
+  /**
+   * Optional challenge solver port configuration.
+   */
+  solver?: SolverSettings;
 }
 
 const DEFAULTS: AppSettings = {
@@ -116,6 +173,9 @@ export class SettingsStore {
     }
     // A value this build can't run is dropped, not defaulted: unset has its own meaning.
     if (!isDisplayMode(merged.defaultDisplayMode)) delete merged.defaultDisplayMode;
+    if (merged.solver !== undefined) {
+      merged.solver = normalizeSolverSettings(merged.solver);
+    }
     this.cache = merged;
     return merged;
   }
@@ -126,7 +186,13 @@ export class SettingsStore {
       throw new Error(`Unknown display mode "${String(mode)}"`);
     }
     const current = await this.load();
-    const next = { ...current, ...patch };
+    const next: AppSettings = {
+      ...current,
+      ...patch,
+      ...(patch.solver !== undefined
+        ? { solver: normalizeSolverSettings({ ...current.solver, ...patch.solver }) }
+        : {}),
+    };
     this.cache = next;
     writeFileSync(this.jsonPath, JSON.stringify(next, null, 2), "utf8");
     return next;

@@ -13,6 +13,28 @@ export { createDownloadRoute } from "./downloadRoute.js";
 export { createPanelRoute } from "./panel/panelRoutes.js";
 export { PanelSessions } from "./panel/panelSessions.js";
 export { createSharedMcpState } from "./sharedState.js";
+export {
+  SolverCoordinator,
+  BuiltinChallengeDetector,
+  buildScopedSolverPagePort,
+  DEFAULT_SOLVER_CONFIG,
+  type EffectiveProfileSolverPolicy,
+  type SolverCoordinatorOptions,
+} from "./solver/SolverCoordinator.js";
+export {
+  HttpWebhookSolverAdapter,
+  SolverWebhookSessions,
+  createSolverRoute,
+  type HttpWebhookSolverAdapterOptions,
+} from "./solver/HttpWebhookSolverAdapter.js";
+export {
+  buildCapSolverTask,
+  buildTwoCaptchaTask,
+  createCloudProviderSolverPort,
+  isCloudSolverProviderKind,
+  type CloudSolverProviderKind,
+  type CloudSolverProviderOptions,
+} from "./solver/providers.js";
 export { createPrincipal, FULL_PRINCIPAL, principalFrom, sameSecret, TOOL_GROUPS } from "./auth/principal.js";
 export { TokenStore } from "./auth/TokenStore.js";
 export { AuthFailureLimiter, clientAddress } from "./auth/AuthFailureLimiter.js";

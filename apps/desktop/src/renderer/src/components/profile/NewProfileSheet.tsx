@@ -10,6 +10,7 @@ import type {
   DisplayMode,
   ExtensionConfig,
   FingerprintConfig,
+  ProfileSolverMode,
   ProxyConfig,
 } from "../../types";
 import { parseProxyString } from "../../lib/parseProxy";
@@ -70,6 +71,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
   const [pickedEngine, setPickedEngine] = useState<BrowserEngine | undefined>(undefined);
   const engine: BrowserEngine = pickedEngine ?? defaultEngine;
   const [displayMode, setDisplayMode] = useState<DisplayMode | undefined>(undefined);
+  const [solverMode, setSolverMode] = useState<ProfileSolverMode>("inherit");
   const [proxy, setProxy] = useState<DraftProxy>(EMPTY_PROXY);
   const [notes, setNotes] = useState("");
   const [extensions, setExtensions] = useState<ExtensionConfig[]>([]);
@@ -169,6 +171,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
         startUrl: startUrl.trim() || undefined,
         engine: pickedEngine,
         displayMode,
+        ...(solverMode !== "inherit" ? { solverConfig: { mode: solverMode } } : {}),
         proxy: built,
         fingerprint: fingerprint ?? undefined,
         extensions: !extensionsHidden && extensions.length > 0 ? extensions : undefined,
@@ -252,6 +255,8 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
               onEngine={setPickedEngine}
               displayMode={displayMode}
               onDisplayMode={setDisplayMode}
+              solverMode={solverMode}
+              onSolverMode={setSolverMode}
             />
           )}
 

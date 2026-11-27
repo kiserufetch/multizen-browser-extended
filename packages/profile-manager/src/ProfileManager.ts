@@ -2,7 +2,13 @@ import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
-import { isDisplayMode } from "@multizen/types";
+import {
+  isDisplayMode,
+  isProfileSolverMode,
+  isProxyExposureMode,
+  isSolverAdapterKind,
+  isSolverFallbackPolicy,
+} from "@multizen/types";
 import type {
   Profile,
   ProfileId,
@@ -14,6 +20,7 @@ import type {
   ExtensionConfig,
   BrowserEngine,
   DisplayMode,
+  ProfileSolverConfig,
 } from "@multizen/types";
 import { defaultFingerprint, migrateFingerprint } from "./fingerprint.js";
 import { isSealed, SecretKeyError, type SecretBox } from "./secretBox.js";
@@ -38,6 +45,7 @@ interface ProfileRow {
   strict_geo_coherence: number | null;
   engine: string | null;
   display_mode: string | null;
+  solver_config: string | null;
 }
 
 export interface ProfileManagerOptions {
@@ -124,6 +132,9 @@ export class ProfileManager {
     // NULL means "follow the default", which is what every older row should do.
     if (!cols.some((c) => c.name === "display_mode")) {
       this.db.exec(`ALTER TABLE profiles ADD COLUMN display_mode TEXT`);
+    }
+    if (!cols.some((c) => c.name === "solver_config")) {
+      this.db.exec(`ALTER TABLE profiles ADD COLUMN solver_config TEXT`);
     }
     this.migrateFingerprints();
   }
@@ -231,13 +242,14 @@ export class ProfileManager {
       updatedAt: now,
       alignTimezoneToProxy: input.alignTimezoneToProxy,
       strictGeoCoherence: input.strictGeoCoherence,
+      solverConfig: sanitizeProfileSolverConfig(input.solverConfig),
     };
 
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, display_mode, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, display_mode, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence, solver_config)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
@@ -257,6 +269,7 @@ export class ProfileManager {
         profile.updatedAt,
         profile.alignTimezoneToProxy ? 1 : null,
         profile.strictGeoCoherence ? 1 : null,
+        profile.solverConfig ? JSON.stringify(profile.solverConfig) : null,
       );
 
     return profile;
@@ -275,12 +288,13 @@ export class ProfileManager {
     if (this.get(profile.id)) {
       throw new Error(`Profile ${profile.id} already exists`);
     }
+    const cleanSolver = sanitizeProfileSolverConfig(profile.solverConfig);
     mkdirSync(profile.dataDir, { recursive: true });
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, display_mode, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, display_mode, data_dir, created_at, updated_at, align_timezone_to_proxy, strict_geo_coherence, solver_config)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
@@ -300,8 +314,9 @@ export class ProfileManager {
         profile.updatedAt,
         profile.alignTimezoneToProxy ? 1 : null,
         profile.strictGeoCoherence ? 1 : null,
+        cleanSolver ? JSON.stringify(cleanSolver) : null,
       );
-    return profile;
+    return { ...profile, ...(cleanSolver ? { solverConfig: cleanSolver } : {}) };
   }
 
   update(id: ProfileId, patch: UpdateProfileInput): Profile {
@@ -343,6 +358,12 @@ export class ProfileManager {
       // null clears → follow the default again; undefined keeps existing.
       displayMode:
         patch.displayMode === null ? undefined : (patch.displayMode ?? existing.displayMode),
+      solverConfig:
+        patch.solverConfig === null
+          ? undefined
+          : patch.solverConfig !== undefined
+            ? sanitizeProfileSolverConfig(patch.solverConfig)
+            : existing.solverConfig,
       updatedAt: now,
       // Stale country if proxy changed — next launch / Test re-probes.
       proxyCountry: proxyChanged ? undefined : existing.proxyCountry,
@@ -353,7 +374,7 @@ export class ProfileManager {
         `UPDATE profiles SET
            name = ?, notes = ?, tags = ?, proxy = ?, fingerprint = ?, extensions = ?,
            icon = ?, start_url = ?, search_provider = ?, engine = ?, display_mode = ?, updated_at = ?, proxy_country = ?,
-           align_timezone_to_proxy = ?, strict_geo_coherence = ?
+           align_timezone_to_proxy = ?, strict_geo_coherence = ?, solver_config = ?
          WHERE id = ?`,
       )
       .run(
@@ -372,6 +393,7 @@ export class ProfileManager {
         merged.proxyCountry ?? null,
         merged.alignTimezoneToProxy ? 1 : null,
         merged.strictGeoCoherence ? 1 : null,
+        merged.solverConfig ? JSON.stringify(merged.solverConfig) : null,
         id,
       );
 
@@ -594,6 +616,7 @@ export class ProfileManager {
       proxyCountry: row.proxy_country ?? undefined,
       alignTimezoneToProxy: row.align_timezone_to_proxy === 1 ? true : undefined,
       strictGeoCoherence: row.strict_geo_coherence === 1 ? true : undefined,
+      solverConfig: parseStoredSolverConfig(row.solver_config),
     };
   }
 }
@@ -601,6 +624,40 @@ export class ProfileManager {
 /** A value this build can't run reads as unset, so the launch path only ever sees real modes. */
 function storedDisplayMode(raw: string | null): DisplayMode | undefined {
   return isDisplayMode(raw) ? raw : undefined;
+}
+
+export function sanitizeProfileSolverConfig(raw: unknown): ProfileSolverConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const c = raw as Partial<ProfileSolverConfig>;
+  if (!isProfileSolverMode(c.mode)) return undefined;
+  const out: ProfileSolverConfig = { mode: c.mode };
+  if (isSolverAdapterKind(c.adapter)) out.adapter = c.adapter;
+  if (typeof c.apiKey === "string" && c.apiKey.trim() !== "") out.apiKey = c.apiKey.trim();
+  if (typeof c.apiBaseUrl === "string" && c.apiBaseUrl.trim() !== "") {
+    out.apiBaseUrl = c.apiBaseUrl.trim();
+  }
+  if (typeof c.webhookUrl === "string" && c.webhookUrl.trim() !== "") {
+    out.webhookUrl = c.webhookUrl.trim();
+  }
+  if (typeof c.webhookSecret === "string" && c.webhookSecret !== "") {
+    out.webhookSecret = c.webhookSecret;
+  }
+  if (isSolverFallbackPolicy(c.fallbackPolicy)) out.fallbackPolicy = c.fallbackPolicy;
+  if (isProxyExposureMode(c.proxyExposure)) out.proxyExposure = c.proxyExposure;
+  if (typeof c.allowMainWorldJs === "boolean") out.allowMainWorldJs = c.allowMainWorldJs;
+  if (typeof c.timeoutMs === "number" && Number.isFinite(c.timeoutMs) && c.timeoutMs > 0) {
+    out.timeoutMs = Math.round(c.timeoutMs);
+  }
+  return out;
+}
+
+function parseStoredSolverConfig(raw: string | null): ProfileSolverConfig | undefined {
+  if (!raw) return undefined;
+  try {
+    return sanitizeProfileSolverConfig(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
 }
 
 /**

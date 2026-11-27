@@ -20,25 +20,38 @@ import {
   createDownloadRoute,
   createMultizenMcpServer,
   createPanelRoute,
+  createSolverRoute,
   createSharedMcpState,
   ActivityLog,
   AuthFailureLimiter,
   FULL_PRINCIPAL,
+  HttpWebhookSolverAdapter,
   InMemoryHumanHandoff,
   PanelSessions,
+  SolverWebhookSessions,
   sameSecret,
   type ActivityEvent,
   type PendingHandoff,
 } from "@multizen/mcp-server";
-import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
+import {
+  DEFAULT_SOLVER_SETTINGS,
+  SettingsStore,
+  defaultSettingsPath,
+  normalizeSolverSettings,
+  type AppSettings,
+} from "@multizen/settings-store";
 import {
   ChromiumBrowserDriver,
   EngineRegistry,
   EngineRouter,
   ExtensionsService,
   LinuxSandboxManager,
+  createCloudProviderSolverPort,
   describeSandboxReason,
+  getProfileBridgeInfo,
+  isCloudSolverProviderKind,
   liveServerLockHolder,
+  loadModuleSolverPort,
   probeProxyGeo,
   readManifestIcon,
   resolveLoadDir,
@@ -48,10 +61,12 @@ import {
 } from "@multizen/browser-runtime";
 import { electronHost } from "./electronHost.ts";
 import type {
+  CaptchaSolverPort,
   EngineUpdateStatus,
   ExtensionConfig,
   ProxyConfig,
   SandboxStatus,
+  SolverSettings,
   UpdateStatus,
 } from "@multizen/types";
 import { resolveEngine } from "@multizen/types";
@@ -116,6 +131,8 @@ let activityLog: ActivityLog;
 const humanHandoff = new InMemoryHumanHandoff();
 /** One profile mutex and lease table for all sessions, each of which gets its own server. */
 const sharedMcpState = createSharedMcpState({ handoff: humanHandoff });
+const solverWebhookSessions = new SolverWebhookSessions();
+let activeSolverPort: CaptchaSolverPort | null = null;
 let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
 let mcpAuthToken: string | null = null;
@@ -164,6 +181,53 @@ function openPanelWindow(handoffId?: string): boolean {
     `${origin}/panel/login?code=${encodeURIComponent(code)}${handoffId ? `#${handoffId}` : ""}`,
   );
   return true;
+}
+
+async function instantiateDesktopSolverPort(
+  solverCfg: SolverSettings,
+  mcpHttpPort: number,
+): Promise<CaptchaSolverPort | null> {
+  if (!solverCfg.enabled) return null;
+  if (isCloudSolverProviderKind(solverCfg.adapter) && solverCfg.apiKey) {
+    const apiBaseUrl =
+      typeof solverCfg.options?.apiBaseUrl === "string" && solverCfg.options.apiBaseUrl.trim() !== ""
+        ? solverCfg.options.apiBaseUrl.trim()
+        : undefined;
+    return createCloudProviderSolverPort(solverCfg.adapter, {
+      apiKey: solverCfg.apiKey,
+      ...(apiBaseUrl ? { apiBaseUrl } : {}),
+    });
+  }
+  if (solverCfg.adapter === "module" && solverCfg.modulePath) {
+    return loadModuleSolverPort(solverCfg.modulePath, {
+      ...(solverCfg.options ? { options: solverCfg.options } : {}),
+      ...(solverCfg.apiKey ? { apiKey: solverCfg.apiKey } : {}),
+      ...(solverCfg.webhookSecret ? { secret: solverCfg.webhookSecret } : {}),
+    });
+  }
+  if (solverCfg.adapter === "webhook" && solverCfg.webhookUrl) {
+    return new HttpWebhookSolverAdapter({
+      webhookUrl: solverCfg.webhookUrl,
+      ...(solverCfg.webhookSecret ? { webhookSecret: solverCfg.webhookSecret } : {}),
+      ...(solverCfg.apiKey ? { apiKey: solverCfg.apiKey } : {}),
+      callbackBaseUrl: () => `http://127.0.0.1:${mcpHttpPort}`,
+      sessions: solverWebhookSessions,
+    });
+  }
+  return null;
+}
+
+async function reloadDesktopSolverPort(settings: AppSettings): Promise<void> {
+  const prev = activeSolverPort;
+  activeSolverPort = null;
+  await prev?.dispose?.().catch(() => {});
+  const solverCfg = normalizeSolverSettings(settings.solver ?? DEFAULT_SOLVER_SETTINGS);
+  try {
+    activeSolverPort = await instantiateDesktopSolverPort(solverCfg, settings.mcpHttpPort);
+  } catch (e) {
+    process.stderr.write(`[multizen] failed to load solver port: ${(e as Error).message}\n`);
+    activeSolverPort = null;
+  }
 }
 
 /** A new handoff: the person may be anywhere, so the OS says it and the app comes forward. */
@@ -492,16 +556,33 @@ app.whenReady().then(async () => {
     sendToRenderer("activity:event", e);
   });
 
+  await reloadDesktopSolverPort(cachedSettings);
+  sharedMcpState.solver.configure({
+    getSolverPort: () => activeSolverPort,
+    getSolverSettings: () =>
+      normalizeSolverSettings(cachedSettings?.solver ?? DEFAULT_SOLVER_SETTINGS),
+    onUpdateSettings: async (nextSettings, nextPort) => {
+      cachedSettings = await settingsStore.update({ solver: nextSettings });
+      activeSolverPort = nextPort;
+    },
+    webhookSessions: solverWebhookSessions,
+    callbackBaseUrl: () => `http://127.0.0.1:${cachedSettings?.mcpHttpPort ?? 7777}`,
+    getBridgeInfo: (id) => getProfileBridgeInfo(id),
+    activityLog,
+  });
+
   // Forward human-handoff changes (CAPTCHA/2FA) so the UI can show a prompt and
   // offer a Resume control; the renderer calls handoff:resume to unblock the
-  // agent's wait_for_human.
+  // agent's wait_for_human. While solverActive is true, suppress OS notification
+  // and window focus unless/until the solver falls back to human control.
   let announced = new Set<string>();
   humanHandoff.onChange((pending: PendingHandoff[]) => {
     sendToRenderer("handoff:changed", pending);
-    for (const handoff of pending) {
+    const humanPending = pending.filter((h) => !h.solverActive);
+    for (const handoff of humanPending) {
       if (!announced.has(handoff.handoffId)) announceHandoff(handoff);
     }
-    announced = new Set(pending.map((handoff) => handoff.handoffId));
+    announced = new Set(humanPending.map((handoff) => handoff.handoffId));
     if (pending.length === 0 && panelWindow && !panelWindow.isDestroyed()) panelWindow.close();
   });
   // A headed window deals with its own dialogs and file pickers, as it always has. One
@@ -556,6 +637,7 @@ app.whenReady().then(async () => {
             secureCookie: false,
             activityLog,
           }),
+          createSolverRoute(solverWebhookSessions),
         ],
         authedRoutes: [createDownloadRoute({ driver: browserDriver, profiles: profileManager })],
         // Each session gets its own MCP server; deps + ActivityLog are shared.
@@ -644,6 +726,9 @@ app.whenReady().then(async () => {
     // Let the updaters react to their auto-update toggles without a restart.
     updater?.onSettingsChanged();
     engineUpdater?.onSettingsChanged();
+    if (patch.solver !== undefined) {
+      await reloadDesktopSolverPort(cachedSettings);
+    }
     return cachedSettings;
   });
 
@@ -661,7 +746,63 @@ app.whenReady().then(async () => {
   ipcMain.handle("handoff:abort", (_e, handoffId: string) => {
     humanHandoff.abortById(handoffId, "desktop");
   });
+  ipcMain.handle("handoff:takeover", (_e, profileId: string) => {
+    sharedMcpState.solver.cancel(profileId, { handoffToHuman: true, by: "desktop" });
+  });
   ipcMain.handle("handoff:openPanel", (_e, handoffId?: string) => openPanelWindow(handoffId));
+
+  ipcMain.handle(
+    "solver:test",
+    async (
+      _e,
+      draft?: Partial<SolverSettings>,
+    ): Promise<{ ok: boolean; adapterId?: string; latencyMs?: number; message: string }> => {
+      const base = normalizeSolverSettings({
+        ...(cachedSettings?.solver ?? DEFAULT_SOLVER_SETTINGS),
+        ...draft,
+        enabled: true,
+      });
+      let port: CaptchaSolverPort | null = null;
+      try {
+        port = await instantiateDesktopSolverPort(base, cachedSettings?.mcpHttpPort ?? 7777);
+        if (!port) {
+          return {
+            ok: false,
+            message:
+              isCloudSolverProviderKind(base.adapter)
+                ? `Enter a valid API key for ${base.adapter}.`
+                : base.adapter === "webhook"
+                  ? "Enter a valid webhook URL."
+                  : base.adapter === "module"
+                    ? "Enter a valid ESM module path."
+                    : "Select an adapter type.",
+          };
+        }
+        if (port.healthcheck) {
+          const h = await port.healthcheck();
+          const balanceSuffix =
+            typeof h.details?.balance === "number" ? ` — balance: ${h.details.balance}` : "";
+          return {
+            ok: h.ok,
+            adapterId: port.id,
+            ...(h.latencyMs !== undefined ? { latencyMs: h.latencyMs } : {}),
+            message: h.ok
+              ? `Connected to ${port.name} (${port.id})${balanceSuffix}`
+              : `Healthcheck failed: ${JSON.stringify(h.details ?? {})}`,
+          };
+        }
+        return {
+          ok: true,
+          adapterId: port.id,
+          message: `Loaded ${port.name} (${port.id}) [${port.capabilities.kinds.join(", ")}]`,
+        };
+      } catch (e) {
+        return { ok: false, message: (e as Error).message };
+      } finally {
+        await port?.dispose?.().catch(() => {});
+      }
+    },
+  );
 
   // Chromium bootstrap IPC
   ipcMain.handle("chromium:status", () => engineRegistry.get("cloakbrowser").getStatus());

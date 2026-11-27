@@ -1,6 +1,6 @@
 import { useEffect, useState, type JSX } from "react";
 import { displayModeLabel } from "../atoms";
-import type { BrowserEngine, DisplayMode } from "../../types";
+import type { BrowserEngine, DisplayMode, ProfileSolverMode } from "../../types";
 
 /**
  * Browser engine, display mode + start-page controls, shared by the create and edit sheets.
@@ -70,6 +70,8 @@ export function BrowserSection({
   onDisplayMode,
   displayModeDisabled = false,
   displayModeDisabledReason,
+  solverMode = "inherit",
+  onSolverMode,
 }: {
   startUrl: string;
   onStartUrl: (v: string) => void;
@@ -85,6 +87,8 @@ export function BrowserSection({
   /** When true the mode cannot be changed (a running browser keeps its mode). */
   displayModeDisabled?: boolean;
   displayModeDisabledReason?: string;
+  solverMode?: ProfileSolverMode;
+  onSolverMode?: (v: ProfileSolverMode) => void;
 }): JSX.Element {
   const [appDefaultMode, setAppDefaultMode] = useState<DisplayMode>("headed");
   const [platform, setPlatform] = useState("");
@@ -189,6 +193,21 @@ export function BrowserSection({
           style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
         />
       </SectionField>
+
+      {onSolverMode && (
+        <SectionField label="Challenge solver port">
+          <select
+            value={solverMode}
+            onChange={(e) => onSolverMode(e.target.value as ProfileSolverMode)}
+            className="w-full px-2.5 h-9 rounded-lg bg-white/[0.03] text-[12px] text-slate-200 outline-none"
+            style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+          >
+            <option value="inherit">Follow app default (Settings)</option>
+            <option value="enabled">Enabled for this profile</option>
+            <option value="disabled">Disabled (Human handoff only)</option>
+          </select>
+        </SectionField>
+      )}
 
       <p className="text-[10px] text-slate-600 leading-relaxed">
         {engine === "camoufox"

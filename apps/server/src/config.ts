@@ -16,8 +16,24 @@ import {
   parseEgressAllowEntry,
   type EgressMode,
 } from "@multizen/browser-runtime";
-import type { BrowserEngine, DisplayModeSetting } from "@multizen/types";
-import { DISPLAY_MODES, isBrowserEngine, isDisplayMode } from "@multizen/types";
+import type {
+  BrowserEngine,
+  DisplayModeSetting,
+  ProxyExposureMode,
+  SolverAdapterKind,
+  SolverFallbackPolicy,
+} from "@multizen/types";
+import {
+  DISPLAY_MODES,
+  isBrowserEngine,
+  isDisplayMode,
+  isProxyExposureMode,
+  isSolverAdapterKind,
+  isSolverFallbackPolicy,
+  PROXY_EXPOSURE_MODES,
+  SOLVER_ADAPTER_KINDS,
+  SOLVER_FALLBACK_POLICIES,
+} from "@multizen/types";
 
 /** Bad flags or values: reported as such, exit code 2. */
 export class UsageError extends Error {}
@@ -71,6 +87,24 @@ export interface ServerConfig {
   downloadQuotaBytes: number;
   /** What one profile's base64 uploads may take until it closes. */
   uploadInboxQuotaBytes: number;
+  /** Built-in or external solver adapter type (none, capsolver, 2captcha, rucaptcha, webhook, module). */
+  solverAdapter?: SolverAdapterKind;
+  /** Optional external HTTP webhook URL for the challenge solver port. */
+  solverWebhook?: string;
+  /** HMAC secret for signing solver webhook payloads. */
+  solverWebhookSecret?: string;
+  /** Local ESM module path exporting a CaptchaSolverPort factory. */
+  solverModule?: string;
+  /** Optional API key passed to the solver adapter. */
+  solverApiKey?: string;
+  /** Fallback policy when a solver port is configured. */
+  solverFallback?: SolverFallbackPolicy;
+  /** How profile proxies are exposed to the solver port. */
+  solverProxyExposure?: ProxyExposureMode;
+  /** Whether the solver port may evaluate JS in the page's main world. */
+  solverAllowMainWorldJs?: boolean;
+  /** Per-task timeout in ms for the solver port. */
+  solverTimeoutMs?: number;
 }
 
 export const LEASE_ON_SESSION_CLOSE = ["keep", "release"] as const;
@@ -442,6 +476,79 @@ const INBOX_OPTIONS: NonNullable<ParseArgsConfig["options"]> = {
   "upload-inbox-quota-bytes": { type: "string" },
 };
 
+const SOLVER_OPTIONS: NonNullable<ParseArgsConfig["options"]> = {
+  "solver-adapter": { type: "string" },
+  "solver-webhook": { type: "string" },
+  "solver-webhook-secret": { type: "string" },
+  "solver-module": { type: "string" },
+  "solver-api-key": { type: "string" },
+  "solver-fallback": { type: "string" },
+  "solver-proxy-exposure": { type: "string" },
+  "solver-allow-main-world-js": { type: "boolean" },
+  "solver-timeout-ms": { type: "string" },
+};
+
+type SolverConfigFields = Pick<
+  ServerConfig,
+  | "solverAdapter"
+  | "solverWebhook"
+  | "solverWebhookSecret"
+  | "solverModule"
+  | "solverApiKey"
+  | "solverFallback"
+  | "solverProxyExposure"
+  | "solverAllowMainWorldJs"
+  | "solverTimeoutMs"
+>;
+
+function solverFields(flags: ParsedFlags, env: Env): SolverConfigFields {
+  const adapter = flags.flag("solver-adapter") ?? env.MULTIZEN_SOLVER_ADAPTER;
+  const webhook = flags.flag("solver-webhook") ?? env.MULTIZEN_SOLVER_WEBHOOK;
+  const secret = flags.flag("solver-webhook-secret") ?? env.MULTIZEN_SOLVER_WEBHOOK_SECRET;
+  const mod = flags.flag("solver-module") ?? env.MULTIZEN_SOLVER_MODULE;
+  const apiKey = flags.flag("solver-api-key") ?? env.MULTIZEN_SOLVER_API_KEY;
+  const fallback = flags.flag("solver-fallback") ?? env.MULTIZEN_SOLVER_FALLBACK;
+  const exposure = flags.flag("solver-proxy-exposure") ?? env.MULTIZEN_SOLVER_PROXY_EXPOSURE;
+  const allowMain =
+    flags.isSet("solver-allow-main-world-js") || env.MULTIZEN_SOLVER_ALLOW_MAIN_WORLD_JS === "1";
+  const timeout = flags.flag("solver-timeout-ms") ?? env.MULTIZEN_SOLVER_TIMEOUT_MS;
+
+  if (adapter !== undefined && !isSolverAdapterKind(adapter)) {
+    throw new UsageError(
+      `--solver-adapter must be one of ${SOLVER_ADAPTER_KINDS.join(", ")}, got "${adapter}"`,
+    );
+  }
+  if (webhook && mod) {
+    throw new UsageError("--solver-webhook and --solver-module are mutually exclusive");
+  }
+  if (secret && !webhook) {
+    throw new UsageError("--solver-webhook-secret needs --solver-webhook");
+  }
+  if (fallback !== undefined && !isSolverFallbackPolicy(fallback)) {
+    throw new UsageError(
+      `--solver-fallback must be one of ${SOLVER_FALLBACK_POLICIES.join(", ")}, got "${fallback}"`,
+    );
+  }
+  if (exposure !== undefined && !isProxyExposureMode(exposure)) {
+    throw new UsageError(
+      `--solver-proxy-exposure must be one of ${PROXY_EXPOSURE_MODES.join(", ")}, got "${exposure}"`,
+    );
+  }
+  return {
+    ...(adapter ? { solverAdapter: adapter } : {}),
+    ...(webhook ? { solverWebhook: parseHttpUrl("--solver-webhook", webhook).href } : {}),
+    ...(secret ? { solverWebhookSecret: secret } : {}),
+    ...(mod ? { solverModule: resolve(mod) } : {}),
+    ...(apiKey ? { solverApiKey: apiKey } : {}),
+    ...(fallback ? { solverFallback: fallback } : {}),
+    ...(exposure ? { solverProxyExposure: exposure } : {}),
+    ...(allowMain ? { solverAllowMainWorldJs: true } : {}),
+    ...(timeout !== undefined
+      ? { solverTimeoutMs: parsePositiveInt("--solver-timeout-ms", timeout) }
+      : {}),
+  };
+}
+
 const HANDOFF_OPTIONS: NonNullable<ParseArgsConfig["options"]> = {
   "handoff-webhook": { type: "string" },
   "handoff-webhook-secret": { type: "string" },
@@ -498,6 +605,7 @@ export function parseServeConfig(
     ...DISPLAY_OPTIONS,
     ...EGRESS_OPTIONS,
     ...HANDOFF_OPTIONS,
+    ...SOLVER_OPTIONS,
   });
   rejectPositionals(flags.positionals);
   const idleTtl = flags.flag("session-idle-ttl-ms") ?? env.MULTIZEN_SESSION_IDLE_TTL_MS;
@@ -531,6 +639,7 @@ export function parseServeConfig(
     ...displayFields(flags, env),
     ...egressFields(flags, env),
     ...handoffFields(flags, env),
+    ...solverFields(flags, env),
   };
 }
 
@@ -544,6 +653,15 @@ export type StdioConfig =
       | "egressPolicy"
       | "egressAllow"
       | "uploadInboxQuotaBytes"
+      | "solverAdapter"
+      | "solverWebhook"
+      | "solverWebhookSecret"
+      | "solverModule"
+      | "solverApiKey"
+      | "solverFallback"
+      | "solverProxyExposure"
+      | "solverAllowMainWorldJs"
+      | "solverTimeoutMs"
     >)
   | { kind: "connect"; url: string; tokenFile?: string; keepAliveMs?: number };
 
@@ -562,6 +680,7 @@ export function parseStdioConfig(
     ...DISPLAY_OPTIONS,
     ...EGRESS_OPTIONS,
     ...INBOX_OPTIONS,
+    ...SOLVER_OPTIONS,
   });
   rejectPositionals(flags.positionals);
 
@@ -580,6 +699,7 @@ export function parseStdioConfig(
       ...displayFields(flags, env),
       ...egressFields(flags, env),
       ...inboxFields(flags, env),
+      ...solverFields(flags, env),
     };
   }
 
@@ -594,6 +714,15 @@ export function parseStdioConfig(
     "egress-policy",
     "egress-allow",
     "upload-inbox-quota-bytes",
+    "solver-adapter",
+    "solver-webhook",
+    "solver-webhook-secret",
+    "solver-module",
+    "solver-api-key",
+    "solver-fallback",
+    "solver-proxy-exposure",
+    "solver-allow-main-world-js",
+    "solver-timeout-ms",
   ];
   if (browserFlags.some((flag) => flags.isSet(flag))) {
     throw new UsageError(
@@ -782,4 +911,29 @@ export function parseSecretsCommand(
   if (extra !== undefined) throw new UsageError(`Unexpected argument "${extra}"`);
   if (action !== "rotate") throw new UsageError(`secrets needs "rotate", got "${action ?? ""}"`);
   return { action, dataDir: resolveDataDir(flags, env, facts) };
+}
+
+export interface SolverCommand {
+  action: "status";
+  dataDir: string;
+  solver: SolverConfigFields;
+}
+
+export function parseSolverCommand(
+  argv: string[],
+  env: Env = process.env,
+  facts: PlatformFacts = currentPlatform(),
+): SolverCommand {
+  const flags = parseFlags(argv, {
+    "data-dir": { type: "string" },
+    ...SOLVER_OPTIONS,
+  });
+  const [action, extra] = flags.positionals;
+  if (extra !== undefined) throw new UsageError(`Unexpected argument "${extra}"`);
+  if (action !== "status") throw new UsageError(`solver needs "status", got "${action ?? ""}"`);
+  return {
+    action,
+    dataDir: resolveDataDir(flags, env, facts),
+    solver: solverFields(flags, env),
+  };
 }

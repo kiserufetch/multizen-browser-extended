@@ -425,6 +425,11 @@ export class EngineRouter extends EventEmitter implements BrowserDriver {
   evaluateJs(profileId: ProfileId, expression: string, sessionId?: string): Promise<unknown> {
     return this.require(profileId).evaluateJs(profileId, expression, sessionId);
   }
+  evaluateIsolatedJs(profileId: ProfileId, expression: string): Promise<unknown> {
+    const driver = this.require(profileId);
+    if (driver.evaluateIsolatedJs) return driver.evaluateIsolatedJs(profileId, expression);
+    return driver.evaluateJs(profileId, expression);
+  }
   getCookies(profileId: ProfileId, urls?: string[], sessionId?: string): Promise<unknown> {
     return this.require(profileId).getCookies(profileId, urls, sessionId);
   }

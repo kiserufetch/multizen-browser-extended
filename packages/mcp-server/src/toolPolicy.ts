@@ -73,6 +73,9 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
   // Answers the dialog an operation may be stuck behind, so it can't queue behind it.
   list_dialogs: { group: "read", annotations: LOCAL_READ, scope: "profile", ...unlocked },
   get_human_status: { group: "read", annotations: LOCAL_READ, scope: "profile", ...unlocked },
+  detect_captcha: { group: "read", annotations: PAGE_READ, ...pageRead },
+  get_solver_status: { group: "read", annotations: LOCAL_READ, scope: "none", ...unlocked },
+  get_solver_balance: { group: "read", annotations: LOCAL_READ, scope: "none", ...unlocked },
 
   // act
   launch_profile: { group: "act", annotations: hints(false, false, true, true), ...pageWrite },
@@ -104,6 +107,9 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = {
   close_tab: { group: "act", annotations: hints(false, true, true, false), ...pageWrite },
   request_human: { group: "act", annotations: LOCAL_CHANGE, scope: "profile", ...unlocked },
   wait_for_human: { group: "act", annotations: LOCAL_READ, scope: "profile", ...unlocked },
+  configure_solver: { group: "act", annotations: LOCAL_CHANGE, scope: "none", ...unlocked },
+  solve_captcha: { group: "act", annotations: LOCAL_CHANGE, scope: "profile", ...unlocked },
+  cancel_solver: { group: "act", annotations: LOCAL_CHANGE, scope: "profile", ...unlocked },
   // Lease TTL keeps running during a handoff, so renewal has to keep working.
   acquire_profile: { group: "act", annotations: hints(false, false, false, false), scope: "profile", ...unlocked, ownLeaseCheck: true },
   renew_profile: { group: "act", annotations: hints(false, false, false, false), scope: "profile", ...unlocked, ownLeaseCheck: true },

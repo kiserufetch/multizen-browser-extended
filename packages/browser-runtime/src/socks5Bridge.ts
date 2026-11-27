@@ -167,6 +167,28 @@ export async function stopAllBridges(): Promise<void> {
   await Promise.all(ids.map((id) => stopBridgeForProfile(id)));
 }
 
+/**
+ * Returns the running local SOCKS5 bridge endpoint for `profileId`, or null when
+ * no bridge is active for it. Used by the challenge solver port when `proxyExposure`
+ * is `"bridge"` or `"raw"` so external solvers can route through the profile's
+ * egress without learning raw upstream proxy credentials.
+ */
+export function getProfileBridgeInfo(profileId: ProfileId): {
+  type: "socks5";
+  host: "127.0.0.1";
+  port: number;
+  url: string;
+} | null {
+  const handle = byProfile.get(profileId);
+  if (!handle) return null;
+  return {
+    type: "socks5",
+    host: "127.0.0.1",
+    port: handle.port,
+    url: `socks5://127.0.0.1:${handle.port}`,
+  };
+}
+
 interface BridgeEgress {
   policy: EgressPolicy;
   /** This bridge's own lookups, so a page that exhausts them holds up only itself. */

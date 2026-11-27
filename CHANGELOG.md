@@ -7,10 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Four fingerprint defects the 0.11.0 detection baselines found, fixed with values that stay the same
-for a profile from one launch to the next. Each changes what some desktop personas show pages, as
-listed below. Measurements, causes, and what still needs engine changes:
-[`docs/fingerprint-defects-2026-11-01.md`](docs/fingerprint-defects-2026-11-01.md).
+## [0.12.0] - 2026-11-28
+
+Hexagonal CAPTCHA / challenge solver ports (`CaptchaSolverPort`, `ChallengeDetectorPort`, `SolverPagePort`), built-in cloud provider adapters (**CapSolver**, **2Captcha**, **RuCaptcha**), external HTTP/Webhook callback routes (`/solver/v1/tasks/:taskId/*`), dynamic ESM plugin loading, full zero-preconfig MCP self-service (`configure_solver`, `get_solver_balance`, `detect_captcha`, `solve_captcha`, `get_solver_status`, `cancel_solver`), and four fingerprint/detection fixes from the 0.11.0 baseline measurements ([`docs/captcha-solver-ports-spec.md`](docs/captcha-solver-ports-spec.md), [`docs/fingerprint-defects-2026-11-01.md`](docs/fingerprint-defects-2026-11-01.md)).
+
+### Added
+
+- **Hexagonal CAPTCHA / challenge solver ports (`@multizen/types`, `@multizen/browser-runtime`, `@multizen/mcp-server`).**
+  - `CaptchaSolverPort`, `ChallengeDetectorPort` and hybrid `SolverPagePort` (supporting both token-level injection via `applyToken`, cookie access and interactive UI actions via `captureFrame`, `extract`, `clickRef`, `typeRef`, `dispatchInput`, `performAction`, `evaluateIsolatedJs`, and gated `evaluateMainWorldJs`).
+  - Stealth-safe `DefaultChallengeDetector` / `BuiltinChallengeDetector` running strictly in an isolated world (`Page.createIsolatedWorld` on CloakBrowser, isolated evaluation on Camoufox) to detect Cloudflare Turnstile, Cloudflare WAF, reCAPTCHA v2/v3 (standard & Enterprise), hCaptcha, GeeTest v3/v4, Arkose FunCaptcha and DataDome without touching main-world globals.
+  - Built-in cloud provider adapters: **CapSolver** (`CapSolverAdapter`), **2Captcha** (`TwoCaptchaAdapter`) and **RuCaptcha** (`RuCaptchaAdapter`) implementing REST API v2 (`createTask`, `getTaskResult`, `getBalance`) with automatic proxy/proxyless task mapping and persona User-Agent coherence.
+  - External HTTP / Webhook adapter (`HttpWebhookSolverAdapter`) with HMAC-SHA256 signing (`X-MultiZen-Signature`), single-task ephemeral bearer tokens and interactive callback routes `/solver/v1/tasks/:taskId/{frame,extract,input,action,apply-token,cookies,evaluate-isolated,evaluate-main,settle}`.
+  - Dynamic ESM plugin loader (`loadModuleSolverPort`, `--solver-module`) for custom local solver modules.
+  - Proxy exposure policy (`ProxyExposureMode`: `"bridge" | "raw" | "none"`, default `"bridge"`), passing the profile's local SOCKS5 bridge (`socks5://127.0.0.1:<port>`) and effective `FingerprintConfig` without leaking raw proxy credentials unless `"raw"` is explicitly selected.
+- **Full zero-preconfig MCP solver self-service (`@multizen/mcp-server`).**
+  - `configure_solver`: configure or hot-swap solver providers (`capsolver`, `2captcha`, `rucaptcha`, `webhook`, `none`), API keys, custom API base URLs, fallback policies (`solver-then-human`, `solver-only`, `human-only`) and proxy exposure globally or per profile (`profile_id`) directly over MCP, with optional live verification (`verify: true`) and persistence to `settings.json` / SQLite `profiles.solver_config`.
+  - `get_solver_balance`: query live account balance and health (`/getBalance`) for the global solver, a profile's solver, or an ad-hoc `adapter` + `api_key` before saving.
+  - `detect_captcha`, `solve_captcha` (including one-shot inline `adapter` + `api_key` overrides), `get_solver_status` (global or per-profile, with optional `include_balance: true`) and `cancel_solver` (with `handoff_to_human: true` takeover).
+  - Seamless `request_human(kind: "captcha")` interception: routes CAPTCHA handoffs through `SolverCoordinator` first, suppresses premature human webhook notifications while the solver works, and falls back to human operator control on failure/unsupported under `solver-then-human`.
+- **CLI, Server & Desktop GUI solver controls (`@multizen/server`, `@multizen/desktop`).**
+  - `multizen-server serve` / `stdio` flags (`--solver-adapter`, `--solver-api-key`, `--solver-webhook`, `--solver-webhook-secret`, `--solver-module`, `--solver-fallback`, `--solver-proxy-exposure`, `--solver-allow-main-world-js`, `--solver-timeout-ms`) and `MULTIZEN_SOLVER_*` environment variables, plus `multizen-server solver status`.
+  - Desktop Settings **Challenge solver port** card (CapSolver, 2Captcha, RuCaptcha, HTTP Webhook, Local ESM Module, live **Test solver port** with balance display), per-profile solver mode override in create/edit sheets, and active solver status + **Take over** button in `HandoffBanner`.
 
 ### Fixed
 
@@ -909,6 +926,7 @@ feature set into the extended fork while keeping the fork's MCP/CDP tooling.
   per-profile SOCKS5 bridge with persona alignment, and the activity log.
 - GitHub Actions release workflow with stable, version-less download URLs.
 
+[0.12.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.10.0...v0.11.0
 [0.8.1]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/kiserufetch/multizen-browser-extended/compare/v0.8.0-canary.1...v0.8.0

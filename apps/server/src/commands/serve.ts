@@ -6,6 +6,7 @@ import {
   createDownloadRoute,
   createMultizenMcpServer,
   createPanelRoute,
+  createSolverRoute,
   FULL_PRINCIPAL,
   HttpTransport,
   PanelSessions,
@@ -127,11 +128,15 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
     });
   }
 
-  const runtime = await buildRuntime(config, await takeOverFromPreviousRun(config.dataDir), true);
+  const reachableAt = config.publicUrl ?? base;
+  const runtime = await buildRuntime(
+    { ...config, callbackBaseUrl: () => reachableAt },
+    await takeOverFromPreviousRun(config.dataDir),
+    true,
+  );
   shutdown.add("runtime", () => runtime.close(), RUNTIME_CLOSE_BUDGET_MS);
   preflightUserNamespaces(enginesInUse(runtime));
 
-  const reachableAt = config.publicUrl ?? base;
   const limiter = new AuthFailureLimiter();
   const panelSessions = new PanelSessions();
   const panel = createPanelRoute({
@@ -183,7 +188,7 @@ export async function runServe(config: ServerConfig, shutdown: ShutdownManager):
       ? { onSessionClosed: (sessionId: string) => runtime.shared.leases.dropSession(sessionId) }
       : {}),
     publicHealthz: true,
-    publicRoutes: [panel],
+    publicRoutes: [panel, createSolverRoute(runtime.solverWebhookSessions)],
     authedRoutes: [createDownloadRoute({ driver: runtime.driver, profiles: runtime.profileManager })],
     authFailureLimiter: limiter,
     trustProxy: config.trustProxy,

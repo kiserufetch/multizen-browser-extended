@@ -178,6 +178,11 @@ export interface BrowserDriver {
   //    tool layer calls these instead of composing CDP, so the curated tools
   //    run on every engine. (wait_for_* stay composed on evaluateJs above.)
   evaluateJs(profileId: ProfileId, expression: string, sessionId?: string): Promise<unknown>;
+  /**
+   * Evaluate JS in an isolated world (invisible to main-world page scripts).
+   * On Chromium this uses Page.createIsolatedWorld; on Camoufox evaluateJs is already isolated.
+   */
+  evaluateIsolatedJs?(profileId: ProfileId, expression: string): Promise<unknown>;
   getCookies(profileId: ProfileId, urls?: string[], sessionId?: string): Promise<unknown>;
   setCookies(profileId: ProfileId, cookies: unknown[], sessionId?: string): Promise<unknown>;
   listTabs(profileId: ProfileId, sessionId?: string): Promise<unknown>;

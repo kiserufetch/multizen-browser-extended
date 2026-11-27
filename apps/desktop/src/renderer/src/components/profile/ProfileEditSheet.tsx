@@ -5,6 +5,7 @@ import type {
   DisplayMode,
   FingerprintConfig,
   Profile,
+  ProfileSolverMode,
   ProxyConfig,
   UpdateProfileInput,
 } from "../../types";
@@ -44,6 +45,7 @@ interface FormState {
   engine: BrowserEngine | undefined;
   /** `undefined` follows the app default. */
   displayMode: DisplayMode | undefined;
+  solverMode: ProfileSolverMode;
   proxyEnabled: boolean;
   proxyType: "http" | "socks5";
   proxyHost: string;
@@ -62,6 +64,7 @@ function toForm(p: Profile): FormState {
     startUrl: p.startUrl ?? "",
     engine: p.engine, // undefined stays undefined → patch omits it → keeps unset
     displayMode: p.displayMode,
+    solverMode: p.solverConfig?.mode ?? "inherit",
 
     proxyEnabled: !!p.proxy,
     proxyType: p.proxy?.type ?? "http",
@@ -98,6 +101,7 @@ function toPatch(f: FormState): UpdateProfileInput {
     startUrl: f.startUrl.trim() || null, // null → app default start page
     engine: f.engine,
     displayMode: f.displayMode ?? null, // null → follow the app default again
+    solverConfig: f.solverMode === "inherit" ? null : { mode: f.solverMode },
     proxy,
     fingerprint: f.fingerprint,
   };
@@ -277,6 +281,8 @@ export function ProfileEditSheet({ profile, isRunning = false, onSaved }: Props)
             onDisplayMode={(v) => update("displayMode", v)}
             displayModeDisabled={isRunning}
             displayModeDisabledReason="Stop the profile to change how it displays."
+            solverMode={form.solverMode}
+            onSolverMode={(v) => update("solverMode", v)}
           />
         )}
 

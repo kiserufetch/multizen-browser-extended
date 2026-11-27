@@ -3,6 +3,7 @@ import { DOWNLOAD_TOOLS } from "./downloads.js";
 import { HUMAN_HANDLERS, HUMAN_TOOLS } from "./human.js";
 import { INTERACTION_TOOLS } from "./interaction.js";
 import { LEASE_TOOLS } from "./leases.js";
+import { SOLVER_TOOLS } from "./solver.js";
 import type { ExtensionTool } from "./shared.js";
 
 export type { ToolContext } from "./shared.js";
@@ -13,6 +14,7 @@ const EXTENSION_TOOLS: ExtensionTool[] = [
   ...DIALOG_TOOLS,
   ...LEASE_TOOLS,
   ...HUMAN_TOOLS,
+  ...SOLVER_TOOLS,
 ];
 
 export const EXTENSION_DEFS = EXTENSION_TOOLS.map((t) => t.definition);

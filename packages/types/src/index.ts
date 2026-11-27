@@ -1,3 +1,5 @@
+import type { ProfileSolverConfig } from "./solver.js";
+
 export type ProfileId = string;
 
 /**
@@ -257,6 +259,8 @@ export interface Profile {
    * Default off (warn only).
    */
   strictGeoCoherence?: boolean;
+  /** Optional per-profile override for the challenge solver port. */
+  solverConfig?: ProfileSolverConfig;
 }
 
 export interface ProfileSummary {
@@ -302,6 +306,7 @@ export interface CreateProfileInput {
   extensions?: ExtensionConfig[];
   alignTimezoneToProxy?: boolean;
   strictGeoCoherence?: boolean;
+  solverConfig?: ProfileSolverConfig;
 }
 
 export interface UpdateProfileInput {
@@ -320,6 +325,7 @@ export interface UpdateProfileInput {
   extensions?: ExtensionConfig[];
   alignTimezoneToProxy?: boolean | null;
   strictGeoCoherence?: boolean | null;
+  solverConfig?: ProfileSolverConfig | null;
 }
 
 export interface LaunchedProfile {
@@ -434,3 +440,4 @@ export interface SandboxStatus {
 export * from "./driver.js";
 export * from "./errors.js";
 export * from "./text.js";
+export * from "./solver.js";

@@ -54,13 +54,13 @@ This repository is a fork of [`multizenteam/multizen-browser`](https://github.co
 <!-- FORK-BASE: update this version whenever you pull changes from upstream -->
 **Based on upstream release:** `v0.4.2` (upstream `master` through `794bbf4`)
 
-**Fork app version:** `0.11.0` (independent semver from upstream).
+**Fork app version:** `0.12.0` (independent semver from upstream).
 
 Fork-specific work (see [`CHANGELOG.md`](CHANGELOG.md)) includes:
 
 - Expanded fingerprint device catalogs (extra Mac M2–M4 SKUs, Linux laptops) and higher entropy thresholds
 - Strict-pin launch timezone policy with opt-in `alignTimezoneToProxy` / `strictGeoCoherence`
-- MCP extras: always-on `cdp_send` / `cdp_send_no_safety`, `probe_fingerprint`, `click_ref` / `type_ref`, human handoff (`request_human` / `get_human_status` / `wait_for_human` / `resume_human`), session-stable multi-client HTTP transport
+- MCP extras: always-on `cdp_send` / `cdp_send_no_safety`, `probe_fingerprint`, `click_ref` / `type_ref`, human handoff (`request_human` / `get_human_status` / `wait_for_human` / `resume_human`), CAPTCHA solver ports (`configure_solver` / `get_solver_balance` / `detect_captcha` / `solve_captcha` / `get_solver_status` / `cancel_solver`) with built-in CapSolver, 2Captcha, RuCaptcha, HTTP Webhook and ESM module adapters, session-stable multi-client HTTP transport
 - [`multizen-server`](apps/server/README.md): the desktop's tools and drivers with no Electron, plus display modes including headless, Docker, tokens and an egress policy
 - Release CI typecheck gate before the multi-OS build matrix
 
@@ -212,7 +212,7 @@ http_headers = { Authorization = "Bearer <token>" }
 }
 ```
 
-Restart your client. The agent now has the full tool set, 45 tools:
+Restart your client. The agent now has the full tool set, 51 tools:
 
 - **Profiles:** `list_profiles`, `create_profile`, `update_profile`, `delete_profile`, `launch_profile`, `close_profile`, `list_fingerprint_options`
 - **Reading a page:** `extract`, `screenshot`
@@ -222,7 +222,7 @@ Restart your client. The agent now has the full tool set, 45 tools:
 - **Waits:** `wait_for_load`, `wait_for_navigation`, `wait_for_selector`
 - **Files:** `upload_file`, `list_downloads`, `get_download`, `delete_download`
 - **JavaScript dialogs:** `set_dialog_policy`, `list_dialogs`, `handle_dialog`
-- **Human handoff:** `request_human`, `get_human_status`, `wait_for_human`, `resume_human`
+- **Human handoff & Challenge solver ports:** `request_human`, `get_human_status`, `wait_for_human`, `resume_human`, `configure_solver`, `get_solver_balance`, `detect_captcha`, `solve_captcha`, `get_solver_status`, `cancel_solver`
 - **Exclusive use:** `acquire_profile`, `renew_profile`, `release_profile`
 - **Diagnostics and raw access:** `probe_fingerprint`, `cdp_send`, `cdp_send_no_safety`
 

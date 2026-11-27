@@ -1,4 +1,9 @@
-export { ProfileManager, type DataDirReconciliation, type StoredSecrets } from "./ProfileManager.js";
+export {
+  ProfileManager,
+  sanitizeProfileSolverConfig,
+  type DataDirReconciliation,
+  type StoredSecrets,
+} from "./ProfileManager.js";
 export {
   createSecretBox,
   generateSecretKey,

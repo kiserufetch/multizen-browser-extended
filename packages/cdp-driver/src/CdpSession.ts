@@ -173,6 +173,7 @@ const OPERATION_BUDGETS: Readonly<Record<string, (args: unknown[], deadlineMs: n
   screenshot: flat,
   evaluate: flat,
   evaluateJs: flat,
+  evaluateIsolatedJs: flat,
   listTabs: flat,
   newTab: flat,
   activateTab: flat,
@@ -2716,6 +2717,32 @@ export class CdpSession {
         safe: true,
       });
     return tab ? this.pageOp(tab, run) : run();
+  }
+
+  /**
+   * Evaluate JS in an isolated world on the active tab's main frame.
+   * Never enables Runtime or DOM, and leaves no globals or hooks in the page's main world.
+   */
+  async evaluateIsolatedJs(expression: string): Promise<unknown> {
+    const tab = this.activeTab();
+    return this.pageOp(tab, async () => {
+      const { sessionId, frameId } = await this.mainFrame(tab);
+      const { executionContextId } = await this.send<{ executionContextId: number }>(
+        "Page.createIsolatedWorld",
+        { frameId, worldName: "mz_solver_world" },
+        sessionId,
+      );
+      return this.send(
+        "Runtime.evaluate",
+        {
+          expression,
+          contextId: executionContextId,
+          returnByValue: true,
+          awaitPromise: true,
+        },
+        sessionId,
+      );
+    });
   }
 
   /** Every frame of a tab in depth order, up to the snapshot limits. */

@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { BrowserEngine, Profile, ProfileId } from "@multizen/types";
 import { isBrowserEngine, isDisplayMode } from "@multizen/types";
 import { exportProfile, importProfile } from "./archive.js";
-import type { ProfileManager } from "./ProfileManager.js";
+import { sanitizeProfileSolverConfig, type ProfileManager } from "./ProfileManager.js";
 
 /** Default file name of a profile's archive: its name with path-hostile runs replaced. */
 export function archiveFileName(profile: Pick<Profile, "name">): string {
@@ -77,6 +77,8 @@ export async function importProfileFromArchive(
   restored.engine ??= opts.defaultEngine;
   // An archive is untrusted input: a mode this build doesn't know follows the default.
   if (!isDisplayMode(restored.displayMode)) delete restored.displayMode;
+  restored.solverConfig = sanitizeProfileSolverConfig(restored.solverConfig);
+  if (!restored.solverConfig) delete restored.solverConfig;
   // Insert the row verbatim so the DB entry points at the restored files (the old
   // create()-based path minted a new id/dataDir and orphaned the cookies/logins
   // that were just restored).

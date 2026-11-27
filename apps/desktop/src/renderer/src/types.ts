@@ -15,6 +15,9 @@ import type {
   BrowserEngine,
   DisplayMode,
   SandboxStatus,
+  ProfileSolverConfig,
+  ProfileSolverMode,
+  SolverSettings,
 } from "@multizen/types";
 
 /** Payload for the `extensions:installed` push (companion "Add to MultiZen"). */
@@ -99,8 +102,14 @@ export interface MultizenApi {
     pending: () => Promise<PendingHandoff[]>;
     resume: (profileId: ProfileId, handoffId?: string) => Promise<void>;
     abort: (handoffId: string) => Promise<void>;
+    takeover: (profileId: ProfileId) => Promise<void>;
     openPanel: (handoffId?: string) => Promise<boolean>;
     onChanged: (cb: (pending: PendingHandoff[]) => void) => () => void;
+  };
+  solver: {
+    test: (
+      draft?: Partial<SolverSettings>,
+    ) => Promise<{ ok: boolean; adapterId?: string; latencyMs?: number; message: string }>;
   };
   system: {
     info: () => Promise<SystemInfo>;
@@ -193,4 +202,7 @@ export type {
   BrowserEngine,
   DisplayMode,
   SandboxStatus,
+  ProfileSolverConfig,
+  ProfileSolverMode,
+  SolverSettings,
 };
