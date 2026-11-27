@@ -674,6 +674,121 @@ test("Post-solve verification: prevents false 'solved' when interactive hCaptcha
     );
     assert.equal(mouseDowns.length, 4);
 
+    // 3. Test multi-round RuCaptcha with intermediate loading state + exampleBounds -> imgInstructions
+    modalOpen = true;
+    driver.humanInput.length = 0;
+    let multiRoundInspect = 0;
+    const gridPayloads: Array<Record<string, unknown>> = [];
+
+    shared.solver.configure({
+      fetchImpl: async (url, init) => {
+        const body = JSON.parse(String(init?.body)) as { task?: Record<string, unknown> };
+        if (String(url).endsWith("/createTask") && body.task?.type === "GridTask") {
+          gridPayloads.push(body.task);
+          return new Response(
+            JSON.stringify({
+              errorId: 0,
+              taskId: `grid-multi-${gridPayloads.length}`,
+              status: "ready",
+              solution: { click: gridPayloads.length === 1 ? [2, 6] : [1, 9] },
+            }),
+            { status: 200 },
+          );
+        }
+        throw new Error(`Unexpected URL ${String(url)}`);
+      },
+    });
+
+    driver.evaluateIsolatedJs = async (_id, _expr, opts) => {
+      if (opts?.frameUrlPattern) {
+        multiRoundInspect++;
+        const tileBounds = Array.from({ length: 9 }, (_, i) => ({
+          index: i,
+          x: 460 + (i % 3) * 120,
+          y: 200 + Math.floor(i / 3) * 120,
+          width: 110,
+          height: 110,
+        }));
+        if (multiRoundInspect === 1) {
+          return {
+            result: {
+              value: JSON.stringify({
+                frameBounds: { x: 440, y: 80, width: 400, height: 600 },
+                challengeType: "grid",
+                promptText: "Select matching objects",
+                exampleBounds: { x: 740, y: 100, width: 70, height: 60 },
+                tileBounds,
+                submitButtonBounds: { x: 720, y: 610, width: 90, height: 36 },
+                submitButtonText: "Next",
+                roundSignature: "sig-r1",
+                isVisible: true,
+              }),
+            },
+          };
+        }
+        if (multiRoundInspect === 2 || multiRoundInspect === 3) {
+          // Intermediate loading state (challengeType is undefined while Round 2 tiles load)
+          return {
+            result: {
+              value: JSON.stringify({
+                frameBounds: { x: 440, y: 80, width: 400, height: 600 },
+                promptText: "Select matching objects",
+                exampleBounds: { x: 740, y: 100, width: 70, height: 60 },
+                submitButtonBounds: { x: 720, y: 610, width: 90, height: 36 },
+                loading: true,
+                isVisible: true,
+              }),
+            },
+          };
+        }
+        if (multiRoundInspect === 4) {
+          return {
+            result: {
+              value: JSON.stringify({
+                frameBounds: { x: 440, y: 80, width: 400, height: 600 },
+                challengeType: "grid",
+                promptText: "Select matching objects",
+                exampleBounds: { x: 740, y: 100, width: 70, height: 60 },
+                tileBounds,
+                submitButtonBounds: { x: 720, y: 610, width: 90, height: 36 },
+                submitButtonText: "Verify",
+                roundSignature: "sig-r2",
+                isVisible: true,
+              }),
+            },
+          };
+        }
+        return { result: { value: "null" } };
+      }
+      return {
+        result: {
+          value: JSON.stringify({
+            kind: "hcaptcha",
+            vendor: "hcaptcha",
+            pageUrl: "https://discord.com/login",
+            sitekey: "a9b5fb07-92ff-493f-86fe-352a2803b3df",
+            frame: {
+              url: "https://newassets.hcaptcha.com/captcha/v1/abc/static/hcaptcha.html#frame=challenge",
+              isCrossOrigin: true,
+              bounds: { x: 440, y: 80, width: 400, height: 600 },
+            },
+          }),
+        },
+      };
+    };
+
+    const multiRoundRes = await callToolJson(client, "solve_captcha", {
+      profile_id: profile.id,
+      adapter: "rucaptcha",
+      api_key: "ru-key",
+      strategy: "auto",
+    });
+    assert.equal(multiRoundRes.isError, false);
+    assert.equal(multiRoundRes.data.status, "solved");
+    assert.equal(gridPayloads.length, 2);
+    assert.equal(typeof gridPayloads[0]!.imgInstructions, "string");
+    assert.equal(typeof gridPayloads[1]!.imgInstructions, "string");
+
     await client.close();
   });
 });

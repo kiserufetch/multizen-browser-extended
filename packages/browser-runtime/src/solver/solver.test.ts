@@ -620,4 +620,156 @@ test("Interactive visual hCaptcha runner: TwoCaptcha GridTask / CoordinatesTask 
     // 3 matching tiles (indices 0, 2, 8) + 1 submit click = 4 clicks
     assert.equal(clicks.length, 4);
   }
+
+  // 3. Multi-round RuCaptcha GridTask with intermediate "loading" states (challengeType: undefined) + exampleBounds -> imgInstructions
+  {
+    const ruPayloads: Array<Record<string, unknown>> = [];
+    const ruAdapter = new RuCaptchaAdapter({
+      apiKey: "ru-key",
+      pollIntervalMs: 5,
+      interactiveDelayScale: 0,
+      fetchImpl: async (url, init) => {
+        const body = JSON.parse(String(init?.body)) as { task?: Record<string, unknown> };
+        if (String(url).endsWith("/createTask") && body.task) {
+          ruPayloads.push(body.task);
+          const roundIdx = ruPayloads.length;
+          return new Response(
+            JSON.stringify({
+              errorId: 0,
+              taskId: `ru-grid-${roundIdx}`,
+              status: "ready",
+              solution: { click: roundIdx === 1 ? [1, 5] : [3, 7] },
+            }),
+            { status: 200 },
+          );
+        }
+        throw new Error(`Unexpected URL ${String(url)}`);
+      },
+    });
+
+    // Scripted sequence of inspectChallengeFrame calls:
+    // Call 1 (Round 1 initial): ready grid round 1 with exampleBounds
+    // Call 2 (after Round 1 Next click, poll #1): header visible, tiles still loading (challengeType: undefined, loading: true)
+    // Call 3 (after Round 1 Next click, poll #2): still loading (challengeType: undefined, loading: true)
+    // Call 4 (after Round 1 Next click, poll #3): ready grid round 2 with new roundSignature and exampleBounds
+    // Call 5 (after Round 2 Verify click, poll #1): modal closed (isVisible: false)
+    let inspectCall = 0;
+    const clicks: HumanInputEvent[] = [];
+    const driver = stubDriver({
+      cdpSend: async (_id, method, params) => {
+        if (method === "Page.captureScreenshot") {
+          const clip = (params as { clip?: { height?: number } } | undefined)?.clip;
+          if (clip && clip.height === 60) {
+            return { data: Buffer.from("fake-example-instructions-jpeg").toString("base64") };
+          }
+          return { data: Buffer.from("fake-grid-or-tile-jpeg").toString("base64") };
+        }
+        return {};
+      },
+      evaluateIsolatedJs: async (_id, _expr, opts) => {
+        if (opts?.frameUrlPattern) {
+          inspectCall++;
+          if (inspectCall === 1) {
+            return {
+              result: {
+                value: JSON.stringify({
+                  frameBounds: hcaptchaInteractiveChallenge.frame.bounds,
+                  challengeType: "grid",
+                  promptText: "Нажмите на все изображения с таким же объектом",
+                  exampleBounds: { x: 740, y: 100, width: 70, height: 60 },
+                  tileBounds: makeGridTiles(),
+                  submitButtonBounds: { x: 720, y: 610, width: 90, height: 36 },
+                  submitButtonText: "Далее",
+                  roundSignature: "round-1-sig",
+                  isVisible: true,
+                }),
+              },
+            };
+          }
+          if (inspectCall === 2 || inspectCall === 3) {
+            // Intermediate loading state while Round 2 images are downloading over proxy
+            return {
+              result: {
+                value: JSON.stringify({
+                  frameBounds: hcaptchaInteractiveChallenge.frame.bounds,
+                  promptText: "Нажмите на все изображения с таким же объектом",
+                  exampleBounds: { x: 740, y: 100, width: 70, height: 60 },
+                  submitButtonBounds: { x: 720, y: 610, width: 90, height: 36 },
+                  submitButtonText: "Готово",
+                  loading: true,
+                  isVisible: true,
+                }),
+              },
+            };
+          }
+          if (inspectCall === 4) {
+            return {
+              result: {
+                value: JSON.stringify({
+                  frameBounds: hcaptchaInteractiveChallenge.frame.bounds,
+                  challengeType: "grid",
+                  promptText: "Нажмите на все изображения с таким же объектом",
+                  exampleBounds: { x: 740, y: 100, width: 70, height: 60 },
+                  tileBounds: makeGridTiles(),
+                  submitButtonBounds: { x: 720, y: 610, width: 90, height: 36 },
+                  submitButtonText: "Готово",
+                  roundSignature: "round-2-sig",
+                  isVisible: true,
+                }),
+              },
+            };
+          }
+          return {
+            result: {
+              value: JSON.stringify({
+                frameBounds: hcaptchaInteractiveChallenge.frame.bounds,
+                isVisible: false,
+              }),
+            },
+          };
+        }
+        return { result: { value: "null" } };
+      },
+      dispatchInput: async (_id, ev) => {
+        clicks.push(ev);
+      },
+    });
+
+    const page = createSolverPagePort({
+      profileId: "p1",
+      engine: "cloakbrowser",
+      driver,
+      allowMainWorldJs: false,
+    });
+
+    const now = Date.now();
+    const outcome = await ruAdapter.solve(
+      {
+        taskId: "t-ru-multiround",
+        profileId: "p1",
+        strategy: "auto",
+        challenge: hcaptchaInteractiveChallenge,
+        network: sampleNetwork,
+        createdAt: new Date(now).toISOString(),
+        expiresAt: new Date(now + 10_000).toISOString(),
+      },
+      page,
+      new AbortController().signal,
+    );
+
+    assert.equal(outcome.status, "solved");
+    assert.equal(outcome.mode, "interactive");
+    assert.equal(ruPayloads.length, 2);
+    assert.equal(
+      ruPayloads[0]!.imgInstructions,
+      Buffer.from("fake-example-instructions-jpeg").toString("base64"),
+    );
+    assert.equal(
+      ruPayloads[1]!.imgInstructions,
+      Buffer.from("fake-example-instructions-jpeg").toString("base64"),
+    );
+    // Round 1: 2 tiles + 1 Next = 3 clicks; Round 2: 2 tiles + 1 Verify = 3 clicks -> 6 clicks total
+    const mouseDowns = clicks.filter((e) => e.kind === "mouse" && e.action === "down");
+    assert.equal(mouseDowns.length, 6);
+  }
 });

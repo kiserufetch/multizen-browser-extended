@@ -2733,12 +2733,20 @@ export class CdpSession {
       if (opts?.frameUrlPattern) {
         const pattern = opts.frameUrlPattern.toLowerCase();
         const { frames } = await this.collectFrames(tab);
+        const dedupedByFrameId = new Map<string, SnapshotFrame>();
+        for (const frame of frames) {
+          if (!frame.ownerSessionId) continue;
+          const existing = dedupedByFrameId.get(frame.frameId);
+          // Prefer the OOPIF's own target session (sessionId !== ownerSessionId) over the parent's childFrames stub.
+          if (!existing || frame.sessionId !== frame.ownerSessionId) {
+            dedupedByFrameId.set(frame.frameId, frame);
+          }
+        }
         const candidates: Array<{
           frame: SnapshotFrame;
           bounds: { x: number; y: number; width: number; height: number };
         }> = [];
-        for (const frame of frames) {
-          if (!frame.ownerSessionId) continue;
+        for (const frame of dedupedByFrameId.values()) {
           const url = (frame.url ?? "").toLowerCase();
           if (!url.includes(pattern)) continue;
           const bounds = await this.readFrameBounds(tab, frame);

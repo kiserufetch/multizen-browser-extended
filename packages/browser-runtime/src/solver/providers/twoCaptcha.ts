@@ -253,6 +253,9 @@ export class TwoCaptchaCompatibleAdapter
         comment: input.promptText,
         rows: input.rows,
         columns: input.columns,
+        ...(input.instructionsImageBase64
+          ? { imgInstructions: input.instructionsImageBase64 }
+          : {}),
       },
       signal,
     );
@@ -281,6 +284,9 @@ export class TwoCaptchaCompatibleAdapter
         type: "CoordinatesTask",
         body: input.imageBase64,
         comment: input.promptText,
+        ...(input.instructionsImageBase64
+          ? { imgInstructions: input.instructionsImageBase64 }
+          : {}),
       },
       signal,
     );

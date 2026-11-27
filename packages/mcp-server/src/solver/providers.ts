@@ -415,6 +415,9 @@ class CloudRestSolverAdapter implements CaptchaSolverPort, InteractiveVisionClas
         comment: input.promptText,
         rows: input.rows,
         columns: input.columns,
+        ...(input.instructionsImageBase64
+          ? { imgInstructions: input.instructionsImageBase64 }
+          : {}),
       },
       signal,
       60_000,
@@ -473,6 +476,9 @@ class CloudRestSolverAdapter implements CaptchaSolverPort, InteractiveVisionClas
         type: "CoordinatesTask",
         body: input.imageBase64,
         comment: input.promptText,
+        ...(input.instructionsImageBase64
+          ? { imgInstructions: input.instructionsImageBase64 }
+          : {}),
       },
       signal,
       60_000,

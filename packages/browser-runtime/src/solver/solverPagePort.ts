@@ -200,10 +200,22 @@ export const INSPECT_CHALLENGE_FRAME_SCRIPT = `(() => {
   };
 
   const promptEl = document.querySelector(
-    ".prompt-text, .task-prompt, [class*='prompt-text'], h2.prompt-text"
+    ".prompt-text, .task-prompt, [class*='prompt-text'], h2.prompt-text, [id*='prompt-text']"
   );
   const promptText =
     promptEl && promptEl.textContent ? promptEl.textContent.trim().replace(/\\s+/g, " ") : undefined;
+
+  const exampleCandidates = Array.from(
+    document.querySelectorAll(
+      ".example-image .image, .challenge-example .image, .challenge-example img, .prompt-image, [class*='example'] .image, [class*='example'] img, .challenge-header"
+    )
+  ).filter((el) => {
+    if (!isVisible(el)) return false;
+    const r = el.getBoundingClientRect();
+    return Boolean(r && r.width >= 24 && r.height >= 24);
+  });
+  const exampleBounds =
+    exampleCandidates.length > 0 ? toRootBox(exampleCandidates[0]) : undefined;
 
   const errorEl = document.querySelector(
     ".display-error, .error-text, [class*='display-error']"
@@ -220,11 +232,42 @@ export const INSPECT_CHALLENGE_FRAME_SCRIPT = `(() => {
   const submitButtonText =
     submitEl && submitEl.textContent ? submitEl.textContent.trim() : undefined;
 
+  const hasTileGraphicLoaded = (node) => {
+    const checkBg = (el) => {
+      if (!el || typeof window.getComputedStyle !== "function") return false;
+      const bg = window.getComputedStyle(el).backgroundImage || "";
+      if (!bg || bg === "none") return false;
+      if (/url\\(\\s*["']?\\s*["']?\\s*\\)/i.test(bg)) return false;
+      return /url\\(/i.test(bg);
+    };
+    if (checkBg(node)) return true;
+    const bgChild = node.querySelector(".image, [style*='background-image']");
+    if (bgChild && checkBg(bgChild)) return true;
+    const img = node.querySelector("img");
+    if (img && img.complete && img.naturalWidth > 0) return true;
+    const canvas = node.querySelector("canvas");
+    if (canvas && isVisible(canvas)) return true;
+    return false;
+  };
+
   const tileNodes = Array.from(
-    document.querySelectorAll(".task-image, .image-wrapper, [class*='task-image']")
+    document.querySelectorAll(".task-image, .image-wrapper, [class*='task-image'], .challenge-item")
   ).filter(isVisible);
 
   if (tileNodes.length >= 4) {
+    const loadedCount = tileNodes.filter(hasTileGraphicLoaded).length;
+    if (loadedCount < tileNodes.length) {
+      return JSON.stringify({
+        frameBounds,
+        ...(promptText ? { promptText } : {}),
+        ...(exampleBounds ? { exampleBounds } : {}),
+        ...(submitButtonBounds ? { submitButtonBounds } : {}),
+        ...(submitButtonText ? { submitButtonText } : {}),
+        ...(errorText ? { errorText } : {}),
+        loading: true,
+        isVisible: true,
+      });
+    }
     const tileBounds = tileNodes.map((node, index) => ({
       index,
       ...toRootBox(node),
@@ -238,6 +281,7 @@ export const INSPECT_CHALLENGE_FRAME_SCRIPT = `(() => {
     return JSON.stringify({
       frameBounds,
       ...(promptText ? { promptText } : {}),
+      ...(exampleBounds ? { exampleBounds } : {}),
       challengeType: "grid",
       tileBounds,
       ...(submitButtonBounds ? { submitButtonBounds } : {}),
@@ -249,7 +293,7 @@ export const INSPECT_CHALLENGE_FRAME_SCRIPT = `(() => {
   }
 
   const canvasNodes = Array.from(
-    document.querySelectorAll(".task-grid canvas, .challenge-container canvas, canvas")
+    document.querySelectorAll(".task-grid canvas, .challenge-container canvas, .challenge-view canvas, canvas")
   ).filter((c) => isVisible(c) && c.getBoundingClientRect().width >= 100 && c.getBoundingClientRect().height >= 100);
 
   if (canvasNodes.length > 0) {
@@ -257,6 +301,7 @@ export const INSPECT_CHALLENGE_FRAME_SCRIPT = `(() => {
     return JSON.stringify({
       frameBounds,
       ...(promptText ? { promptText } : {}),
+      ...(exampleBounds ? { exampleBounds } : {}),
       challengeType: "canvas",
       canvasBounds: toRootBox(canvasEl),
       ...(submitButtonBounds ? { submitButtonBounds } : {}),
@@ -284,6 +329,7 @@ export const INSPECT_CHALLENGE_FRAME_SCRIPT = `(() => {
   return JSON.stringify({
     frameBounds,
     ...(promptText ? { promptText } : {}),
+    ...(exampleBounds ? { exampleBounds } : {}),
     isVisible: Boolean(promptText || submitButtonBounds),
   });
 })()`;

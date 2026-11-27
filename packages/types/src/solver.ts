@@ -196,6 +196,7 @@ export interface ChallengeTileBounds {
 export interface ChallengeFrameInspection {
   frameBounds: { x: number; y: number; width: number; height: number };
   promptText?: string;
+  exampleBounds?: { x: number; y: number; width: number; height: number };
   challengeType?: "grid" | "canvas" | "checkbox";
   tileBounds?: ChallengeTileBounds[];
   canvasBounds?: { x: number; y: number; width: number; height: number };
@@ -205,6 +206,7 @@ export interface ChallengeFrameInspection {
   submitButtonText?: string;
   errorText?: string;
   roundSignature?: string;
+  loading?: boolean;
   isVisible: boolean;
 }
 

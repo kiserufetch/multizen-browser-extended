@@ -7,6 +7,7 @@ import type {
 export interface InteractiveGridInput {
   imageBase64: string;
   tileImagesBase64?: string[];
+  instructionsImageBase64?: string;
   promptText: string;
   rows: number;
   columns: number;
@@ -14,6 +15,7 @@ export interface InteractiveGridInput {
 
 export interface InteractiveCanvasInput {
   imageBase64: string;
+  instructionsImageBase64?: string;
   promptText: string;
 }
 
@@ -31,6 +33,7 @@ export interface RunHCaptchaInteractiveOptions {
   signal: AbortSignal;
   maxRounds?: number;
   delayScale?: number;
+  roundTransitionTimeoutMs?: number;
   jitterRatio?: number;
   frameUrlPattern?: string;
 }
@@ -143,6 +146,66 @@ async function clickBoxHumanized(opts: {
   });
 }
 
+async function waitForChallengeRound(opts: {
+  page: SolverPagePort;
+  frameUrlPattern: string;
+  previousRoundSignature?: string;
+  timeoutMs: number;
+  pollIntervalMs: number;
+  signal: AbortSignal;
+}): Promise<
+  | { kind: "closed" }
+  | { kind: "ready"; inspection: ChallengeFrameInspection }
+  | { kind: "unknown_layout"; inspection: ChallengeFrameInspection }
+> {
+  const deadline = Date.now() + Math.max(0, opts.timeoutMs);
+  let lastInspection: ChallengeFrameInspection | null = null;
+
+  for (;;) {
+    const inspection = await opts.page.inspectChallengeFrame!(opts.frameUrlPattern);
+    lastInspection = inspection;
+
+    if (
+      !inspection ||
+      !inspection.isVisible ||
+      (inspection.challengeType === "checkbox" && inspection.checkboxChecked)
+    ) {
+      return { kind: "closed" };
+    }
+
+    if (inspection.challengeType === "grid" || inspection.challengeType === "canvas") {
+      if (opts.previousRoundSignature === undefined) {
+        return { kind: "ready", inspection };
+      }
+      const hasError = Boolean(
+        inspection.errorText && /try again|попробуйте еще/i.test(inspection.errorText),
+      );
+      if (inspection.roundSignature !== opts.previousRoundSignature || hasError) {
+        return { kind: "ready", inspection };
+      }
+      if (Date.now() >= deadline || opts.signal.aborted) {
+        return { kind: "ready", inspection };
+      }
+    } else if (Date.now() >= deadline || opts.signal.aborted) {
+      return { kind: "unknown_layout", inspection };
+    }
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0 || opts.signal.aborted) {
+      if (
+        lastInspection &&
+        (lastInspection.challengeType === "grid" || lastInspection.challengeType === "canvas")
+      ) {
+        return { kind: "ready", inspection: lastInspection };
+      }
+      return lastInspection
+        ? { kind: "unknown_layout", inspection: lastInspection }
+        : { kind: "closed" };
+    }
+    await sleepWithSignal(Math.min(opts.pollIntervalMs, Math.max(1, remaining)), opts.signal);
+  }
+}
+
 export async function runHCaptchaInteractive(
   opts: RunHCaptchaInteractiveOptions,
 ): Promise<SolverOutcome> {
@@ -164,6 +227,10 @@ export async function runHCaptchaInteractive(
     };
   }
 
+  const pollIntervalMs = Math.max(10, Math.round(350 * delayScale));
+  const roundTimeoutMs =
+    opts.roundTransitionTimeoutMs ?? Math.round(8_000 * Math.max(delayScale, 0.05));
+
   const initialFrame = await page.captureFrame({ quality: 85 });
   let viewport = initialFrame.viewport;
 
@@ -176,6 +243,8 @@ export async function runHCaptchaInteractive(
       fallbackToHuman: true,
     };
   }
+
+  let pendingInspection: ChallengeFrameInspection | null = null;
 
   if (firstCheck.challengeType === "checkbox") {
     if (firstCheck.checkboxChecked) {
@@ -194,20 +263,41 @@ export async function runHCaptchaInteractive(
       delayScale,
       jitterRatio,
     });
-    await sleepWithSignal(Math.round(1400 * delayScale), signal);
+    await sleepWithSignal(Math.round(350 * delayScale), signal);
 
-    const afterCheckbox = await page.inspectChallengeFrame(frameUrlPattern);
-    if (
-      !afterCheckbox ||
-      !afterCheckbox.isVisible ||
-      (afterCheckbox.challengeType === "checkbox" && afterCheckbox.checkboxChecked)
-    ) {
+    const afterCheckbox = await waitForChallengeRound({
+      page,
+      frameUrlPattern,
+      timeoutMs: roundTimeoutMs,
+      pollIntervalMs,
+      signal,
+    });
+    if (afterCheckbox.kind === "closed") {
       return {
         status: "solved",
         mode: "interactive",
         notes: "hCaptcha solved via checkbox click",
       };
     }
+    pendingInspection = afterCheckbox.inspection;
+  } else if (!firstCheck.challengeType) {
+    const initialWait = await waitForChallengeRound({
+      page,
+      frameUrlPattern,
+      timeoutMs: roundTimeoutMs,
+      pollIntervalMs,
+      signal,
+    });
+    if (initialWait.kind === "closed") {
+      return {
+        status: "solved",
+        mode: "interactive",
+        notes: "hCaptcha modal closed while waiting for initial round",
+      };
+    }
+    pendingInspection = initialWait.inspection;
+  } else {
+    pendingInspection = firstCheck;
   }
 
   let errorRetries = 0;
@@ -222,9 +312,9 @@ export async function runHCaptchaInteractive(
     }
 
     const inspection =
-      round === 0 && firstCheck.challengeType !== "checkbox"
-        ? firstCheck
-        : await page.inspectChallengeFrame(frameUrlPattern);
+      pendingInspection ?? (await page.inspectChallengeFrame(frameUrlPattern));
+    pendingInspection = null;
+
     if (!inspection || !inspection.isVisible) {
       if (round > 0) {
         return {
@@ -264,6 +354,9 @@ export async function runHCaptchaInteractive(
     const promptText = inspection.promptText ?? "Select matching images";
     const latestFrame = await page.captureFrame({ quality: 85 });
     viewport = latestFrame.viewport;
+    const instructionsImageBase64 = inspection.exampleBounds
+      ? await captureRegion(page, inspection.exampleBounds)
+      : undefined;
 
     if (
       inspection.challengeType === "grid" &&
@@ -289,6 +382,7 @@ export async function runHCaptchaInteractive(
         {
           imageBase64,
           tileImagesBase64,
+          ...(instructionsImageBase64 ? { instructionsImageBase64 } : {}),
           promptText,
           rows: 3,
           columns: 3,
@@ -328,6 +422,7 @@ export async function runHCaptchaInteractive(
       const coords = await classifier.solveCoordinates(
         {
           imageBase64,
+          ...(instructionsImageBase64 ? { instructionsImageBase64 } : {}),
           promptText,
         },
         signal,
@@ -377,19 +472,23 @@ export async function runHCaptchaInteractive(
       jitterRatio,
     });
 
-    await sleepWithSignal(Math.round(randomInRange(1200, 1800) * delayScale), signal);
-    const afterSubmit = await page.inspectChallengeFrame(frameUrlPattern);
-    if (
-      !afterSubmit ||
-      !afterSubmit.isVisible ||
-      (afterSubmit.challengeType === "checkbox" && afterSubmit.checkboxChecked)
-    ) {
+    await sleepWithSignal(Math.round(randomInRange(250, 400) * delayScale), signal);
+    const nextRound = await waitForChallengeRound({
+      page,
+      frameUrlPattern,
+      previousRoundSignature: inspection.roundSignature,
+      timeoutMs: roundTimeoutMs,
+      pollIntervalMs,
+      signal,
+    });
+    if (nextRound.kind === "closed") {
       return {
         status: "solved",
         mode: "interactive",
         notes: `Solved interactive hCaptcha in ${round + 1} round(s)`,
       };
     }
+    pendingInspection = nextRound.inspection;
   }
 
   return {

@@ -2172,3 +2172,70 @@ test("a failed navigate's message has the origin; the whole URL stays in details
   assert.equal(e.message, "Navigation to http://x.test:81 failed: net::ERR_FAILED");
   assert.equal(e.details?.url, secretUrl);
 });
+
+test("evaluateIsolatedJs with frameUrlPattern deduplicates OOPIF frames and invokes Page.createIsolatedWorld only on the OOPIF session", async () => {
+  const { b, s } = await connected(["A"]);
+  const hcaptchaUrl =
+    "https://newassets.hcaptcha.com/captcha/v1/abc/static/hcaptcha.html#frame=challenge";
+
+  // Attach an OOPIF target whose frameId ("F-HC") also appears in the parent tab's childFrames
+  b.attachTarget(
+    { targetId: "F-HC", type: "iframe", url: hcaptchaUrl },
+    "S-HC",
+    "S-A",
+  );
+
+  b.handlers.set("Page.getFrameTree", (_p, sid) => {
+    if (sid === "S-A") {
+      return {
+        frameTree: {
+          frame: { id: "F-S-A", loaderId: "L1", url: "https://discord.com/login" },
+          childFrames: [
+            {
+              frame: { id: "F-HC", loaderId: "L2", url: hcaptchaUrl },
+            },
+          ],
+        },
+      };
+    }
+    if (sid === "S-HC") {
+      return {
+        frameTree: {
+          frame: { id: "F-HC", loaderId: "L2", url: hcaptchaUrl },
+        },
+      };
+    }
+    return { frameTree: { frame: { id: `F-${sid}`, loaderId: "L1" } } };
+  });
+
+  b.handlers.set("DOM.getFrameOwner", () => ({ backendNodeId: 42 }));
+  b.handlers.set("DOM.getContentQuads", () => ({ quads: [quad(440, 80, 400, 600)] }));
+  b.handlers.set("DOM.getBoxModel", () => ({
+    model: {
+      border: quad(440, 80, 400, 600),
+      content: quad(440, 80, 400, 600),
+    },
+  }));
+  b.handlers.set("Runtime.evaluate", (_p, sid) => ({
+    result: {
+      value: JSON.stringify({
+        sessionUsed: sid,
+        isVisible: true,
+      }),
+    },
+  }));
+
+  const res = (await s.evaluateIsolatedJs("({ isVisible: true })", {
+    frameUrlPattern: "hcaptcha.com",
+  })) as { result?: { value?: string } };
+
+  const isolatedCalls = b.calls("Page.createIsolatedWorld");
+  assert.equal(isolatedCalls.length, 1, "Must not call createIsolatedWorld on the parent session");
+  assert.equal(isolatedCalls[0]!.sessionId, "S-HC");
+  assert.equal(isolatedCalls[0]!.params.frameId, "F-HC");
+  assert.deepEqual(JSON.parse(res.result!.value!), {
+    sessionUsed: "S-HC",
+    isVisible: true,
+  });
+  assertStealth(b);
+});
