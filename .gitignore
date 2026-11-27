@@ -55,16 +55,17 @@ vendor/multizen-private/
 CLAUDE.md
 
 # Internal strategy / planning docs — never committed
-docs/
+docs/*
+!docs/i18n/
 notes/
 specs/
 INTERNAL_*.md
 
 # Markdown is internal working material — the only doc we ship is README.md
-# (at any depth). Everything else (CONTRIBUTING, ROADMAP, specs, notes…) stays
-# local and out of git.
+# (at any depth) plus localized READMEs under docs/i18n/.
 *.md
 !README.md
+!docs/i18n/README.*.md
 
 # What a GPU driver logs to a browser's working directory
 NVIDIA Corporation/

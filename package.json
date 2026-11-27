@@ -2,11 +2,11 @@
   "name": "multizen",
   "version": "0.12.0",
   "private": true,
-  "description": "AI-native browser for agents and operators — desktop app + MCP server with anti-detect Chromium",
-  "homepage": "https://getmultizen.com",
+  "description": "MultiZen Extended — dual-engine anti-detect browser platform (CloakBrowser + Camoufox), desktop app, headless server, MCP tools, and hexagonal CAPTCHA solver ports",
+  "homepage": "https://github.com/kiserufetch/multizen-browser-extended#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/multizenteam/multizen-browser.git"
+    "url": "https://github.com/kiserufetch/multizen-browser-extended.git"
   },
   "license": "MIT",
   "workspaces": [
