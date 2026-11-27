@@ -181,8 +181,13 @@ export interface BrowserDriver {
   /**
    * Evaluate JS in an isolated world (invisible to main-world page scripts).
    * On Chromium this uses Page.createIsolatedWorld; on Camoufox evaluateJs is already isolated.
+   * When `opts.frameUrlPattern` is provided, evaluates inside the matching child iframe's isolated world.
    */
-  evaluateIsolatedJs?(profileId: ProfileId, expression: string): Promise<unknown>;
+  evaluateIsolatedJs?(
+    profileId: ProfileId,
+    expression: string,
+    opts?: { frameUrlPattern?: string },
+  ): Promise<unknown>;
   getCookies(profileId: ProfileId, urls?: string[], sessionId?: string): Promise<unknown>;
   setCookies(profileId: ProfileId, cookies: unknown[], sessionId?: string): Promise<unknown>;
   listTabs(profileId: ProfileId, sessionId?: string): Promise<unknown>;

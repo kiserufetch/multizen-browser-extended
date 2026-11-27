@@ -1440,8 +1440,64 @@ export class FirefoxBrowserDriver extends EventEmitter implements BrowserDriver 
   }
 
   /** On Camoufox, Playwright's page.evaluate already executes in an isolated world. */
-  async evaluateIsolatedJs(profileId: ProfileId, expression: string): Promise<unknown> {
-    return this.evaluateJs(profileId, expression);
+  async evaluateIsolatedJs(
+    profileId: ProfileId,
+    expression: string,
+    opts?: { frameUrlPattern?: string },
+  ): Promise<unknown> {
+    if (!opts?.frameUrlPattern) {
+      return this.evaluateJs(profileId, expression);
+    }
+    const r = this.require(profileId);
+    const { page, pageId } = await this.foregroundTab(r);
+    const pattern = opts.frameUrlPattern.toLowerCase();
+    return this.pageOp(r, pageId, async () => {
+      const candidates: Array<{
+        frame: ReturnType<Page["frames"]>[number];
+        bounds: { x: number; y: number; width: number; height: number };
+      }> = [];
+      for (const frame of page.frames()) {
+        if (frame === page.mainFrame()) continue;
+        if (!frame.url().toLowerCase().includes(pattern)) continue;
+        try {
+          const el = await frame.frameElement();
+          const box = await el.boundingBox();
+          if (box && box.width > 0 && box.height > 0) {
+            candidates.push({
+              frame,
+              bounds: {
+                x: Math.round(box.x),
+                y: Math.round(box.y),
+                width: Math.round(box.width),
+                height: Math.round(box.height),
+              },
+            });
+          }
+        } catch {
+          // ignore detached frame
+        }
+      }
+      candidates.sort((a, b) => b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height);
+      for (const { frame, bounds } of candidates) {
+        try {
+          const wrapped = `(() => { const __mzFrameBounds = ${JSON.stringify(bounds)}; const __mzFrameUrl = ${JSON.stringify(frame.url())}; return (${expression}); })()`;
+          const value = await frame.evaluate(wrapped);
+          if (typeof value === "string" && value !== "null") {
+            try {
+              const parsed = JSON.parse(value) as { isVisible?: boolean } | null;
+              if (parsed && parsed.isVisible) return { result: { value } };
+            } catch {
+              return { result: { value } };
+            }
+          } else if (value && typeof value === "object") {
+            if ((value as { isVisible?: boolean }).isVisible !== false) return { result: { value } };
+          }
+        } catch {
+          // try next matching frame
+        }
+      }
+      return { result: { value: null } };
+    });
   }
 
   async getCookies(profileId: ProfileId, urls?: string[]): Promise<unknown> {

@@ -7,6 +7,12 @@ import type {
   SolverPagePort,
   SolverTask,
 } from "@multizen/types";
+import {
+  runHCaptchaInteractive,
+  type InteractiveCanvasInput,
+  type InteractiveGridInput,
+  type InteractiveVisionClassifier,
+} from "./HCaptchaInteractiveRunner.js";
 
 export type CloudSolverProviderKind = "capsolver" | "2captcha" | "rucaptcha";
 
@@ -19,6 +25,7 @@ export interface CloudSolverProviderOptions {
   apiBaseUrl?: string;
   pollIntervalMs?: number;
   fetchImpl?: typeof fetch;
+  interactiveDelayScale?: number;
 }
 
 interface CloudSolverApiResponse {
@@ -35,6 +42,10 @@ interface CloudSolverApiResponse {
     pass_token?: string;
     userAgent?: string;
     cookie?: string;
+    click?: number[] | string;
+    coordinates?: Array<{ x: number; y: number }>;
+    objects?: Array<boolean | number>;
+    box?: [number, number] | { x: number; y: number };
     [key: string]: unknown;
   };
 }
@@ -307,7 +318,12 @@ function sleepWithSignal(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-class CloudRestSolverAdapter implements CaptchaSolverPort {
+function hasOpenInteractiveChallengeFrame(challenge: ChallengeDescriptor): boolean {
+  const b = challenge.frame?.bounds;
+  return Boolean(b && b.width >= 200 && b.height >= 200);
+}
+
+class CloudRestSolverAdapter implements CaptchaSolverPort, InteractiveVisionClassifier {
   readonly id: CloudSolverProviderKind;
   readonly name: string;
   readonly capabilities: CaptchaSolverPort["capabilities"] = {
@@ -320,13 +336,14 @@ class CloudRestSolverAdapter implements CaptchaSolverPort {
       "arkose",
       "datadome",
     ],
-    modes: ["token"],
+    modes: ["token", "interactive"],
   };
 
   private readonly apiKey: string;
   private readonly apiBaseUrl: string;
   private readonly pollIntervalMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly interactiveDelayScale: number;
   private readonly buildTask: (
     challenge: ChallengeDescriptor,
     network: SolverNetworkContext,
@@ -349,14 +366,143 @@ class CloudRestSolverAdapter implements CaptchaSolverPort {
     this.name = meta.name;
     this.apiKey = opts.apiKey.trim();
     this.apiBaseUrl = (opts.apiBaseUrl ?? meta.defaultBaseUrl).replace(/\/+$/, "");
-    this.pollIntervalMs = Math.max(250, opts.pollIntervalMs ?? meta.defaultPollMs);
+    this.pollIntervalMs = Math.max(10, opts.pollIntervalMs ?? meta.defaultPollMs);
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.interactiveDelayScale = opts.interactiveDelayScale ?? 1;
     this.buildTask = meta.buildTask;
   }
 
   canSolve(challenge: ChallengeDescriptor, network: SolverNetworkContext): boolean {
     if (!this.apiKey) return false;
+    if (challenge.kind === "hcaptcha" && hasOpenInteractiveChallengeFrame(challenge)) {
+      return true;
+    }
     return this.buildTask(challenge, network) !== null;
+  }
+
+  async solveGrid(input: InteractiveGridInput, signal: AbortSignal): Promise<number[]> {
+    if (this.id === "capsolver") {
+      const queries =
+        input.tileImagesBase64 && input.tileImagesBase64.length > 0
+          ? input.tileImagesBase64
+          : [input.imageBase64];
+      const { solution } = await this.executeRawTaskWithId(
+        {
+          type: "HCaptchaClassification",
+          queries,
+          question: input.promptText,
+        },
+        signal,
+        60_000,
+      );
+      const objects = solution.objects;
+      if (Array.isArray(objects)) {
+        const indices: number[] = [];
+        for (let i = 0; i < objects.length; i++) {
+          const val = objects[i];
+          if (val === true) indices.push(i + 1);
+          else if (typeof val === "number" && Number.isInteger(val) && val >= 1) indices.push(val);
+        }
+        return indices;
+      }
+      return [];
+    }
+
+    const { solution } = await this.executeRawTaskWithId(
+      {
+        type: "GridTask",
+        body: input.imageBase64,
+        comment: input.promptText,
+        rows: input.rows,
+        columns: input.columns,
+      },
+      signal,
+      60_000,
+    );
+    const click = solution.click;
+    if (Array.isArray(click)) {
+      return click
+        .map((n) => Number(n))
+        .filter((n) => Number.isInteger(n) && n >= 1);
+    }
+    if (typeof click === "string") {
+      return click
+        .replace(/^click:/i, "")
+        .split(/[\/,;\s]+/)
+        .map((s) => Number(s))
+        .filter((n) => Number.isInteger(n) && n >= 1);
+    }
+    return [];
+  }
+
+  async solveCoordinates(
+    input: InteractiveCanvasInput,
+    signal: AbortSignal,
+  ): Promise<Array<{ x: number; y: number }>> {
+    if (this.id === "capsolver") {
+      const { solution } = await this.executeRawTaskWithId(
+        {
+          type: "HCaptchaClassification",
+          queries: [input.imageBase64],
+          question: input.promptText,
+        },
+        signal,
+        60_000,
+      );
+      if (Array.isArray(solution.box) && solution.box.length >= 2) {
+        return [{ x: Number(solution.box[0]), y: Number(solution.box[1]) }];
+      }
+      if (
+        solution.box &&
+        typeof solution.box === "object" &&
+        "x" in solution.box &&
+        "y" in solution.box
+      ) {
+        return [{ x: Number(solution.box.x), y: Number(solution.box.y) }];
+      }
+      if (Array.isArray(solution.coordinates)) {
+        return solution.coordinates
+          .map((pt) => ({ x: Number(pt.x), y: Number(pt.y) }))
+          .filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+      }
+      return [];
+    }
+
+    const { solution } = await this.executeRawTaskWithId(
+      {
+        type: "CoordinatesTask",
+        body: input.imageBase64,
+        comment: input.promptText,
+      },
+      signal,
+      60_000,
+    );
+    if (Array.isArray(solution.coordinates)) {
+      return solution.coordinates
+        .map((pt) => ({ x: Number(pt.x), y: Number(pt.y) }))
+        .filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+    }
+    return [];
+  }
+
+  async solveInteractive(
+    _taskInfo: SolverTask,
+    page: SolverPagePort,
+    signal: AbortSignal,
+  ): Promise<SolverOutcome> {
+    if (!this.apiKey) {
+      return {
+        status: "failed",
+        reason: `${this.name} API key is not configured`,
+        retryable: false,
+      };
+    }
+    return runHCaptchaInteractive({
+      page,
+      classifier: this,
+      signal,
+      delayScale: this.interactiveDelayScale,
+    });
   }
 
   async solve(
@@ -372,119 +518,53 @@ class CloudRestSolverAdapter implements CaptchaSolverPort {
       };
     }
 
+    const strategy = taskInfo.strategy ?? "auto";
+    const openInteractiveModal = hasOpenInteractiveChallengeFrame(taskInfo.challenge);
+    if (
+      strategy === "interactive-only" ||
+      (strategy === "auto" &&
+        taskInfo.challenge.kind === "hcaptcha" &&
+        (openInteractiveModal || !taskInfo.challenge.sitekey))
+    ) {
+      return this.solveInteractive(taskInfo, page, signal);
+    }
+
     const task = this.buildTask(taskInfo.challenge, taskInfo.network);
     if (!task) {
+      if (
+        strategy !== "token-only" &&
+        taskInfo.challenge.kind === "hcaptcha" &&
+        page.inspectChallengeFrame
+      ) {
+        return this.solveInteractive(taskInfo, page, signal);
+      }
       return {
         status: "unsupported",
         reason: `${this.name} does not support ${taskInfo.challenge.kind} with the detected parameters`,
       };
     }
 
-    let createData: CloudSolverApiResponse;
     try {
-      createData = await this.postJson(
-        "/createTask",
-        {
-          clientKey: this.apiKey,
-          task,
-        },
+      const expiresMs = Date.parse(taskInfo.expiresAt);
+      const timeoutMs = Number.isFinite(expiresMs)
+        ? Math.max(1_000, expiresMs - Date.now())
+        : 120_000;
+      const { providerTaskId, solution } = await this.executeRawTaskWithId(
+        task,
         signal,
+        timeoutMs,
       );
+      return await this.finalizeSolution(page, providerTaskId, solution);
     } catch (e) {
       if (signal.aborted) {
         return { status: "failed", reason: `${this.name} request aborted`, retryable: false };
       }
       return {
         status: "failed",
-        reason: `${this.name} createTask error: ${(e as Error).message}`,
+        reason: (e as Error).message,
         retryable: true,
       };
     }
-
-    if (createData.errorId !== 0) {
-      return {
-        status: "failed",
-        reason:
-          createData.errorDescription ??
-          createData.errorCode ??
-          `${this.name} errorId ${createData.errorId}`,
-        retryable: false,
-      };
-    }
-
-    if (createData.status === "ready" && createData.solution) {
-      return this.finalizeSolution(page, String(createData.taskId ?? "sync"), createData.solution);
-    }
-
-    const providerTaskId = createData.taskId;
-    if (providerTaskId === undefined || providerTaskId === null || providerTaskId === "") {
-      return {
-        status: "failed",
-        reason: `${this.name} createTask returned no taskId`,
-        retryable: false,
-      };
-    }
-
-    const expiresMs = Date.parse(taskInfo.expiresAt);
-    const deadline = Number.isFinite(expiresMs) ? expiresMs : Date.now() + 120_000;
-    while (Date.now() < deadline) {
-      if (signal.aborted) {
-        return { status: "failed", reason: `${this.name} polling aborted`, retryable: false };
-      }
-      await sleepWithSignal(this.pollIntervalMs, signal);
-      if (signal.aborted) {
-        return { status: "failed", reason: `${this.name} polling aborted`, retryable: false };
-      }
-
-      let pollData: CloudSolverApiResponse;
-      try {
-        pollData = await this.postJson(
-          "/getTaskResult",
-          {
-            clientKey: this.apiKey,
-            taskId: providerTaskId,
-          },
-          signal,
-        );
-      } catch (e) {
-        if (signal.aborted) {
-          return { status: "failed", reason: `${this.name} polling aborted`, retryable: false };
-        }
-        return {
-          status: "failed",
-          reason: `${this.name} getTaskResult error: ${(e as Error).message}`,
-          retryable: true,
-        };
-      }
-
-      if (pollData.errorId !== 0) {
-        return {
-          status: "failed",
-          reason:
-            pollData.errorDescription ??
-            pollData.errorCode ??
-            `${this.name} errorId ${pollData.errorId}`,
-          retryable: false,
-        };
-      }
-
-      if (pollData.status === "ready" && pollData.solution) {
-        return this.finalizeSolution(page, String(providerTaskId), pollData.solution);
-      }
-      if (pollData.status === "failed") {
-        return {
-          status: "failed",
-          reason: pollData.errorDescription ?? `${this.name} task failed`,
-          retryable: true,
-        };
-      }
-    }
-
-    return {
-      status: "failed",
-      reason: `${this.name} timed out waiting for getTaskResult`,
-      retryable: true,
-    };
   }
 
   async healthcheck(): Promise<{
@@ -521,6 +601,84 @@ class CloudRestSolverAdapter implements CaptchaSolverPort {
         details: { error: (e as Error).message },
       };
     }
+  }
+
+  private async executeRawTaskWithId(
+    task: Record<string, unknown>,
+    signal: AbortSignal,
+    timeoutMs = 120_000,
+  ): Promise<{
+    providerTaskId: string;
+    solution: NonNullable<CloudSolverApiResponse["solution"]>;
+  }> {
+    const createData = await this.postJson(
+      "/createTask",
+      {
+        clientKey: this.apiKey,
+        task,
+      },
+      signal,
+    );
+
+    if (createData.errorId !== 0) {
+      throw new Error(
+        createData.errorDescription ??
+          createData.errorCode ??
+          `${this.name} errorId ${createData.errorId}`,
+      );
+    }
+
+    if (createData.status === "ready" && createData.solution) {
+      return {
+        providerTaskId: String(createData.taskId ?? "sync"),
+        solution: createData.solution,
+      };
+    }
+
+    const providerTaskId = createData.taskId;
+    if (providerTaskId === undefined || providerTaskId === null || providerTaskId === "") {
+      throw new Error(`${this.name} createTask returned no taskId`);
+    }
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (signal.aborted) {
+        throw new Error(`${this.name} polling aborted`);
+      }
+      await sleepWithSignal(this.pollIntervalMs, signal);
+      if (signal.aborted) {
+        throw new Error(`${this.name} polling aborted`);
+      }
+
+      const pollData = await this.postJson(
+        "/getTaskResult",
+        {
+          clientKey: this.apiKey,
+          taskId: providerTaskId,
+        },
+        signal,
+      );
+
+      if (pollData.errorId !== 0) {
+        throw new Error(
+          pollData.errorDescription ??
+            pollData.errorCode ??
+            `${this.name} errorId ${pollData.errorId}`,
+        );
+      }
+
+      if (pollData.status === "ready" && pollData.solution) {
+        return {
+          providerTaskId: String(providerTaskId),
+          solution: pollData.solution,
+        };
+      }
+      if (pollData.status === "failed") {
+        throw new Error(pollData.errorDescription ?? `${this.name} task failed`);
+      }
+    }
+
+    throw new Error(`${this.name} timed out waiting for getTaskResult`);
   }
 
   private async finalizeSolution(

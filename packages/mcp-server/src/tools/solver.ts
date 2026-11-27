@@ -6,6 +6,7 @@ import {
   PROXY_EXPOSURE_MODES,
   SOLVER_ADAPTER_KINDS,
   SOLVER_FALLBACK_POLICIES,
+  SOLVER_STRATEGIES,
   type CaptchaSolverPort,
   type ChallengeDescriptor,
   type ProfileSolverConfig,
@@ -47,6 +48,7 @@ const ConfigureSolverSchema = z.object({
   webhook_url: z.string().url().optional(),
   webhook_secret: z.string().optional(),
   fallback_policy: z.enum(SOLVER_FALLBACK_POLICIES).optional(),
+  strategy: z.enum(SOLVER_STRATEGIES).optional(),
   proxy_exposure: z.enum(PROXY_EXPOSURE_MODES).optional(),
   allow_main_world_js: z.boolean().optional(),
   timeout_ms: z.number().int().positive().optional(),
@@ -79,6 +81,7 @@ const SolveCaptchaSchema = ProfileIdSchema.extend({
   api_base_url: z.string().url().optional(),
   webhook_url: z.string().url().optional(),
   webhook_secret: z.string().optional(),
+  strategy: z.enum(SOLVER_STRATEGIES).optional(),
   proxy_exposure: z.enum(PROXY_EXPOSURE_MODES).optional(),
   allow_main_world_js: z.boolean().optional(),
   fallback_to_human: z.boolean().optional(),
@@ -205,6 +208,12 @@ export const SOLVER_TOOLS: ExtensionTool[] = [
             description:
               "'solver-then-human' (default: try solver, fall back to human handoff), 'solver-only', or 'human-only'.",
           },
+          strategy: {
+            type: "string",
+            enum: [...SOLVER_STRATEGIES],
+            description:
+              "'auto' (default: interactive clicker when an interactive hCaptcha modal is open, otherwise token with interactive fallback), 'token-only', 'interactive-only', or 'token-then-interactive'.",
+          },
           proxy_exposure: {
             type: "string",
             enum: [...PROXY_EXPOSURE_MODES],
@@ -265,6 +274,7 @@ export const SOLVER_TOOLS: ExtensionTool[] = [
           ...(input.fallback_policy !== undefined
             ? { fallbackPolicy: input.fallback_policy }
             : {}),
+          ...(input.strategy !== undefined ? { strategy: input.strategy } : {}),
           ...(input.proxy_exposure !== undefined ? { proxyExposure: input.proxy_exposure } : {}),
           ...(input.allow_main_world_js !== undefined
             ? { allowMainWorldJs: input.allow_main_world_js }
@@ -289,6 +299,7 @@ export const SOLVER_TOOLS: ExtensionTool[] = [
           has_webhook_secret: policy.hasWebhookSecret,
           capabilities: policy.port?.capabilities ?? null,
           fallback_policy: policy.fallbackPolicy,
+          strategy: policy.strategy,
           proxy_exposure: policy.proxyExposure,
           allow_main_world_js: policy.allowMainWorldJs,
           timeout_ms: policy.timeoutMs,
@@ -313,6 +324,7 @@ export const SOLVER_TOOLS: ExtensionTool[] = [
         ...(input.fallback_policy !== undefined
           ? { fallbackPolicy: input.fallback_policy }
           : {}),
+        ...(input.strategy !== undefined ? { strategy: input.strategy } : {}),
         ...(input.proxy_exposure !== undefined ? { proxyExposure: input.proxy_exposure } : {}),
         ...(input.allow_main_world_js !== undefined
           ? { allowMainWorldJs: input.allow_main_world_js }
@@ -337,6 +349,7 @@ export const SOLVER_TOOLS: ExtensionTool[] = [
         has_webhook_secret: Boolean(settings.webhookSecret),
         capabilities: port?.capabilities ?? null,
         fallback_policy: settings.fallbackPolicy,
+        strategy: settings.strategy ?? "auto",
         proxy_exposure: settings.proxyExposure,
         allow_main_world_js: settings.allowMainWorldJs,
         timeout_ms: settings.timeoutMs,
@@ -501,6 +514,12 @@ export const SOLVER_TOOLS: ExtensionTool[] = [
             type: "string",
             description: "Optional one-shot webhook HMAC secret.",
           },
+          strategy: {
+            type: "string",
+            enum: [...SOLVER_STRATEGIES],
+            description:
+              "Optional one-shot solver strategy override ('auto', 'token-only', 'interactive-only', 'token-then-interactive').",
+          },
           proxy_exposure: {
             type: "string",
             enum: [...PROXY_EXPOSURE_MODES],
@@ -613,6 +632,7 @@ export const SOLVER_TOOLS: ExtensionTool[] = [
           ? { fallbackToHumanOverride: input.fallback_to_human }
           : {}),
         ...(inlinePort ? { portOverride: inlinePort } : {}),
+        ...(input.strategy ? { strategyOverride: input.strategy } : {}),
         ...(input.proxy_exposure ? { proxyExposureOverride: input.proxy_exposure } : {}),
         ...(input.allow_main_world_js !== undefined
           ? { allowMainWorldJsOverride: input.allow_main_world_js }
@@ -704,6 +724,7 @@ export const SOLVER_TOOLS: ExtensionTool[] = [
           has_webhook_secret: policy.hasWebhookSecret,
           capabilities: policy.port?.capabilities ?? null,
           fallback_policy: policy.fallbackPolicy,
+          strategy: policy.strategy,
           proxy_exposure: policy.proxyExposure,
           allow_main_world_js: policy.allowMainWorldJs,
           timeout_ms: policy.timeoutMs,
@@ -737,6 +758,7 @@ export const SOLVER_TOOLS: ExtensionTool[] = [
         has_webhook_secret: Boolean(settings.webhookSecret),
         capabilities: port?.capabilities ?? null,
         fallback_policy: settings.fallbackPolicy,
+        strategy: settings.strategy ?? "auto",
         proxy_exposure: settings.proxyExposure,
         allow_main_world_js: settings.allowMainWorldJs,
         timeout_ms: settings.timeoutMs,

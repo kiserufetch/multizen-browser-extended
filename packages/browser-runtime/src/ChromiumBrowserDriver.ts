@@ -1174,8 +1174,12 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return this.requireSession(profileId).evaluateJs(expression, sessionId);
   }
 
-  async evaluateIsolatedJs(profileId: ProfileId, expression: string): Promise<unknown> {
-    return this.requireSession(profileId).evaluateIsolatedJs(expression);
+  async evaluateIsolatedJs(
+    profileId: ProfileId,
+    expression: string,
+    opts?: { frameUrlPattern?: string },
+  ): Promise<unknown> {
+    return this.requireSession(profileId).evaluateIsolatedJs(expression, opts);
   }
 
   async getCookies(profileId: ProfileId, urls?: string[], sessionId?: string): Promise<unknown> {

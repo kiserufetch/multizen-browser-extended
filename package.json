@@ -1,6 +1,6 @@
 {
   "name": "multizen",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "description": "MultiZen Extended — dual-engine anti-detect browser platform (CloakBrowser + Camoufox), desktop app, headless server, MCP tools, and hexagonal CAPTCHA solver ports",
   "homepage": "https://github.com/kiserufetch/multizen-browser-extended#readme",

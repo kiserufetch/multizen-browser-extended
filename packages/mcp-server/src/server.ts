@@ -35,6 +35,7 @@ import {
   PROXY_EXPOSURE_MODES,
   resolveEngine,
   SOLVER_FALLBACK_POLICIES,
+  SOLVER_STRATEGIES,
 } from "@multizen/types";
 import { ActivityLog } from "./ActivityLog.js";
 import { callSignal, principalFrom, type Principal } from "./auth/principal.js";
@@ -260,6 +261,7 @@ const ProfileSolverConfigSchema = z
     webhookUrl: z.string().url().optional(),
     webhookSecret: z.string().optional(),
     fallbackPolicy: z.enum(SOLVER_FALLBACK_POLICIES).optional(),
+    strategy: z.enum(SOLVER_STRATEGIES).optional(),
     proxyExposure: z.enum(PROXY_EXPOSURE_MODES).optional(),
     allowMainWorldJs: z.boolean().optional(),
     timeoutMs: z.number().int().positive().optional(),

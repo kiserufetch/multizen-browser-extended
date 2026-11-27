@@ -8,6 +8,7 @@ import {
   isProxyExposureMode,
   isSolverAdapterKind,
   isSolverFallbackPolicy,
+  isSolverStrategy,
 } from "@multizen/types";
 import type {
   Profile,
@@ -632,6 +633,7 @@ export function sanitizeProfileSolverConfig(raw: unknown): ProfileSolverConfig |
   if (!isProfileSolverMode(c.mode)) return undefined;
   const out: ProfileSolverConfig = { mode: c.mode };
   if (isSolverAdapterKind(c.adapter)) out.adapter = c.adapter;
+  if (isSolverStrategy(c.strategy)) out.strategy = c.strategy;
   if (typeof c.apiKey === "string" && c.apiKey.trim() !== "") out.apiKey = c.apiKey.trim();
   if (typeof c.apiBaseUrl === "string" && c.apiBaseUrl.trim() !== "") {
     out.apiBaseUrl = c.apiBaseUrl.trim();

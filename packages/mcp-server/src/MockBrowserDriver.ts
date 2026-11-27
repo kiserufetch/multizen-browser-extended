@@ -155,7 +155,11 @@ export class MockBrowserDriver implements BrowserDriver {
     );
   }
 
-  async evaluateIsolatedJs(profileId: ProfileId, expression: string): Promise<unknown> {
+  async evaluateIsolatedJs(
+    profileId: ProfileId,
+    expression: string,
+    _opts?: { frameUrlPattern?: string },
+  ): Promise<unknown> {
     return this.evaluateJs(profileId, expression);
   }
 

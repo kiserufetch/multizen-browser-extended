@@ -73,10 +73,31 @@ export const ISOLATED_CHALLENGE_DETECT_SCRIPT = `(() => {
     return out;
   };
 
+  const isElementVisible = (el) => {
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      if (typeof window.getComputedStyle === "function") {
+        const st = window.getComputedStyle(cur);
+        if (
+          st.display === "none" ||
+          st.visibility === "hidden" ||
+          st.visibility === "collapse" ||
+          parseFloat(st.opacity) === 0
+        ) {
+          return false;
+        }
+      }
+      cur = cur.parentElement;
+    }
+    return true;
+  };
+
   const rectOf = (el) => {
     if (!el || typeof el.getBoundingClientRect !== "function") return undefined;
+    if (!isElementVisible(el)) return undefined;
     const r = el.getBoundingClientRect();
-    if (!r || (r.width === 0 && r.height === 0)) return undefined;
+    if (!r || r.width <= 0 || r.height <= 0) return undefined;
+    if (r.bottom <= 0 || r.right <= 0) return undefined;
     return {
       x: Math.round(r.x),
       y: Math.round(r.y),
@@ -111,9 +132,20 @@ export const ISOLATED_CHALLENGE_DETECT_SCRIPT = `(() => {
   let enterprise = undefined;
   let invisible = undefined;
   let frame = undefined;
+  let bestFrameArea = -1;
   let rawAttributes = {};
 
-  // 1. Inspect iframes for known challenge providers
+  const considerFrame = (candidateFrame) => {
+    const b = candidateFrame.bounds;
+    const area = b ? b.width * b.height : 0;
+    if (!frame || area > bestFrameArea) {
+      frame = candidateFrame;
+      bestFrameArea = area;
+    }
+  };
+
+  // 1. Inspect all iframes for known challenge providers (do not break on the first small anchor frame
+  // so that an open 400x600 interactive challenge modal frame wins for frame.bounds while still keeping sitekey).
   const iframes = Array.from(document.querySelectorAll("iframe"));
   for (const ifr of iframes) {
     const rawSrc = ifr.getAttribute("src") || "";
@@ -129,57 +161,73 @@ export const ISOLATED_CHALLENGE_DETECT_SCRIPT = `(() => {
     }
 
     if (srcLower.includes("challenges.cloudflare.com") || srcLower.includes("turnstile")) {
-      kind = "turnstile";
-      vendor = "cloudflare-turnstile";
-      const match = rawSrc.match(/(0x[0-9a-zA-Z_-]{10,})/);
-      if (match) sitekey = match[1];
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
-      rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      if (!kind || kind === "turnstile") {
+        kind = "turnstile";
+        vendor = "cloudflare-turnstile";
+        const match = rawSrc.match(/(0x[0-9a-zA-Z_-]{10,})/);
+        if (match && !sitekey) sitekey = match[1];
+        considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
+        rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
+      }
+      continue;
     }
     if (srcLower.includes("hcaptcha.com")) {
-      kind = "hcaptcha";
-      vendor = "hcaptcha";
-      sitekey = (parsed && (parsed.params.get("sitekey") || parsed.params.get("id"))) || undefined;
-      if (parsed && parsed.params.get("size") === "invisible") invisible = true;
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
-      rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      if (!kind || kind === "hcaptcha") {
+        kind = "hcaptcha";
+        vendor = "hcaptcha";
+        const sk = (parsed && (parsed.params.get("sitekey") || parsed.params.get("id"))) || undefined;
+        if (sk && !sitekey) sitekey = sk;
+        if (parsed && parsed.params.get("size") === "invisible") invisible = true;
+        considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
+        rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
+      }
+      continue;
     }
     if (srcLower.includes("google.com/recaptcha") || srcLower.includes("recaptcha.net/recaptcha")) {
       const isEnt = srcLower.includes("/enterprise");
       const sizeParam = parsed ? parsed.params.get("size") : null;
-      const isV3 = sizeParam === "invisible" && srcLower.includes("anchor");
-      kind = isV3 ? "recaptcha_v3" : "recaptcha_v2";
-      vendor = isEnt ? "google-recaptcha-enterprise" : "google-recaptcha";
-      enterprise = isEnt;
-      if (sizeParam === "invisible") invisible = true;
-      sitekey = (parsed && parsed.params.get("k")) || undefined;
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
-      rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      const isV3 = sizeParam === "invisible" && srcLower.includes("anchor") && !srcLower.includes("bframe");
+      const detectedKind = isV3 ? "recaptcha_v3" : "recaptcha_v2";
+      if (!kind || kind === "recaptcha_v2" || kind === "recaptcha_v3") {
+        if (kind !== "recaptcha_v2") kind = detectedKind;
+        vendor = isEnt ? "google-recaptcha-enterprise" : "google-recaptcha";
+        if (isEnt) enterprise = true;
+        if (sizeParam === "invisible") invisible = true;
+        const sk = (parsed && parsed.params.get("k")) || undefined;
+        if (sk && !sitekey) sitekey = sk;
+        considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
+        rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
+      }
+      continue;
     }
     if (srcLower.includes("arkoselabs.com") || srcLower.includes("funcaptcha.com")) {
-      kind = "arkose";
-      vendor = "arkose-funcaptcha";
-      sitekey = (parsed && (parsed.params.get("pk") || parsed.params.get("pkey"))) || undefined;
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
-      rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      if (!kind || kind === "arkose") {
+        kind = "arkose";
+        vendor = "arkose-funcaptcha";
+        const sk = (parsed && (parsed.params.get("pk") || parsed.params.get("pkey"))) || undefined;
+        if (sk && !sitekey) sitekey = sk;
+        considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
+        rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
+      }
+      continue;
     }
     if (srcLower.includes("captcha-delivery.com") || srcLower.includes("datadome")) {
-      kind = "datadome";
-      vendor = "datadome";
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
-      rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      if (!kind || kind === "datadome") {
+        kind = "datadome";
+        vendor = "datadome";
+        considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
+        rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
+      }
+      continue;
     }
     if (srcLower.includes("geetest.com")) {
-      kind = "geetest";
-      vendor = "geetest";
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
-      rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      if (!kind || kind === "geetest") {
+        kind = "geetest";
+        vendor = "geetest";
+        considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
+        rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
+      }
+      continue;
     }
   }
 

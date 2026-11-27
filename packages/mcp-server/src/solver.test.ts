@@ -502,3 +502,178 @@ test("Zero-preconfig MCP self-service: configure_solver, get_solver_balance, get
     await client.close();
   });
 });
+
+test("Post-solve verification: prevents false 'solved' when interactive hCaptcha modal stays open after token injection, and supports interactive visual solving fallback", async () => {
+  await withTempProfiles(async (pm) => {
+    const profile = pm.create({ name: "spa-hcaptcha-profile" });
+    const driver = new MockBrowserDriver();
+    await driver.launch(profile.id);
+
+    // Simulate an active 400x600 interactive hCaptcha modal on Discord registration
+    let modalOpen = true;
+    let frameInspectCalls = 0;
+
+    driver.evaluateIsolatedJs = async (_id, expr, opts) => {
+      if (opts?.frameUrlPattern) {
+        frameInspectCalls++;
+        if (!modalOpen) return { result: { value: "null" } };
+        const tileBounds = Array.from({ length: 9 }, (_, i) => ({
+          index: i,
+          x: 460 + (i % 3) * 120,
+          y: 200 + Math.floor(i / 3) * 120,
+          width: 110,
+          height: 110,
+        }));
+        return {
+          result: {
+            value: JSON.stringify({
+              frameBounds: { x: 440, y: 80, width: 400, height: 600 },
+              challengeType: "grid",
+              promptText: "Please click each image containing a train",
+              tileBounds,
+              submitButtonBounds: { x: 720, y: 610, width: 90, height: 36 },
+              submitButtonText: "Verify",
+              roundSignature: "round-train-1",
+              isVisible: true,
+            }),
+          },
+        };
+      }
+      if (expr.includes("matchedSelectors")) {
+        return {
+          result: {
+            value: JSON.stringify({
+              applied: true,
+              matchedSelectors: ['textarea[name="h-captcha-response"]'],
+              callbackName: null,
+            }),
+          },
+        };
+      }
+      if (!modalOpen) {
+        return { result: { value: "null" } };
+      }
+      return {
+        result: {
+          value: JSON.stringify({
+            kind: "hcaptcha",
+            vendor: "hcaptcha",
+            pageUrl: "https://discord.com/register",
+            sitekey: "a9b5fb07-92ff-493f-86fe-352a2803b3df",
+            frame: {
+              url: "https://newassets.hcaptcha.com/captcha/v1/abc/static/hcaptcha.html#frame=challenge",
+              isCrossOrigin: true,
+              bounds: { x: 440, y: 80, width: 400, height: 600 },
+            },
+          }),
+        },
+      };
+    };
+
+    const origDispatchInput = driver.dispatchInput.bind(driver);
+    driver.dispatchInput = async (id, event) => {
+      await origDispatchInput(id, event);
+      // When the interactive runner clicks the submit button at ~(765/1280, 628/720), close the modal!
+      if (event.kind === "mouse" && event.action === "up" && event.y > 0.8) {
+        modalOpen = false;
+      }
+    };
+
+    const shared = createSharedMcpState({
+      solverOptions: {
+        postSolveVerifyTimeoutMs: 120,
+        postSolveVerifyIntervalMs: 30,
+        interactiveDelayScale: 0,
+        fetchImpl: async (url, init) => {
+          const body = JSON.parse(String(init?.body)) as { task?: { type?: string } };
+          if (String(url).endsWith("/createTask")) {
+            if (body.task?.type === "GridTask") {
+              return new Response(
+                JSON.stringify({
+                  errorId: 0,
+                  taskId: "grid-task-1",
+                  status: "ready",
+                  solution: { click: [1, 4, 7] },
+                }),
+                { status: 200 },
+              );
+            }
+            return new Response(
+              JSON.stringify({
+                errorId: 0,
+                taskId: "token-task-1",
+                status: "ready",
+                solution: { gRecaptchaResponse: "P1_token_ignored_by_react_spa" },
+              }),
+              { status: 200 },
+            );
+          }
+          throw new Error(`Unexpected URL ${String(url)}`);
+        },
+      },
+    });
+
+    const { server } = createMultizenMcpServer({
+      profileManager: pm,
+      browserDriver: driver,
+      shared,
+      handoffGate: true,
+    });
+    const [cTrans, sTrans] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "t", version: "1.0.0" });
+    await server.connect(sTrans);
+    await client.connect(cTrans);
+
+    // 1. Configure 2captcha with strategy: "token-only" -> token is injected into textarea,
+    //    but the 400x600 interactive modal stays open. Must NOT report falsely solved;
+    //    must hand off to human with descriptive solver_fallback_reason!
+    await callToolJson(client, "configure_solver", {
+      adapter: "2captcha",
+      api_key: "2c-key",
+      strategy: "token-only",
+      fallback_policy: "solver-then-human",
+    });
+
+    const tokenOnlySolve = await callToolJson(client, "solve_captcha", {
+      profile_id: profile.id,
+      kind: "hcaptcha",
+    });
+    assert.equal(tokenOnlySolve.isError, false);
+    assert.equal(tokenOnlySolve.data.status, "handed_off");
+    assert.match(String(tokenOnlySolve.data.error ?? ""), /interactive hcaptcha modal remained open/);
+
+    const humanStatus = await callToolJson(client, "get_human_status", {
+      profile_id: profile.id,
+      handoff_id: String(tokenOnlySolve.data.handoff_id),
+    });
+    assert.equal(humanStatus.data.status, "pending");
+    assert.equal(humanStatus.data.solver_active, false);
+    assert.match(
+      String(humanStatus.data.solver_fallback_reason ?? ""),
+      /interactive hcaptcha modal remained open/,
+    );
+
+    // Resume the pending handoff so we can test strategy: "auto" (interactive visual solving)
+    await callToolJson(client, "resume_human", { profile_id: profile.id });
+
+    // 2. Now solve with strategy: "auto" -> detects the 400x600 interactive hCaptcha modal,
+    //    runs HCaptchaInteractiveRunner with GridTask, clicks tiles [1, 4, 7] + Verify,
+    //    closes the modal, and settles as "solved"!
+    const autoSolve = await callToolJson(client, "solve_captcha", {
+      profile_id: profile.id,
+      kind: "hcaptcha",
+      strategy: "auto",
+    });
+    assert.equal(autoSolve.isError, false);
+    assert.equal(autoSolve.data.status, "solved");
+    assert.ok(frameInspectCalls >= 1);
+    assert.equal(modalOpen, false);
+    // 3 tiles + 1 submit click = 4 clicks (12 mouse events: move/down/up each)
+    const mouseDowns = driver.humanInput.filter(
+      (e) => e.event.kind === "mouse" && e.event.action === "down",
+    );
+    assert.equal(mouseDowns.length, 4);
+
+    await client.close();
+  });
+});

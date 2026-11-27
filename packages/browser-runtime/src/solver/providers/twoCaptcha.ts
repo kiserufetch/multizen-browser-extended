@@ -7,6 +7,12 @@ import type {
   SolverPagePort,
   SolverTask,
 } from "@multizen/types";
+import {
+  runHCaptchaInteractive,
+  type InteractiveCanvasInput,
+  type InteractiveGridInput,
+  type InteractiveVisionClassifier,
+} from "../HCaptchaInteractiveRunner.js";
 import type { SolverModuleContext } from "../moduleLoader.js";
 
 export interface TwoCaptchaAdapterOptions {
@@ -19,6 +25,8 @@ export interface TwoCaptchaAdapterOptions {
   softId?: number;
   /** Custom fetch implementation for testing. */
   fetchImpl?: typeof fetch;
+  /** Timing multiplier for interactive clicks (default 1; set 0 in unit tests). */
+  interactiveDelayScale?: number;
 }
 
 interface TwoCaptchaApiResponse {
@@ -34,6 +42,8 @@ interface TwoCaptchaApiResponse {
     pass_token?: string;
     captcha_output?: string;
     userAgent?: string;
+    click?: number[] | string;
+    coordinates?: Array<{ x: number; y: number }>;
     [key: string]: unknown;
   };
 }
@@ -183,7 +193,14 @@ export function buildTwoCaptchaTask(
   }
 }
 
-export class TwoCaptchaCompatibleAdapter implements CaptchaSolverPort {
+function hasOpenInteractiveChallengeFrame(challenge: ChallengeDescriptor): boolean {
+  const b = challenge.frame?.bounds;
+  return Boolean(b && b.width >= 200 && b.height >= 200);
+}
+
+export class TwoCaptchaCompatibleAdapter
+  implements CaptchaSolverPort, InteractiveVisionClassifier
+{
   readonly id: string;
   readonly name: string;
   readonly capabilities: CaptchaSolverPort["capabilities"] = {
@@ -196,7 +213,7 @@ export class TwoCaptchaCompatibleAdapter implements CaptchaSolverPort {
       "arkose",
       "datadome",
     ],
-    modes: ["token"],
+    modes: ["token", "interactive"],
   };
 
   private readonly apiKey: string;
@@ -204,6 +221,7 @@ export class TwoCaptchaCompatibleAdapter implements CaptchaSolverPort {
   private readonly pollIntervalMs: number;
   private readonly softId?: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly interactiveDelayScale: number;
 
   constructor(
     meta: { id: string; name: string; defaultBaseUrl: string },
@@ -213,14 +231,86 @@ export class TwoCaptchaCompatibleAdapter implements CaptchaSolverPort {
     this.name = meta.name;
     this.apiKey = opts.apiKey.trim();
     this.apiBaseUrl = (opts.apiBaseUrl ?? meta.defaultBaseUrl).replace(/\/+$/, "");
-    this.pollIntervalMs = Math.max(250, opts.pollIntervalMs ?? 3_000);
+    this.pollIntervalMs = Math.max(10, opts.pollIntervalMs ?? 3_000);
     this.softId = opts.softId;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.interactiveDelayScale = opts.interactiveDelayScale ?? 1;
   }
 
   canSolve(challenge: ChallengeDescriptor, network: SolverNetworkContext): boolean {
     if (!this.apiKey) return false;
+    if (challenge.kind === "hcaptcha" && hasOpenInteractiveChallengeFrame(challenge)) {
+      return true;
+    }
     return buildTwoCaptchaTask(challenge, network) !== null;
+  }
+
+  async solveGrid(input: InteractiveGridInput, signal: AbortSignal): Promise<number[]> {
+    const solution = await this.executeRawTask(
+      {
+        type: "GridTask",
+        body: input.imageBase64,
+        comment: input.promptText,
+        rows: input.rows,
+        columns: input.columns,
+      },
+      signal,
+    );
+    const click = solution.click;
+    if (Array.isArray(click)) {
+      return click
+        .map((n) => Number(n))
+        .filter((n) => Number.isInteger(n) && n >= 1);
+    }
+    if (typeof click === "string") {
+      return click
+        .replace(/^click:/i, "")
+        .split(/[\/,;\s]+/)
+        .map((s) => Number(s))
+        .filter((n) => Number.isInteger(n) && n >= 1);
+    }
+    return [];
+  }
+
+  async solveCoordinates(
+    input: InteractiveCanvasInput,
+    signal: AbortSignal,
+  ): Promise<Array<{ x: number; y: number }>> {
+    const solution = await this.executeRawTask(
+      {
+        type: "CoordinatesTask",
+        body: input.imageBase64,
+        comment: input.promptText,
+      },
+      signal,
+    );
+    const coords = solution.coordinates;
+    if (Array.isArray(coords)) {
+      return coords
+        .map((pt) => ({ x: Number(pt.x), y: Number(pt.y) }))
+        .filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+    }
+    return [];
+  }
+
+  async solveInteractive(
+    _taskInfo: SolverTask,
+    page: SolverPagePort,
+    signal: AbortSignal,
+  ): Promise<SolverOutcome> {
+    if (!this.apiKey) {
+      return {
+        status: "failed",
+        reason: `${this.name} API key is not configured`,
+        retryable: false,
+      };
+    }
+    return runHCaptchaInteractive({
+      page,
+      classifier: this,
+      signal,
+      delayScale: this.interactiveDelayScale,
+    });
   }
 
   async solve(
@@ -236,117 +326,53 @@ export class TwoCaptchaCompatibleAdapter implements CaptchaSolverPort {
       };
     }
 
+    const strategy = taskInfo.strategy ?? "auto";
+    const openInteractiveModal = hasOpenInteractiveChallengeFrame(taskInfo.challenge);
+    if (
+      strategy === "interactive-only" ||
+      (strategy === "auto" &&
+        taskInfo.challenge.kind === "hcaptcha" &&
+        (openInteractiveModal || !taskInfo.challenge.sitekey))
+    ) {
+      return this.solveInteractive(taskInfo, page, signal);
+    }
+
     const task = buildTwoCaptchaTask(taskInfo.challenge, taskInfo.network);
     if (!task) {
+      if (
+        strategy !== "token-only" &&
+        taskInfo.challenge.kind === "hcaptcha" &&
+        page.inspectChallengeFrame
+      ) {
+        return this.solveInteractive(taskInfo, page, signal);
+      }
       return {
         status: "unsupported",
         reason: `${this.name} does not support ${taskInfo.challenge.kind} with the detected parameters`,
       };
     }
 
-    let createData: TwoCaptchaApiResponse;
     try {
-      createData = await this.postJson(
-        "/createTask",
-        {
-          clientKey: this.apiKey,
-          ...(this.softId !== undefined ? { softId: this.softId } : {}),
-          task,
-        },
+      const expiresMs = Date.parse(taskInfo.expiresAt);
+      const timeoutMs = Number.isFinite(expiresMs)
+        ? Math.max(1_000, expiresMs - Date.now())
+        : 120_000;
+      const { providerTaskId, solution } = await this.executeRawTaskWithId(
+        task,
         signal,
+        timeoutMs,
       );
+      return await this.finalizeSolution(page, providerTaskId, solution);
     } catch (e) {
       if (signal.aborted) {
         return { status: "failed", reason: `${this.name} request aborted`, retryable: false };
       }
       return {
         status: "failed",
-        reason: `${this.name} createTask error: ${(e as Error).message}`,
+        reason: (e as Error).message,
         retryable: true,
       };
     }
-
-    if (createData.errorId !== 0) {
-      return {
-        status: "failed",
-        reason:
-          createData.errorDescription ??
-          createData.errorCode ??
-          `${this.name} errorId ${createData.errorId}`,
-        retryable: false,
-      };
-    }
-
-    if (createData.status === "ready" && createData.solution) {
-      return this.finalizeSolution(
-        page,
-        String(createData.taskId ?? "sync"),
-        createData.solution,
-      );
-    }
-
-    const providerTaskId = createData.taskId;
-    if (providerTaskId === undefined || providerTaskId === null || providerTaskId === "") {
-      return {
-        status: "failed",
-        reason: `${this.name} createTask returned no taskId`,
-        retryable: false,
-      };
-    }
-
-    const expiresMs = Date.parse(taskInfo.expiresAt);
-    const deadline = Number.isFinite(expiresMs) ? expiresMs : Date.now() + 120_000;
-    while (Date.now() < deadline) {
-      if (signal.aborted) {
-        return { status: "failed", reason: `${this.name} polling aborted`, retryable: false };
-      }
-      await sleepWithSignal(this.pollIntervalMs, signal);
-      if (signal.aborted) {
-        return { status: "failed", reason: `${this.name} polling aborted`, retryable: false };
-      }
-
-      let pollData: TwoCaptchaApiResponse;
-      try {
-        pollData = await this.postJson(
-          "/getTaskResult",
-          {
-            clientKey: this.apiKey,
-            taskId: providerTaskId,
-          },
-          signal,
-        );
-      } catch (e) {
-        if (signal.aborted) {
-          return { status: "failed", reason: `${this.name} polling aborted`, retryable: false };
-        }
-        return {
-          status: "failed",
-          reason: `${this.name} getTaskResult error: ${(e as Error).message}`,
-          retryable: true,
-        };
-      }
-
-      if (pollData.errorId !== 0) {
-        return {
-          status: "failed",
-          reason:
-            pollData.errorDescription ??
-            pollData.errorCode ??
-            `${this.name} errorId ${pollData.errorId}`,
-          retryable: false,
-        };
-      }
-
-      if (pollData.status === "ready" && pollData.solution) {
-        return this.finalizeSolution(page, String(providerTaskId), pollData.solution);
-      }
-    }
-
-    return {
-      status: "failed",
-      reason: `${this.name} timed out waiting for getTaskResult`,
-      retryable: true,
-    };
   }
 
   async healthcheck(): Promise<{
@@ -383,6 +409,91 @@ export class TwoCaptchaCompatibleAdapter implements CaptchaSolverPort {
         details: { error: (e as Error).message },
       };
     }
+  }
+
+  private async executeRawTask(
+    task: Record<string, unknown>,
+    signal: AbortSignal,
+    timeoutMs = 60_000,
+  ): Promise<NonNullable<TwoCaptchaApiResponse["solution"]>> {
+    const { solution } = await this.executeRawTaskWithId(task, signal, timeoutMs);
+    return solution;
+  }
+
+  private async executeRawTaskWithId(
+    task: Record<string, unknown>,
+    signal: AbortSignal,
+    timeoutMs = 120_000,
+  ): Promise<{
+    providerTaskId: string;
+    solution: NonNullable<TwoCaptchaApiResponse["solution"]>;
+  }> {
+    const createData = await this.postJson(
+      "/createTask",
+      {
+        clientKey: this.apiKey,
+        ...(this.softId !== undefined ? { softId: this.softId } : {}),
+        task,
+      },
+      signal,
+    );
+
+    if (createData.errorId !== 0) {
+      throw new Error(
+        createData.errorDescription ??
+          createData.errorCode ??
+          `${this.name} errorId ${createData.errorId}`,
+      );
+    }
+
+    if (createData.status === "ready" && createData.solution) {
+      return {
+        providerTaskId: String(createData.taskId ?? "sync"),
+        solution: createData.solution,
+      };
+    }
+
+    const providerTaskId = createData.taskId;
+    if (providerTaskId === undefined || providerTaskId === null || providerTaskId === "") {
+      throw new Error(`${this.name} createTask returned no taskId`);
+    }
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (signal.aborted) {
+        throw new Error(`${this.name} polling aborted`);
+      }
+      await sleepWithSignal(this.pollIntervalMs, signal);
+      if (signal.aborted) {
+        throw new Error(`${this.name} polling aborted`);
+      }
+
+      const pollData = await this.postJson(
+        "/getTaskResult",
+        {
+          clientKey: this.apiKey,
+          taskId: providerTaskId,
+        },
+        signal,
+      );
+
+      if (pollData.errorId !== 0) {
+        throw new Error(
+          pollData.errorDescription ??
+            pollData.errorCode ??
+            `${this.name} errorId ${pollData.errorId}`,
+        );
+      }
+
+      if (pollData.status === "ready" && pollData.solution) {
+        return {
+          providerTaskId: String(providerTaskId),
+          solution: pollData.solution,
+        };
+      }
+    }
+
+    throw new Error(`${this.name} timed out waiting for getTaskResult`);
   }
 
   private async finalizeSolution(

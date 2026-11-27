@@ -66,10 +66,23 @@ export function isProfileSolverMode(value: unknown): value is ProfileSolverMode 
   return typeof value === "string" && (PROFILE_SOLVER_MODES as readonly string[]).includes(value);
 }
 
+export const SOLVER_STRATEGIES = [
+  "auto",
+  "token-only",
+  "interactive-only",
+  "token-then-interactive",
+] as const;
+export type SolverStrategy = (typeof SOLVER_STRATEGIES)[number];
+
+export function isSolverStrategy(value: unknown): value is SolverStrategy {
+  return typeof value === "string" && (SOLVER_STRATEGIES as readonly string[]).includes(value);
+}
+
 /** Per-profile override for the challenge solver port. */
 export interface ProfileSolverConfig {
   mode: ProfileSolverMode;
   adapter?: SolverAdapterKind;
+  strategy?: SolverStrategy;
   apiKey?: string;
   apiBaseUrl?: string;
   webhookUrl?: string;
@@ -84,6 +97,7 @@ export interface ProfileSolverConfig {
 export interface SolverSettings {
   enabled: boolean;
   adapter: SolverAdapterKind;
+  strategy?: SolverStrategy;
   webhookUrl?: string;
   webhookSecret?: string;
   apiKey?: string;
@@ -164,21 +178,63 @@ export interface SolverTokenPayload {
   triggerCallback?: boolean;
 }
 
+export interface ApplyTokenResult {
+  applied: boolean;
+  textareaUpdated?: boolean;
+  callbackInvoked?: boolean;
+  details?: string;
+}
+
+export interface ChallengeTileBounds {
+  index: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ChallengeFrameInspection {
+  frameBounds: { x: number; y: number; width: number; height: number };
+  promptText?: string;
+  challengeType?: "grid" | "canvas" | "checkbox";
+  tileBounds?: ChallengeTileBounds[];
+  canvasBounds?: { x: number; y: number; width: number; height: number };
+  checkboxBounds?: { x: number; y: number; width: number; height: number };
+  checkboxChecked?: boolean;
+  submitButtonBounds?: { x: number; y: number; width: number; height: number };
+  submitButtonText?: string;
+  errorText?: string;
+  roundSignature?: string;
+  isVisible: boolean;
+}
+
 /** Read-only page port exposed to ChallengeDetectorPort. */
 export interface SolverPageReadPort {
   readonly profileId: ProfileId;
   readonly engine: BrowserEngine;
   extract(): Promise<{ result: unknown }>;
   captureFrame(opts?: { quality?: number }): Promise<CapturedFrame>;
+  /** Captures a specific viewport region (or full viewport if bounds omitted) as a base64-encoded JPEG. */
+  captureRegionBase64?(bounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }): Promise<string>;
+  /** Inspects a child challenge iframe (e.g. "hcaptcha.com") in an isolated world and returns its prompt, tile bounds, and submit button in root-viewport coordinates. */
+  inspectChallengeFrame?(frameUrlPattern?: string): Promise<ChallengeFrameInspection | null>;
   listTabs(): Promise<unknown>;
   getCookies(urls?: string[]): Promise<unknown>;
   /** Evaluates a JS expression strictly in an isolated world (invisible to main-world hooks). */
-  evaluateIsolatedJs(expression: string): Promise<unknown>;
+  evaluateIsolatedJs(
+    expression: string,
+    opts?: { frameUrlPattern?: string },
+  ): Promise<unknown>;
 }
 
 /** Full hybrid page port (Token + Interactive UI) exposed to CaptchaSolverPort during an active solve task. */
 export interface SolverPagePort extends SolverPageReadPort {
-  applyToken(payload: SolverTokenPayload): Promise<{ applied: boolean; details?: string }>;
+  applyToken(payload: SolverTokenPayload): Promise<ApplyTokenResult>;
   setCookies(cookies: unknown[]): Promise<unknown>;
   dispatchInput(event: HumanInputEvent): Promise<void>;
   clickRef(ref: string): Promise<{ ok: true }>;
@@ -204,6 +260,7 @@ export interface SolverTask {
   handoffId?: string;
   profileId: ProfileId;
   reason?: string;
+  strategy?: SolverStrategy;
   challenge: ChallengeDescriptor;
   network: SolverNetworkContext;
   createdAt: string;

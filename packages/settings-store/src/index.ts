@@ -5,6 +5,7 @@ import {
   isProxyExposureMode,
   isSolverAdapterKind,
   isSolverFallbackPolicy,
+  isSolverStrategy,
   type BrowserEngine,
   type DisplayMode,
   type SolverSettings,
@@ -15,6 +16,7 @@ export type { BrowserEngine, DisplayMode, SolverSettings };
 export const DEFAULT_SOLVER_SETTINGS: SolverSettings = {
   enabled: false,
   adapter: "none",
+  strategy: "auto",
   fallbackPolicy: "solver-then-human",
   proxyExposure: "bridge",
   allowMainWorldJs: false,
@@ -27,6 +29,7 @@ export function normalizeSolverSettings(raw: unknown): SolverSettings {
   return {
     enabled: typeof s.enabled === "boolean" ? s.enabled : DEFAULT_SOLVER_SETTINGS.enabled,
     adapter: isSolverAdapterKind(s.adapter) ? s.adapter : DEFAULT_SOLVER_SETTINGS.adapter,
+    strategy: isSolverStrategy(s.strategy) ? s.strategy : (DEFAULT_SOLVER_SETTINGS.strategy ?? "auto"),
     ...(typeof s.webhookUrl === "string" && s.webhookUrl.trim() !== ""
       ? { webhookUrl: s.webhookUrl.trim() }
       : {}),

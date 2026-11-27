@@ -35,5 +35,6 @@ export * from "./extensions/extensionStore.ts";
 export * from "./extensions/webstoreDownload.ts";
 export * from "./solver/DefaultChallengeDetector.ts";
 export * from "./solver/solverPagePort.ts";
+export * from "./solver/HCaptchaInteractiveRunner.ts";
 export * from "./solver/moduleLoader.ts";
 export * from "./solver/providers/index.ts";

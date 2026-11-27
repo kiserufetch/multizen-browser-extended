@@ -5,14 +5,17 @@ import {
   isProxyExposureMode,
   isSolverAdapterKind,
   isSolverFallbackPolicy,
+  isSolverStrategy,
   MultizenError,
   resolveEngine,
+  type ApplyTokenResult,
   type BrowserDriver,
   type BrowserEngine,
   type CaptchaSolverPort,
   type ChallengeDescriptor,
   type ChallengeDetectorPort,
   type ChallengeFrameInfo,
+  type ChallengeFrameInspection,
   type ChallengeKind,
   type CapturedFrame,
   type DriverAction,
@@ -27,6 +30,7 @@ import {
   type SolverPagePort,
   type SolverPageReadPort,
   type SolverSettings,
+  type SolverStrategy,
   type SolverTask,
   type SolverTaskRecord,
   type SolverTokenPayload,
@@ -44,10 +48,29 @@ export const DEFAULT_SOLVER_CONFIG: SolverSettings = {
   enabled: false,
   adapter: "none",
   fallbackPolicy: "solver-then-human",
+  strategy: "auto",
   proxyExposure: "bridge",
   allowMainWorldJs: false,
   timeoutMs: DEFAULT_SOLVER_TIMEOUT_MS,
 };
+
+const DEFAULT_POST_SOLVE_VERIFY_TIMEOUT_MS = 2_500;
+const DEFAULT_POST_SOLVE_VERIFY_INTERVAL_MS = 400;
+
+function sleepWithSignal(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("Aborted"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("Aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 function unwrapEvaluatedValue(raw: unknown): unknown {
   if (raw && typeof raw === "object" && "result" in raw) {
@@ -76,8 +99,21 @@ const ISOLATED_DETECT_EXPRESSION = `(() => {
     }
     return out;
   };
+  const isVisible = (el) => {
+    if (!el || typeof window.getComputedStyle !== "function") return true;
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      const style = window.getComputedStyle(cur);
+      if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity || "1") === 0) {
+        return false;
+      }
+      cur = cur.parentElement;
+    }
+    return true;
+  };
   const rectOf = (el) => {
     if (!el || typeof el.getBoundingClientRect !== "function") return undefined;
+    if (!isVisible(el)) return undefined;
     const r = el.getBoundingClientRect();
     if (!r || (r.width === 0 && r.height === 0)) return undefined;
     return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
@@ -108,7 +144,16 @@ const ISOLATED_DETECT_EXPRESSION = `(() => {
   let enterprise = undefined;
   let invisible = undefined;
   let frame = undefined;
+  let bestFrameArea = -1;
   let rawAttributes = {};
+
+  const considerFrame = (candidate) => {
+    const area = candidate.bounds ? candidate.bounds.width * candidate.bounds.height : 0;
+    if (!frame || area > bestFrameArea) {
+      frame = candidate;
+      bestFrameArea = area;
+    }
+  };
 
   for (const ifr of Array.from(document.querySelectorAll("iframe"))) {
     const rawSrc = ifr.getAttribute("src") || "";
@@ -121,53 +166,58 @@ const ISOLATED_DETECT_EXPRESSION = `(() => {
       kind = "turnstile";
       vendor = "cloudflare-turnstile";
       const match = rawSrc.match(/(0x[0-9a-zA-Z_-]{10,})/);
-      if (match) sitekey = match[1];
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
+      if (match && !sitekey) sitekey = match[1];
+      considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
       rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      continue;
     }
     if (srcLower.includes("hcaptcha.com")) {
       kind = "hcaptcha";
       vendor = "hcaptcha";
-      sitekey = (parsed && (parsed.params.get("sitekey") || parsed.params.get("id"))) || undefined;
+      const sk = (parsed && (parsed.params.get("sitekey") || parsed.params.get("id"))) || undefined;
+      if (sk && !sitekey) sitekey = sk;
       if (parsed && parsed.params.get("size") === "invisible") invisible = true;
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
+      considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
       rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      continue;
     }
     if (srcLower.includes("google.com/recaptcha") || srcLower.includes("recaptcha.net/recaptcha")) {
       const isEnt = srcLower.includes("/enterprise");
       const sizeParam = parsed ? parsed.params.get("size") : null;
-      kind = sizeParam === "invisible" && srcLower.includes("anchor") ? "recaptcha_v3" : "recaptcha_v2";
+      if (!kind) {
+        kind = sizeParam === "invisible" && srcLower.includes("anchor") ? "recaptcha_v3" : "recaptcha_v2";
+      }
       vendor = isEnt ? "google-recaptcha-enterprise" : "google-recaptcha";
       enterprise = isEnt;
       if (sizeParam === "invisible") invisible = true;
-      sitekey = (parsed && parsed.params.get("k")) || undefined;
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
+      const sk = (parsed && parsed.params.get("k")) || undefined;
+      if (sk && !sitekey) sitekey = sk;
+      considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
       rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      continue;
     }
     if (srcLower.includes("arkoselabs.com") || srcLower.includes("funcaptcha.com")) {
       kind = "arkose";
       vendor = "arkose-funcaptcha";
-      sitekey = (parsed && (parsed.params.get("pk") || parsed.params.get("pkey"))) || undefined;
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
+      const sk = (parsed && (parsed.params.get("pk") || parsed.params.get("pkey"))) || undefined;
+      if (sk && !sitekey) sitekey = sk;
+      considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
       rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      continue;
     }
     if (srcLower.includes("captcha-delivery.com") || srcLower.includes("datadome")) {
       kind = "datadome";
       vendor = "datadome";
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
+      considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
       rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      continue;
     }
     if (srcLower.includes("geetest.com")) {
       kind = "geetest";
       vendor = "geetest";
-      frame = { url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) };
+      considerFrame({ url: parsed ? parsed.url : rawSrc, isCrossOrigin, ...(bounds ? { bounds } : {}) });
       rawAttributes = { ...rawAttributes, ...readAttrs(ifr) };
-      break;
+      continue;
     }
   }
 
@@ -304,6 +354,218 @@ export class BuiltinChallengeDetector implements ChallengeDetectorPort {
   }
 }
 
+const INSPECT_CHALLENGE_FRAME_EXPRESSION = `(() => {
+  const frameBounds =
+    typeof __mzFrameBounds !== "undefined" && __mzFrameBounds
+      ? __mzFrameBounds
+      : {
+          x: 0,
+          y: 0,
+          width: window.innerWidth || 400,
+          height: window.innerHeight || 600,
+        };
+
+  const isVisible = (el) => {
+    if (!el || typeof el.getBoundingClientRect !== "function") return false;
+    const r = el.getBoundingClientRect();
+    if (!r || r.width <= 2 || r.height <= 2) return false;
+    if (typeof window.getComputedStyle === "function") {
+      const st = window.getComputedStyle(el);
+      if (st.display === "none" || st.visibility === "hidden" || parseFloat(st.opacity) === 0) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const toRootBox = (el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      x: Math.round(frameBounds.x + r.x),
+      y: Math.round(frameBounds.y + r.y),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    };
+  };
+
+  const promptEl = document.querySelector(
+    ".prompt-text, .task-prompt, [class*='prompt-text'], h2.prompt-text"
+  );
+  const promptText =
+    promptEl && promptEl.textContent ? promptEl.textContent.trim().replace(/\\s+/g, " ") : undefined;
+
+  const errorEl = document.querySelector(
+    ".display-error, .error-text, [class*='display-error']"
+  );
+  const errorText =
+    errorEl && isVisible(errorEl) && errorEl.textContent
+      ? errorEl.textContent.trim()
+      : undefined;
+
+  const submitEl = document.querySelector(
+    ".button-submit, .verify-button, [class*='button-submit']"
+  );
+  const submitButtonBounds = submitEl && isVisible(submitEl) ? toRootBox(submitEl) : undefined;
+  const submitButtonText =
+    submitEl && submitEl.textContent ? submitEl.textContent.trim() : undefined;
+
+  const tileNodes = Array.from(
+    document.querySelectorAll(".task-image, .image-wrapper, [class*='task-image']")
+  ).filter(isVisible);
+
+  if (tileNodes.length >= 4) {
+    const tileBounds = tileNodes.map((node, index) => ({
+      index,
+      ...toRootBox(node),
+    }));
+    const sigParts = tileNodes.map((node) => {
+      const imgEl = node.querySelector(".image, img, [style*='background-image']") || node;
+      const st =
+        typeof window.getComputedStyle === "function" ? window.getComputedStyle(imgEl) : null;
+      return (st && st.backgroundImage) || imgEl.getAttribute("src") || imgEl.getAttribute("style") || "";
+    });
+    return JSON.stringify({
+      frameBounds,
+      ...(promptText ? { promptText } : {}),
+      challengeType: "grid",
+      tileBounds,
+      ...(submitButtonBounds ? { submitButtonBounds } : {}),
+      ...(submitButtonText ? { submitButtonText } : {}),
+      ...(errorText ? { errorText } : {}),
+      roundSignature: (promptText || "") + "|" + sigParts.join(","),
+      isVisible: true,
+    });
+  }
+
+  const canvasNodes = Array.from(
+    document.querySelectorAll(".task-grid canvas, .challenge-container canvas, canvas")
+  ).filter((c) => isVisible(c) && c.getBoundingClientRect().width >= 100 && c.getBoundingClientRect().height >= 100);
+
+  if (canvasNodes.length > 0) {
+    const canvasEl = canvasNodes[0];
+    return JSON.stringify({
+      frameBounds,
+      ...(promptText ? { promptText } : {}),
+      challengeType: "canvas",
+      canvasBounds: toRootBox(canvasEl),
+      ...(submitButtonBounds ? { submitButtonBounds } : {}),
+      ...(submitButtonText ? { submitButtonText } : {}),
+      ...(errorText ? { errorText } : {}),
+      roundSignature: (promptText || "") + "|canvas:" + canvasEl.width + "x" + canvasEl.height,
+      isVisible: true,
+    });
+  }
+
+  const checkboxEl = document.querySelector("#checkbox, [role='checkbox'], .check");
+  if (checkboxEl && isVisible(checkboxEl)) {
+    const checked =
+      checkboxEl.getAttribute("aria-checked") === "true" ||
+      checkboxEl.classList.contains("checked");
+    return JSON.stringify({
+      frameBounds,
+      challengeType: "checkbox",
+      checkboxBounds: toRootBox(checkboxEl),
+      checkboxChecked: checked,
+      isVisible: true,
+    });
+  }
+
+  return JSON.stringify({
+    frameBounds,
+    ...(promptText ? { promptText } : {}),
+    isVisible: Boolean(promptText || submitButtonBounds),
+  });
+})()`;
+
+function buildMainWorldCallbackScript(token: string, callbackName?: string | null): string {
+  const cfg = JSON.stringify({ token, callbackName: callbackName ?? null });
+  return `(() => {
+    const { token, callbackName } = ${cfg};
+    const invoked = [];
+
+    if (callbackName && /^[A-Za-z_$][A-Za-z0-9_$.]*$/.test(callbackName)) {
+      try {
+        const parts = callbackName.split(".");
+        let ctx = window;
+        let fn = window;
+        for (const p of parts) {
+          ctx = fn;
+          fn = fn != null ? fn[p] : undefined;
+        }
+        if (typeof fn === "function") {
+          fn.call(ctx, token);
+          invoked.push("global:" + callbackName);
+        }
+      } catch {}
+    }
+
+    if (invoked.length === 0) {
+      const callbackPropNames = ["onVerify", "onSuccess", "callback", "onChange", "onComplete", "onToken"];
+      const anchorSelectors = [
+        ".h-captcha",
+        ".cf-turnstile",
+        ".g-recaptcha",
+        "[data-sitekey]",
+        "[data-hcaptcha-sitekey]",
+        "[data-turnstile-sitekey]",
+        "iframe[src*='hcaptcha.com']",
+        "iframe[src*='challenges.cloudflare.com']",
+        "iframe[src*='recaptcha']"
+      ];
+      const visited = new Set();
+      const tryInvokeFromProps = (props, sourceLabel) => {
+        if (!props || typeof props !== "object") return false;
+        for (const propName of callbackPropNames) {
+          if (typeof props[propName] === "function") {
+            try {
+              props[propName](token);
+              invoked.push(sourceLabel + ":" + propName);
+              return true;
+            } catch {}
+          }
+        }
+        return false;
+      };
+
+      for (const sel of anchorSelectors) {
+        if (invoked.length > 0) break;
+        for (const startEl of Array.from(document.querySelectorAll(sel))) {
+          if (invoked.length > 0) break;
+          let el = startEl;
+          let depth = 0;
+          while (el && depth < 10 && invoked.length === 0) {
+            if (!visited.has(el)) {
+              visited.add(el);
+              const keys = Object.keys(el);
+              for (const k of keys) {
+                if (k.startsWith("__reactProps$")) {
+                  if (tryInvokeFromProps(el[k], "reactProps")) break;
+                }
+                if (k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$")) {
+                  let fiber = el[k];
+                  let fDepth = 0;
+                  while (fiber && fDepth < 15) {
+                    if (tryInvokeFromProps(fiber.memoizedProps || fiber.pendingProps, "reactFiber")) {
+                      break;
+                    }
+                    fiber = fiber.return;
+                    fDepth++;
+                  }
+                  if (invoked.length > 0) break;
+                }
+              }
+            }
+            el = el.parentElement;
+            depth++;
+          }
+        }
+      }
+    }
+
+    return JSON.stringify({ invoked: invoked.length > 0, targets: invoked });
+  })()`;
+}
+
 export function buildScopedSolverPagePort(opts: {
   profileId: ProfileId;
   engine: BrowserEngine;
@@ -321,9 +583,12 @@ export function buildScopedSolverPagePort(opts: {
     }
   };
 
-  const evaluateIsolatedJs = async (expression: string): Promise<unknown> => {
+  const evaluateIsolatedJs = async (
+    expression: string,
+    evalOpts?: { frameUrlPattern?: string },
+  ): Promise<unknown> => {
     assertActive();
-    if (driver.evaluateIsolatedJs) return driver.evaluateIsolatedJs(profileId, expression);
+    if (driver.evaluateIsolatedJs) return driver.evaluateIsolatedJs(profileId, expression, evalOpts);
     return driver.evaluateJs(profileId, expression);
   };
 
@@ -338,9 +603,75 @@ export function buildScopedSolverPagePort(opts: {
     return driver.evaluateJs(profileId, expression);
   };
 
+  const inspectChallengeFrame = async (
+    frameUrlPattern = "hcaptcha.com",
+  ): Promise<ChallengeFrameInspection | null> => {
+    assertActive();
+    try {
+      const raw = await evaluateIsolatedJs(INSPECT_CHALLENGE_FRAME_EXPRESSION, {
+        frameUrlPattern,
+      });
+      const value = unwrapEvaluatedValue(raw);
+      let parsed: ChallengeFrameInspection | null = null;
+      if (typeof value === "string" && value !== "null") {
+        parsed = JSON.parse(value) as ChallengeFrameInspection | null;
+      } else if (value && typeof value === "object" && "frameBounds" in value) {
+        parsed = value as ChallengeFrameInspection;
+      }
+      if (!parsed || !parsed.frameBounds) return null;
+      return parsed;
+    } catch {
+      // Frame may not exist or may have detached.
+    }
+    return null;
+  };
+
+  const captureRegionBase64 = async (bounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }): Promise<string> => {
+    assertActive();
+    if (
+      bounds &&
+      bounds.width > 0 &&
+      bounds.height > 0 &&
+      engine === "cloakbrowser" &&
+      driver.cdpSend
+    ) {
+      try {
+        const res = (await driver.cdpSend(
+          profileId,
+          "Page.captureScreenshot",
+          {
+            format: "jpeg",
+            quality: 85,
+            clip: {
+              x: Math.max(0, Math.round(bounds.x)),
+              y: Math.max(0, Math.round(bounds.y)),
+              width: Math.max(1, Math.round(bounds.width)),
+              height: Math.max(1, Math.round(bounds.height)),
+              scale: 1,
+            },
+          },
+          undefined,
+          { safe: true },
+        )) as { data?: string };
+        if (res && typeof res.data === "string" && res.data.length > 0) {
+          return res.data;
+        }
+      } catch {
+        // Fall back to full frame capture below.
+      }
+    }
+    const frame = await driver.captureFrame(profileId, { quality: 85 });
+    return Buffer.from(frame.jpeg).toString("base64");
+  };
+
   const applyToken = async (
     payload: SolverTokenPayload,
-  ): Promise<{ applied: boolean; details?: string }> => {
+  ): Promise<ApplyTokenResult> => {
     assertActive();
     const selectors = payload.targetSelector
       ? [payload.targetSelector]
@@ -405,33 +736,40 @@ export function buildScopedSolverPagePort(opts: {
     }
 
     let callbackInvoked = false;
-    if (
-      payload.triggerCallback !== false &&
-      allowMainWorldJs &&
-      parsed.callbackName &&
-      /^[A-Za-z_$][A-Za-z0-9_$.]*$/.test(parsed.callbackName)
-    ) {
+    let callbackTargets: string[] = [];
+    if (payload.triggerCallback !== false && allowMainWorldJs) {
       try {
-        await driver.evaluateJs(
+        const cbRaw = await driver.evaluateJs(
           profileId,
-          `(() => {
-            const fn = globalThis[${JSON.stringify(parsed.callbackName)}];
-            if (typeof fn === "function") { fn(${JSON.stringify(payload.token)}); return true; }
-            return false;
-          })()`,
+          buildMainWorldCallbackScript(payload.token, parsed.callbackName),
         );
-        callbackInvoked = true;
+        const cbVal = unwrapEvaluatedValue(cbRaw);
+        if (typeof cbVal === "string") {
+          const cbParsed = JSON.parse(cbVal) as { invoked?: boolean; targets?: string[] };
+          callbackInvoked = Boolean(cbParsed.invoked);
+          callbackTargets = cbParsed.targets ?? [];
+        } else if (typeof cbVal === "boolean") {
+          callbackInvoked = cbVal;
+        }
       } catch {
         // ignore
       }
     }
 
+    const textareaUpdated = Boolean(parsed.applied);
+    const cbDesc =
+      callbackTargets.length > 0
+        ? callbackTargets.join(", ")
+        : parsed.callbackName ?? "callback";
+
     return {
-      applied: Boolean(parsed.applied || callbackInvoked),
+      applied: Boolean(textareaUpdated || callbackInvoked),
+      textareaUpdated,
+      callbackInvoked,
       details: parsed.matchedSelectors?.length
-        ? `Updated ${parsed.matchedSelectors.join(", ")}${callbackInvoked ? " + callback" : ""}`
+        ? `Updated ${parsed.matchedSelectors.join(", ")}${callbackInvoked ? ` + callback (${cbDesc})` : " (no callback invoked)"}`
         : callbackInvoked
-          ? `Invoked callback ${parsed.callbackName}`
+          ? `Invoked callback (${cbDesc})`
           : "No matching token input elements found on page",
     };
   };
@@ -477,6 +815,8 @@ export function buildScopedSolverPagePort(opts: {
     },
     evaluateIsolatedJs,
     evaluateMainWorldJs,
+    inspectChallengeFrame,
+    captureRegionBase64,
     applyToken,
   };
 }
@@ -486,6 +826,7 @@ export interface EffectiveProfileSolverPolicy {
   adapter: SolverAdapterKind;
   port: CaptchaSolverPort | null;
   fallbackPolicy: SolverFallbackPolicy;
+  strategy: SolverStrategy;
   proxyExposure: ProxyExposureMode;
   allowMainWorldJs: boolean;
   timeoutMs: number;
@@ -501,6 +842,7 @@ export interface AdHocSolverSpec {
   apiBaseUrl?: string;
   webhookUrl?: string;
   webhookSecret?: string;
+  interactiveDelayScale?: number;
 }
 
 export interface SolverCoordinatorOptions {
@@ -514,6 +856,9 @@ export interface SolverCoordinatorOptions {
   webhookSessions?: SolverWebhookSessions;
   callbackBaseUrl?: () => string;
   fetchImpl?: typeof fetch;
+  postSolveVerifyTimeoutMs?: number;
+  postSolveVerifyIntervalMs?: number;
+  interactiveDelayScale?: number;
 }
 
 interface ActiveTaskEntry {
@@ -537,6 +882,9 @@ export class SolverCoordinator {
   private webhookSessions: SolverWebhookSessions;
   private callbackBaseUrlFn: () => string;
   private fetchImpl?: typeof fetch;
+  private postSolveVerifyTimeoutMs: number;
+  private postSolveVerifyIntervalMs: number;
+  private interactiveDelayScale?: number;
 
   private runtimeSettingsOverride: SolverSettings | null = null;
   private runtimePortOverride: CaptchaSolverPort | null = null;
@@ -556,6 +904,11 @@ export class SolverCoordinator {
     this.webhookSessions = opts.webhookSessions ?? new SolverWebhookSessions();
     this.callbackBaseUrlFn = opts.callbackBaseUrl ?? (() => "http://127.0.0.1:7777");
     this.fetchImpl = opts.fetchImpl;
+    this.postSolveVerifyTimeoutMs =
+      opts.postSolveVerifyTimeoutMs ?? DEFAULT_POST_SOLVE_VERIFY_TIMEOUT_MS;
+    this.postSolveVerifyIntervalMs =
+      opts.postSolveVerifyIntervalMs ?? DEFAULT_POST_SOLVE_VERIFY_INTERVAL_MS;
+    this.interactiveDelayScale = opts.interactiveDelayScale;
 
     // When a handoff ends externally (browser closed, operator resumed/aborted), cancel its solver task.
     this.handoff.onTransition((record) => {
@@ -577,14 +930,25 @@ export class SolverCoordinator {
     if (opts.webhookSessions !== undefined) this.webhookSessions = opts.webhookSessions;
     if (opts.callbackBaseUrl !== undefined) this.callbackBaseUrlFn = opts.callbackBaseUrl;
     if (opts.fetchImpl !== undefined) this.fetchImpl = opts.fetchImpl;
+    if (opts.postSolveVerifyTimeoutMs !== undefined) {
+      this.postSolveVerifyTimeoutMs = opts.postSolveVerifyTimeoutMs;
+    }
+    if (opts.postSolveVerifyIntervalMs !== undefined) {
+      this.postSolveVerifyIntervalMs = opts.postSolveVerifyIntervalMs;
+    }
+    if (opts.interactiveDelayScale !== undefined) {
+      this.interactiveDelayScale = opts.interactiveDelayScale;
+    }
   }
 
   createAdHocPort(spec: AdHocSolverSpec): CaptchaSolverPort | null {
     if (isCloudSolverProviderKind(spec.adapter) && spec.apiKey) {
+      const delayScale = spec.interactiveDelayScale ?? this.interactiveDelayScale;
       return createCloudProviderSolverPort(spec.adapter, {
         apiKey: spec.apiKey,
         ...(spec.apiBaseUrl ? { apiBaseUrl: spec.apiBaseUrl } : {}),
         ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
+        ...(delayScale !== undefined ? { interactiveDelayScale: delayScale } : {}),
       });
     }
     if (spec.adapter === "webhook" && spec.webhookUrl) {
@@ -608,6 +972,7 @@ export class SolverCoordinator {
     webhookUrl?: string;
     webhookSecret?: string;
     fallbackPolicy?: SolverFallbackPolicy;
+    strategy?: SolverStrategy;
     proxyExposure?: ProxyExposureMode;
     allowMainWorldJs?: boolean;
     timeoutMs?: number;
@@ -646,6 +1011,10 @@ export class SolverCoordinator {
         patch.fallbackPolicy && isSolverFallbackPolicy(patch.fallbackPolicy)
           ? patch.fallbackPolicy
           : current.fallbackPolicy,
+      strategy:
+        patch.strategy && isSolverStrategy(patch.strategy)
+          ? patch.strategy
+          : (current.strategy ?? "auto"),
       proxyExposure:
         patch.proxyExposure && isProxyExposureMode(patch.proxyExposure)
           ? patch.proxyExposure
@@ -756,11 +1125,13 @@ export class SolverCoordinator {
     const enabledByConfig =
       mode === "enabled" ? true : mode === "disabled" ? false : global.enabled;
     const fallbackPolicy = override?.fallbackPolicy ?? global.fallbackPolicy;
+    const strategy = override?.strategy ?? global.strategy ?? "auto";
     return {
       enabled: Boolean(port && enabledByConfig && fallbackPolicy !== "human-only"),
       adapter,
       port,
       fallbackPolicy,
+      strategy,
       proxyExposure: override?.proxyExposure ?? global.proxyExposure,
       allowMainWorldJs: override?.allowMainWorldJs ?? global.allowMainWorldJs,
       timeoutMs: override?.timeoutMs ?? global.timeoutMs,
@@ -879,6 +1250,7 @@ export class SolverCoordinator {
     requestedBy?: string;
     keepReason?: boolean;
     fallbackToHumanOverride?: boolean;
+    strategyOverride?: SolverStrategy;
     timeoutMsOverride?: number;
     portOverride?: CaptchaSolverPort;
     proxyExposureOverride?: ProxyExposureMode;
@@ -897,6 +1269,7 @@ export class SolverCoordinator {
     const policy: EffectiveProfileSolverPolicy = {
       ...basePolicy,
       ...(opts.portOverride ? { port: opts.portOverride, enabled: true } : {}),
+      ...(opts.strategyOverride ? { strategy: opts.strategyOverride } : {}),
       ...(opts.proxyExposureOverride ? { proxyExposure: opts.proxyExposureOverride } : {}),
       ...(opts.allowMainWorldJsOverride !== undefined
         ? { allowMainWorldJs: opts.allowMainWorldJsOverride }
@@ -1100,6 +1473,7 @@ export class SolverCoordinator {
         handoffId,
         profileId: profile.id,
         ...(entry.record.reason !== undefined ? { reason: entry.record.reason } : {}),
+        strategy: policy.strategy,
         challenge,
         network,
         createdAt: entry.record.createdAt,
@@ -1110,9 +1484,90 @@ export class SolverCoordinator {
       if (!isTaskActive()) return { ...entry.record };
 
       if (outcome.status === "solved") {
+        let applyRes: ApplyTokenResult = {
+          applied: true,
+          textareaUpdated: false,
+          callbackInvoked: false,
+        };
         if (outcome.tokenPayload) {
-          await pagePort.applyToken(outcome.tokenPayload).catch(() => {});
+          applyRes = await pagePort.applyToken(outcome.tokenPayload).catch(() => ({
+            applied: false,
+            textareaUpdated: false,
+            callbackInvoked: false,
+            details: "applyToken failed",
+          }));
         }
+
+        const hadInteractiveModal = Boolean(
+          challenge.frame?.bounds &&
+            challenge.frame.bounds.width >= 200 &&
+            challenge.frame.bounds.height >= 200,
+        );
+
+        if (outcome.mode === "token" && hadInteractiveModal) {
+          const verifyDeadline = Date.now() + this.postSolveVerifyTimeoutMs;
+          let modalClosed = false;
+          while (Date.now() < verifyDeadline && isTaskActive()) {
+            const after = await detector.detect(pagePort).catch(() => null);
+            if (
+              !after ||
+              after.pageUrl !== challenge.pageUrl ||
+              !after.frame?.bounds ||
+              after.frame.bounds.width < 200 ||
+              after.frame.bounds.height < 200
+            ) {
+              modalClosed = true;
+              break;
+            }
+            const remaining = verifyDeadline - Date.now();
+            if (remaining <= 0) break;
+            await sleepWithSignal(
+              Math.min(this.postSolveVerifyIntervalMs, remaining),
+              entry.controller.signal,
+            );
+          }
+
+          if (!isTaskActive()) return { ...entry.record };
+
+          if (!modalClosed) {
+            const canTryInteractive =
+              (policy.strategy === "auto" || policy.strategy === "token-then-interactive") &&
+              port.capabilities.modes.includes("interactive");
+
+            if (canTryInteractive) {
+              const interactiveOutcome = await port.solve(
+                { ...task, strategy: "interactive-only" },
+                pagePort,
+                entry.controller.signal,
+              );
+              if (!isTaskActive()) return { ...entry.record };
+              if (interactiveOutcome.status === "solved") {
+                if (interactiveOutcome.tokenPayload) {
+                  await pagePort.applyToken(interactiveOutcome.tokenPayload).catch(() => {});
+                }
+                this.finishEntry(profile.id, entry, "solved");
+                this.handoff.resumeById(handoffId, `solver:${port.id}`);
+                this.activityLog?.recordLifecycle("solver.solved", {
+                  profileId: profile.id,
+                  actor: `solver:${port.id}`,
+                  summary: `${challenge.kind} (interactive)`,
+                });
+                return { ...entry.record };
+              }
+              return await settleFailure(
+                "failed",
+                `Token applied (${applyRes.details ?? "no callback"}), but interactive ${challenge.kind} modal remained open (${interactiveOutcome.reason})`,
+                interactiveOutcome.fallbackToHuman,
+              );
+            }
+
+            return await settleFailure(
+              "failed",
+              `Token applied (${applyRes.details ?? "no callback"}), but interactive ${challenge.kind} modal remained open`,
+            );
+          }
+        }
+
         this.finishEntry(profile.id, entry, "solved");
         this.handoff.resumeById(handoffId, `solver:${port.id}`);
         this.activityLog?.recordLifecycle("solver.solved", {

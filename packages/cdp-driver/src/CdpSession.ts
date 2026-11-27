@@ -387,13 +387,14 @@ interface ResolvedElement extends FrameAddress {
 
 interface SnapshotFrame extends FrameAddress {
   loaderId?: string;
+  url?: string;
   depth: number;
   /** The session that can name this frame's owner element. None for a tab's main frame. */
   ownerSessionId?: string;
 }
 
 interface FrameTreeNode {
-  frame: { id: string; loaderId?: string };
+  frame: { id: string; loaderId?: string; url?: string };
   childFrames?: FrameTreeNode[];
 }
 
@@ -2720,12 +2721,70 @@ export class CdpSession {
   }
 
   /**
-   * Evaluate JS in an isolated world on the active tab's main frame.
+   * Evaluate JS in an isolated world on the active tab's main frame (or a child frame matching `opts.frameUrlPattern`).
    * Never enables Runtime or DOM, and leaves no globals or hooks in the page's main world.
    */
-  async evaluateIsolatedJs(expression: string): Promise<unknown> {
+  async evaluateIsolatedJs(
+    expression: string,
+    opts?: { frameUrlPattern?: string },
+  ): Promise<unknown> {
     const tab = this.activeTab();
     return this.pageOp(tab, async () => {
+      if (opts?.frameUrlPattern) {
+        const pattern = opts.frameUrlPattern.toLowerCase();
+        const { frames } = await this.collectFrames(tab);
+        const candidates: Array<{
+          frame: SnapshotFrame;
+          bounds: { x: number; y: number; width: number; height: number };
+        }> = [];
+        for (const frame of frames) {
+          if (!frame.ownerSessionId) continue;
+          const url = (frame.url ?? "").toLowerCase();
+          if (!url.includes(pattern)) continue;
+          const bounds = await this.readFrameBounds(tab, frame);
+          if (bounds && bounds.width > 0 && bounds.height > 0) {
+            candidates.push({ frame, bounds });
+          }
+        }
+        candidates.sort((a, b) => b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height);
+        for (const { frame, bounds } of candidates) {
+          try {
+            const { executionContextId } = await this.send<{ executionContextId: number }>(
+              "Page.createIsolatedWorld",
+              { frameId: frame.frameId, worldName: "mz_solver_world" },
+              frame.sessionId,
+              SNAPSHOT_FRAME_TIMEOUT_MS,
+            );
+            const wrapped = `(() => { const __mzFrameBounds = ${JSON.stringify(bounds)}; const __mzFrameUrl = ${JSON.stringify(frame.url ?? "")}; return (${expression}); })()`;
+            const res = await this.send<{ result?: { value?: unknown } }>(
+              "Runtime.evaluate",
+              {
+                expression: wrapped,
+                contextId: executionContextId,
+                returnByValue: true,
+                awaitPromise: true,
+              },
+              frame.sessionId,
+              SNAPSHOT_FRAME_TIMEOUT_MS,
+            );
+            const rawVal = res?.result?.value;
+            if (typeof rawVal === "string" && rawVal !== "null") {
+              try {
+                const parsed = JSON.parse(rawVal) as { isVisible?: boolean } | null;
+                if (parsed && parsed.isVisible) return res;
+              } catch {
+                return res;
+              }
+            } else if (rawVal && typeof rawVal === "object") {
+              if ((rawVal as { isVisible?: boolean }).isVisible !== false) return res;
+            }
+          } catch {
+            // Try next matching frame.
+          }
+        }
+        return { result: { value: null } };
+      }
+
       const { sessionId, frameId } = await this.mainFrame(tab);
       const { executionContextId } = await this.send<{ executionContextId: number }>(
         "Page.createIsolatedWorld",
@@ -2743,6 +2802,89 @@ export class CdpSession {
         sessionId,
       );
     });
+  }
+
+  private async frameSessionOrigin(
+    tab: TabSession,
+    sessionId: string,
+  ): Promise<{ x: number; y: number } | null> {
+    if (sessionId === tab.sessionId) return { x: 0, y: 0 };
+    const oopif = tab.oopifs.get(sessionId);
+    if (!oopif) return null;
+    try {
+      const { backendNodeId } = await this.send<{ backendNodeId: number }>(
+        "DOM.getFrameOwner",
+        { frameId: oopif.frameId },
+        oopif.parentSessionId,
+        SNAPSHOT_FRAME_TIMEOUT_MS,
+      );
+      const { quads } = await this.send<{ quads: number[][] }>(
+        "DOM.getContentQuads",
+        { backendNodeId },
+        oopif.parentSessionId,
+        SNAPSHOT_FRAME_TIMEOUT_MS,
+      );
+      const owner = firstNonEmptyQuad(quads);
+      if (!owner) return null;
+      const { model } = await this.send<{ model: { border: number[]; content: number[] } }>(
+        "DOM.getBoxModel",
+        { backendNodeId },
+        oopif.parentSessionId,
+        SNAPSHOT_FRAME_TIMEOUT_MS,
+      );
+      const parent = await this.frameSessionOrigin(tab, oopif.parentSessionId);
+      if (!parent) return null;
+      return {
+        x: parent.x + owner[0]! + model.content[0]! - model.border[0]!,
+        y: parent.y + owner[1]! + model.content[1]! - model.border[1]!,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async readFrameBounds(
+    tab: TabSession,
+    frame: SnapshotFrame,
+  ): Promise<{ x: number; y: number; width: number; height: number } | null> {
+    if (!frame.ownerSessionId) return null;
+    try {
+      const { backendNodeId } = await this.send<{ backendNodeId: number }>(
+        "DOM.getFrameOwner",
+        { frameId: frame.frameId },
+        frame.ownerSessionId,
+        SNAPSHOT_FRAME_TIMEOUT_MS,
+      );
+      const { quads } = await this.send<{ quads: number[][] }>(
+        "DOM.getContentQuads",
+        { backendNodeId },
+        frame.ownerSessionId,
+        SNAPSHOT_FRAME_TIMEOUT_MS,
+      );
+      const owner = firstNonEmptyQuad(quads);
+      if (!owner) return null;
+      const { model } = await this.send<{ model: { border: number[]; content: number[] } }>(
+        "DOM.getBoxModel",
+        { backendNodeId },
+        frame.ownerSessionId,
+        SNAPSHOT_FRAME_TIMEOUT_MS,
+      );
+      const parent = await this.frameSessionOrigin(tab, frame.ownerSessionId);
+      if (!parent) return null;
+      const xs = [owner[0]!, owner[2]!, owner[4]!, owner[6]!];
+      const ys = [owner[1]!, owner[3]!, owner[5]!, owner[7]!];
+      const width = Math.round(Math.max(...xs) - Math.min(...xs));
+      const height = Math.round(Math.max(...ys) - Math.min(...ys));
+      if (width <= 0 || height <= 0) return null;
+      return {
+        x: Math.round(parent.x + owner[0]! + model.content[0]! - model.border[0]!),
+        y: Math.round(parent.y + owner[1]! + model.content[1]! - model.border[1]!),
+        width,
+        height,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /** Every frame of a tab in depth order, up to the snapshot limits. */
@@ -2786,6 +2928,7 @@ export class CdpSession {
           sessionId: root.sessionId,
           frameId: node.frame.id,
           ...(node.frame.loaderId !== undefined ? { loaderId: node.frame.loaderId } : {}),
+          ...(node.frame.url !== undefined ? { url: node.frame.url } : {}),
           depth,
           ...(ownerSessionId !== undefined ? { ownerSessionId } : {}),
         });
